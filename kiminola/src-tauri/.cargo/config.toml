@@ -1,0 +1,7 @@
+# ring (pulled in by tauri-plugin-updater) needs clang to compile on
+# aarch64-pc-windows-msvc; bindgen (sherpa-onnx FFI, wave 2) needs libclang.
+# Both live in the winget-installed LLVM, which is not on PATH by default.
+[env]
+CC_aarch64-pc-windows-msvc = { value = "C:\\Program Files\\LLVM\\bin\\clang-cl.exe", force = true }
+CXX_aarch64-pc-windows-msvc = { value = "C:\\Program Files\\LLVM\\bin\\clang-cl.exe", force = true }
+LIBCLANG_PATH = { value = "C:\\Program Files\\LLVM\\bin", force = true }

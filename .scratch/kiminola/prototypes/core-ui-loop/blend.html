@@ -1,0 +1,1787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kiminola Blend — Granola × Wispr Flow</title>
+  <style>
+    :root {
+      /* Granola-inspired warm stationery palette (light) */
+      --canvas: #ffffff;
+      --ink: #292929;
+      --ink-strong: #0e0f0c;
+      --muted: #72726e;
+      --soft: #a09e95;
+
+      --brand: #5b6f00;
+      --brand-hover: #465800;
+      --brand-deep: #2f3a00;
+      --brand-soft: #e5eacd;
+      --brand-softer: #f1f4e0;
+
+      --surface-soft: #faf8f3;
+      --surface: #f3f0e8;
+      --surface-elev: #e8e3d4;
+
+      --hairline: rgba(0, 0, 0, 0.10);
+      --hairline-soft: rgba(0, 0, 0, 0.06);
+      --hairline-strong: rgba(0, 0, 0, 0.16);
+
+      --danger: #a8362f;
+      --danger-soft: #f7e6e4;
+
+      --shadow-ambient: rgba(34, 30, 15, 0.04);
+      --shadow-paper: rgba(34, 30, 15, 0.06);
+
+      --radius-card: 16px;
+      --radius-pill: 9999px;
+      --radius-input: 12px;
+
+      --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --font-display: Georgia, "Times New Roman", serif;
+
+      --max-width: 760px;
+
+      --sidebar-width: 240px;
+    }
+
+    /* Sidebar collapsed state: fully hidden */
+    body.sidebar-collapsed {
+      --sidebar-width: 0px;
+    }
+
+    /* Dark mode: warm amber brand against deep charcoal */
+    [data-theme="dark"] {
+      --canvas: #131311;
+      --ink: #e8e6df;
+      --ink-strong: #f5f3ec;
+      --muted: #9c9a91;
+      --soft: #6f6d66;
+
+      --brand: #e8b85c;
+      --brand-hover: #f0c87a;
+      --brand-deep: #fff4d6;
+      --brand-soft: #3d2e0f;
+      --brand-softer: #2a1f0a;
+
+      --surface-soft: #1b1b18;
+      --surface: #242420;
+      --surface-elev: #2f2f2a;
+
+      --hairline: rgba(255, 255, 255, 0.10);
+      --hairline-soft: rgba(255, 255, 255, 0.06);
+      --hairline-strong: rgba(255, 255, 255, 0.16);
+
+      --danger: #e07068;
+      --danger-soft: #3a1c1a;
+
+      --shadow-ambient: rgba(0, 0, 0, 0.30);
+      --shadow-paper: rgba(0, 0, 0, 0.40);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+    }
+
+    body {
+      font-family: var(--font-body);
+      background: var(--canvas);
+      color: var(--ink);
+      line-height: 1.55;
+      font-size: 16px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* === Proto notice === */
+    .proto-notice {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      background: var(--brand-softer);
+      color: var(--brand-deep);
+      padding: 10px 16px;
+      font-size: 13px;
+      text-align: center;
+      border-bottom: 1px solid var(--brand-soft);
+    }
+
+    /* === App shell === */
+    .app {
+      display: flex;
+      min-height: 100%;
+    }
+
+    .hidden { display: none !important; }
+
+    /* === Typography === */
+    h1, h2, h3 {
+      margin: 0;
+      font-weight: 600;
+      color: var(--ink-strong);
+      letter-spacing: -0.01em;
+    }
+
+    .display {
+      font-family: var(--font-display);
+      font-size: 32px;
+      font-weight: 400;
+      line-height: 1.1;
+      color: var(--ink-strong);
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 17px;
+      font-weight: 300;
+      margin-bottom: 32px;
+    }
+
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+
+    /* === Buttons === */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border: none;
+      border-radius: var(--radius-pill);
+      padding: 12px 24px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 180ms ease, transform 120ms ease, box-shadow 180ms ease;
+      font-family: inherit;
+    }
+
+    .btn-primary {
+      background: var(--brand);
+      color: #fff;
+    }
+    .btn-primary:hover { background: var(--brand-hover); }
+    .btn-primary:active { transform: translateY(1px); }
+
+    .btn-secondary {
+      background: var(--brand-soft);
+      color: var(--brand-deep);
+    }
+    .btn-secondary:hover { background: var(--brand-softer); }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--ink);
+      border: 1px solid var(--hairline);
+    }
+    .btn-ghost:hover { background: var(--surface-soft); }
+
+    .btn-danger {
+      background: var(--danger);
+      color: #fff;
+    }
+    .btn-danger:hover { background: #8c2d26; }
+
+    .btn-large { padding: 14px 28px; font-size: 16px; }
+
+    /* === Cards === */
+    .card {
+      background: var(--surface);
+      border-radius: var(--radius-card);
+      padding: 20px;
+      border: 1px solid var(--hairline-soft);
+    }
+
+    .card-white {
+      background: var(--canvas);
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-card);
+      padding: 20px;
+    }
+
+    /* === Sidebar === */
+    .sidebar {
+      width: var(--sidebar-width);
+      background: var(--surface-soft);
+      border-right: 1px solid var(--hairline-soft);
+      display: flex;
+      flex-direction: column;
+      padding: 20px 14px 16px;
+      position: fixed;
+      top: 38px;
+      bottom: 0;
+      left: 0;
+      z-index: 100;
+      transition: width 200ms ease, padding 200ms ease;
+      overflow: hidden;
+    }
+
+    body.sidebar-collapsed .sidebar {
+      padding: 20px 0 16px;
+      border-right: none;
+    }
+
+    body.sidebar-collapsed .sidebar > *:not(.sidebar-collapse-btn) {
+      display: none;
+    }
+
+    /* Floating edge collapse button */
+    .sidebar-collapse-btn {
+      position: fixed;
+      top: 90px;
+      left: calc(var(--sidebar-width) - 14px);
+      z-index: 101;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      border: 1px solid var(--hairline);
+      background: var(--surface);
+      color: var(--muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      box-shadow: 0 2px 8px var(--shadow-ambient);
+      transition: left 200ms ease, background 180ms ease, border-color 180ms ease;
+    }
+
+    body.sidebar-collapsed .sidebar-collapse-btn {
+      left: 16px;
+      background: var(--surface);
+      border-color: var(--hairline-strong);
+    }
+
+    .sidebar-collapse-btn:hover {
+      background: var(--surface-elev);
+      color: var(--ink);
+    }
+
+    .sidebar .search-pill {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-pill);
+      padding: 8px 12px;
+      font-size: 14px;
+      color: var(--muted);
+      margin-bottom: 16px;
+      cursor: text;
+    }
+
+    .sidebar .search-pill span:last-child {
+      font-size: 12px;
+      color: var(--soft);
+    }
+
+    .sidebar nav {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .sidebar .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 14px;
+      color: var(--ink);
+      cursor: pointer;
+      transition: background 180ms ease;
+    }
+
+    .sidebar .nav-item:hover { background: var(--surface-elev); }
+    .sidebar .nav-item.active { background: var(--surface); }
+
+    .sidebar .nav-section {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--soft);
+      margin: 18px 0 8px 10px;
+    }
+
+    .sidebar .space-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 14px;
+      color: var(--ink);
+      cursor: pointer;
+      transition: background 180ms ease;
+    }
+
+    .sidebar .space-item:hover { background: var(--surface-elev); }
+
+    .sidebar .space-item .space-arrow {
+      font-size: 11px;
+      color: var(--muted);
+      width: 12px;
+      transition: transform 180ms ease;
+    }
+
+    .sidebar .space-item.collapsed .space-arrow {
+      transform: rotate(-90deg);
+    }
+
+    .sidebar .space-children {
+      margin-left: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .sidebar .space-children.collapsed {
+      display: none;
+    }
+
+    .sidebar .space-child {
+      padding: 7px 10px;
+      font-size: 13px;
+    }
+
+    .sidebar .sidebar-bottom {
+      margin-top: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .sidebar .sidebar-icons {
+      display: flex;
+      gap: 6px;
+      padding: 0 10px;
+    }
+
+    .sidebar .sidebar-icons .icon-btn {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .sidebar .sidebar-icons .icon-btn:hover { background: var(--surface-elev); }
+
+    .sidebar .trial-card {
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .sidebar .trial-card .trial-text {
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .sidebar .trial-card .trial-text strong {
+      display: block;
+      color: var(--ink-strong);
+      font-weight: 600;
+    }
+
+    .sidebar .trial-card .btn-tiny {
+      background: var(--canvas);
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-pill);
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--ink);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .sidebar .account-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    .sidebar .account-row:hover { background: var(--surface-elev); }
+
+    .sidebar .account-row .avatar {
+      width: 22px;
+      height: 22px;
+      border-radius: 5px;
+      background: var(--brand);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .sidebar .account-row .name {
+      flex: 1;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--ink);
+    }
+
+    /* === Main area === */
+    .main {
+      flex: 1;
+      margin-left: var(--sidebar-width);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      transition: margin-left 200ms ease;
+    }
+
+    .main-content {
+      flex: 1;
+      max-width: 760px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 32px 40px 120px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--hairline-soft);
+    }
+
+    .topbar .btn-ghost {
+      padding: 7px 14px;
+      font-size: 13px;
+    }
+
+    .topbar .theme-toggle {
+      width: auto;
+      height: auto;
+      padding: 7px 14px;
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-pill);
+      background: transparent;
+      color: var(--ink);
+      font-size: 14px;
+    }
+
+    .topbar .theme-toggle:hover {
+      background: var(--surface-soft);
+    }
+
+    /* === Screen: Idle / meeting list === */
+    .idle-header {
+      margin-bottom: 32px;
+    }
+
+    .date-card {
+      display: flex;
+      gap: 16px;
+      background: var(--surface);
+      border: 1px solid var(--hairline-soft);
+      border-radius: var(--radius-card);
+      padding: 18px 20px;
+      margin-bottom: 28px;
+    }
+
+    .date-card .date-number {
+      font-size: 36px;
+      font-weight: 500;
+      line-height: 1;
+      color: var(--ink-strong);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .date-card .date-label {
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .date-card .date-label strong {
+      display: block;
+      color: var(--ink-strong);
+      font-weight: 600;
+    }
+
+    .date-card .calendar-cta {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      border-left: 1px solid var(--hairline-soft);
+      padding-left: 20px;
+      gap: 6px;
+    }
+
+    .date-card .calendar-cta p {
+      margin: 0;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+
+    .meeting-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .meeting-item {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      padding: 12px 14px;
+      cursor: pointer;
+      transition: background 180ms ease, border-color 180ms ease;
+    }
+
+    .meeting-item:hover {
+      background: var(--surface-soft);
+      border-color: var(--hairline-soft);
+    }
+
+    .meeting-item .doc-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: var(--surface);
+      border: 1px solid var(--hairline-soft);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .meeting-item .details {
+      flex: 1;
+    }
+
+    .meeting-item .title {
+      font-weight: 600;
+      font-size: 15px;
+      margin-bottom: 2px;
+      color: var(--ink-strong);
+    }
+
+    .meeting-item .meta {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .meeting-item .time {
+      font-size: 13px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 80px 20px;
+      border: 2px dashed var(--hairline);
+      border-radius: var(--radius-card);
+      color: var(--muted);
+      margin-top: 24px;
+    }
+
+    /* === Screen: Recording (notes-first) === */
+    .recording-shell {
+      display: flex;
+      flex-direction: column;
+      min-height: calc(100vh - 140px);
+    }
+
+    .recording-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .recording-title {
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--ink-strong);
+      margin-bottom: 2px;
+    }
+
+    .recording-meta {
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .recording-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--danger-soft);
+      color: var(--danger);
+      padding: 6px 12px;
+      border-radius: var(--radius-pill);
+      font-size: 13px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .recording-badge::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      background: var(--danger);
+      border-radius: 50%;
+      animation: pulse 1.4s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.45; transform: scale(0.9); }
+    }
+
+    /* Wispr Flow-inspired live waveform */
+    .waveform {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      height: 20px;
+      margin-bottom: 16px;
+      opacity: 0.7;
+    }
+
+    .waveform span {
+      width: 3px;
+      background: var(--brand);
+      border-radius: 999px;
+      animation: wave 0.9s ease-in-out infinite;
+    }
+
+    .waveform span:nth-child(1) { height: 8px; animation-delay: 0s; }
+    .waveform span:nth-child(2) { height: 14px; animation-delay: 0.1s; }
+    .waveform span:nth-child(3) { height: 10px; animation-delay: 0.2s; }
+    .waveform span:nth-child(4) { height: 18px; animation-delay: 0.15s; }
+    .waveform span:nth-child(5) { height: 12px; animation-delay: 0.05s; }
+
+    @keyframes wave {
+      0%, 100% { transform: scaleY(1); opacity: 0.6; }
+      50% { transform: scaleY(1.6); opacity: 1; }
+    }
+
+    /* Full notepad hero */
+    .notepad-hero {
+      flex: 1;
+      background: var(--canvas);
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-card);
+      padding: 24px;
+      box-shadow: 0 2px 8px var(--shadow-ambient);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .notepad-hero .notepad-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--hairline-soft);
+    }
+
+    .notepad-hero .notepad-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+
+    .notepad-hero textarea {
+      flex: 1;
+      width: 100%;
+      border: none;
+      outline: none;
+      resize: none;
+      font: inherit;
+      font-size: 16px;
+      line-height: 1.65;
+      color: var(--ink);
+      background: transparent;
+    }
+
+    .notepad-hero textarea::placeholder {
+      color: var(--soft);
+    }
+
+    /* Transcript indicator: subtle pill bottom-left */
+    .transcript-indicator {
+      position: fixed;
+      bottom: 24px;
+      left: calc(var(--sidebar-width) + 24px);
+      z-index: 950;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-pill);
+      padding: 8px 14px;
+      font-size: 13px;
+      color: var(--muted);
+      cursor: pointer;
+      box-shadow: 0 4px 16px var(--shadow-paper);
+      transition: background 180ms ease, border-color 180ms ease, left 200ms ease;
+    }
+
+    .transcript-indicator:hover {
+      background: var(--surface-elev);
+      border-color: var(--hairline-strong);
+    }
+
+    .transcript-indicator .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--danger);
+      animation: pulse 1.4s infinite;
+    }
+
+    /* Floating transcript square (subtle) */
+    .transcript-floating {
+      position: fixed;
+      top: calc(38px + 52px + 32px);
+      bottom: 24px;
+      left: calc(var(--sidebar-width) + 24px);
+      z-index: 949;
+      width: 320px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: 12px;
+      box-shadow: 0 8px 32px var(--shadow-paper);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      animation: squareIn 180ms ease-out;
+      transition: left 200ms ease;
+    }
+
+    /* Push main content right when transcript is open */
+    body.transcript-open .main-content {
+      margin-left: calc(344px + 32px);
+      padding-left: 0;
+    }
+
+    @keyframes squareIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .transcript-floating .floating-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--hairline-soft);
+      background: var(--surface-soft);
+    }
+
+    .transcript-floating .floating-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+
+    .transcript-floating .floating-close {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 0;
+      line-height: 1;
+    }
+
+    .transcript-floating .floating-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      min-height: 160px;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    .transcript-floating .floating-body::-webkit-scrollbar {
+      display: none;
+    }
+
+    .transcript-line {
+      margin-bottom: 14px;
+      animation: lineIn 220ms ease-out;
+    }
+
+    @keyframes lineIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .transcript-line .speaker {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+      color: var(--muted);
+    }
+
+    .transcript-line .speaker::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .transcript-line .speaker.you::before { background: var(--brand); }
+    .transcript-line .speaker.others::before { background: var(--soft); }
+
+    .transcript-line .text {
+      font-size: 14px;
+      line-height: 1.5;
+      color: var(--ink);
+    }
+
+    .transcript-line.partial .text::after {
+      content: "▋";
+      display: inline-block;
+      margin-left: 2px;
+      color: var(--brand);
+      animation: cursorBlink 1s step-end infinite;
+    }
+
+    @keyframes cursorBlink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    .recording-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    /* === Screen: Post-meeting === */
+    .post-shell {
+      display: flex;
+      flex-direction: column;
+      min-height: calc(100vh - 140px);
+      padding-bottom: 100px;
+    }
+
+    .post-header {
+      margin-bottom: 20px;
+    }
+
+    .post-back {
+      margin-bottom: 12px;
+    }
+
+    .post-title-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .post-meta-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+      flex-wrap: wrap;
+    }
+
+    .post-meta-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      color: var(--muted);
+      padding: 5px 12px;
+      border-radius: var(--radius-pill);
+      font-size: 13px;
+    }
+
+    /* Pill tabs: My notes | Enhanced notes | Transcript */
+    .pill-tabs {
+      display: inline-flex;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-pill);
+      padding: 4px;
+      gap: 4px;
+      margin-bottom: 20px;
+    }
+
+    .pill-tab {
+      background: transparent;
+      border: none;
+      border-radius: var(--radius-pill);
+      padding: 7px 14px;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--muted);
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 180ms ease, color 180ms ease;
+    }
+
+    .pill-tab:hover { color: var(--ink); }
+
+    .pill-tab.active {
+      background: var(--canvas);
+      color: var(--ink-strong);
+      box-shadow: 0 1px 3px var(--shadow-ambient);
+    }
+
+    .post-content {
+      flex: 1;
+      max-width: 720px;
+    }
+
+    .note-document {
+      font-size: 16px;
+      line-height: 1.65;
+      color: var(--ink);
+    }
+
+    .note-document h2 {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0 0 10px;
+      color: var(--ink-strong);
+    }
+
+    .note-document p {
+      margin: 0 0 14px;
+    }
+
+    .note-document ul {
+      margin: 0 0 16px;
+      padding-left: 22px;
+    }
+
+    .note-document li {
+      margin-bottom: 6px;
+    }
+
+    .my-notes-card {
+      background: var(--surface-soft);
+      border: 1px solid var(--hairline-soft);
+      border-radius: var(--radius-card);
+      padding: 20px;
+      min-height: 200px;
+      font-size: 16px;
+      line-height: 1.6;
+      color: var(--ink);
+      white-space: pre-wrap;
+    }
+
+    .raw-transcript {
+      background: var(--surface-soft);
+      border: 1px solid var(--hairline-soft);
+      border-radius: var(--radius-card);
+      padding: 16px 20px;
+    }
+
+    .raw-line {
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--ink);
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--hairline-soft);
+    }
+
+    .raw-line:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .raw-line .tag {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin-right: 8px;
+    }
+
+    .raw-line .tag.you { color: var(--brand); }
+
+    /* Bottom action bar: Ask anything + quick actions */
+    .bottom-bar {
+      position: fixed;
+      bottom: 24px;
+      left: calc(var(--sidebar-width) + (100% - var(--sidebar-width)) / 2);
+      transform: translateX(-50%);
+      width: min(720px, calc(100% - var(--sidebar-width) - 80px));
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-pill);
+      padding: 6px 6px 6px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 0 4px 20px var(--shadow-paper);
+      z-index: 900;
+      transition: left 200ms ease, width 200ms ease;
+    }
+
+    .bottom-bar .mic-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: none;
+      background: var(--surface-elev);
+      color: var(--ink);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 16px;
+    }
+
+    .bottom-bar input {
+      flex: 1;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: var(--ink);
+      font: inherit;
+      font-size: 15px;
+    }
+
+    .bottom-bar input::placeholder { color: var(--soft); }
+
+    .bottom-bar .action-btn {
+      background: var(--canvas);
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-pill);
+      padding: 7px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--ink);
+      cursor: pointer;
+      font-family: inherit;
+      white-space: nowrap;
+    }
+
+    .bottom-bar .action-btn:hover { background: var(--surface-soft); }
+
+    .ai-disclaimer {
+      position: fixed;
+      bottom: 4px;
+      left: var(--sidebar-width);
+      right: 0;
+      text-align: center;
+      font-size: 11px;
+      color: var(--soft);
+      z-index: 899;
+      transition: left 200ms ease;
+    }
+
+    /* === Bottom prototype helper === */
+    .proto-helper {
+      position: fixed;
+      top: 104px;
+      left: calc(var(--sidebar-width) + 16px);
+      background: var(--ink-strong);
+      color: #fff;
+      padding: 8px 14px;
+      border-radius: var(--radius-pill);
+      font-size: 12px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+      z-index: 1000;
+      white-space: nowrap;
+      transition: left 200ms ease;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="proto-notice">🛠️ Throwaway blend prototype — Granola calm × Wispr Flow fluidity</div>
+
+  <div class="app">
+
+    <!-- ================= Sidebar ================= -->
+    <aside class="sidebar">
+      <button class="sidebar-collapse-btn" id="sidebar-collapse-btn" onclick="toggleSidebar()" title="Collapse sidebar">⇤</button>
+      <div class="search-pill">
+        <span>🔍 Search</span>
+        <span>Ctrl+K</span>
+      </div>
+
+      <nav>
+        <div class="nav-item active">🏠 <span>Home</span></div>
+
+        <div class="nav-section">Spaces</div>
+
+        <div class="space-item" onclick="toggleSpace(this)">
+          <span class="space-arrow">▾</span>
+          <span>📁</span>
+          <span class="space-name">Personal</span>
+        </div>
+        <div class="space-children">
+          <div class="nav-item space-child" onclick="viewPost('Product standup')">📝 <span>Product standup</span></div>
+          <div class="nav-item space-child" onclick="viewPost('1:1 with Sarah')">📝 <span>1:1 with Sarah</span></div>
+        </div>
+
+        <div class="space-item" onclick="toggleSpace(this)">
+          <span class="space-arrow">▾</span>
+          <span>🏢</span>
+          <span class="space-name">Work</span>
+        </div>
+        <div class="space-children">
+          <div class="nav-item space-child" onclick="viewPost('Engineering sync')">📝 <span>Engineering sync</span></div>
+        </div>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="sidebar-icons">
+          <button class="icon-btn" title="New meeting">➕</button>
+          <button class="icon-btn" title="Settings">⚙</button>
+        </div>
+        <div class="trial-card">
+          <div class="trial-text">
+            <strong>MIT License</strong>
+            Open source
+          </div>
+          <button class="btn-tiny">Contribute</button>
+        </div>
+        <div class="account-row">
+          <div class="avatar">K</div>
+          <div class="name">Kiminola</div>
+          <span>⋯</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ================= Main area ================= -->
+    <main class="main">
+      <div class="topbar">
+        <button class="btn btn-ghost theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme">🌙</button>
+        <button class="btn btn-primary" onclick="startRecording('Product standup')">+ New meeting</button>
+      </div>
+
+      <!-- ================= Screen 1: Idle / meeting list ================= -->
+      <div id="screen-list" class="screen">
+        <div class="main-content">
+          <div class="display" style="margin-bottom:24px;">Coming up</div>
+
+          <div class="date-card">
+            <div>
+              <div class="date-number" id="today-number">13</div>
+            </div>
+            <div class="date-label">
+              <strong>August</strong>
+              <span id="today-weekday">Thu</span>
+            </div>
+            <div class="calendar-cta">
+              <p><strong>Link your calendar</strong><br>Connect Google or Microsoft to see upcoming meetings</p>
+              <button class="btn btn-ghost" style="font-size:13px;padding:6px 12px;">Link calendar</button>
+            </div>
+          </div>
+
+          <div class="section-title">Recent meetings</div>
+          <div class="meeting-list">
+            <div class="meeting-item" onclick="viewPost('Product standup')">
+              <div class="doc-icon">📝</div>
+              <div class="details">
+                <div class="title">Product standup</div>
+                <div class="meta">Me</div>
+              </div>
+              <div class="time">Today</div>
+            </div>
+            <div class="meeting-item" onclick="viewPost('1:1 with Sarah')">
+              <div class="doc-icon">📝</div>
+              <div class="details">
+                <div class="title">1:1 with Sarah</div>
+                <div class="meta">Me</div>
+              </div>
+              <div class="time">Yesterday</div>
+            </div>
+            <div class="meeting-item" onclick="viewPost('Engineering sync')">
+              <div class="doc-icon">📝</div>
+              <div class="details">
+                <div class="title">Engineering sync</div>
+                <div class="meta">Me</div>
+              </div>
+              <div class="time">Aug 10</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="bottom-bar">
+          <button class="mic-btn">🎙</button>
+          <input type="text" placeholder="Ask anything across your meetings…" />
+          <button class="action-btn">List recent todos</button>
+        </div>
+        <div class="ai-disclaimer">Kiminola uses AI and can make mistakes.</div>
+      </div>
+
+      <!-- ================= Screen 2: Recording ================= -->
+      <div id="screen-record" class="screen hidden">
+        <div class="main-content">
+          <div class="recording-shell">
+            <div class="recording-top">
+              <div>
+                <div class="recording-title" id="record-title">Product standup</div>
+                <div class="recording-meta" id="record-timer">Recording · 0:00</div>
+              </div>
+              <div class="recording-badge">Recording</div>
+            </div>
+
+            <div class="waveform" aria-hidden="true">
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+
+            <div class="notepad-hero">
+              <div class="notepad-header">
+                <span class="notepad-label">My notes</span>
+                <span style="font-size:12px;color:var(--soft);">Sketch while you listen</span>
+              </div>
+              <textarea id="notepad" placeholder="Jot rough thoughts, action items, or quotes here…"></textarea>
+            </div>
+
+            <div class="recording-actions">
+              <button class="btn btn-ghost" onclick="cancelRecording()">Cancel</button>
+              <button class="btn btn-danger" onclick="stopRecording()">Stop meeting</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Transcript indicator / floating square -->
+        <div class="transcript-indicator" onclick="toggleTranscriptView()">
+          <span class="dot"></span>
+          <span>Live transcript</span>
+        </div>
+
+        <div class="transcript-floating hidden" id="transcript-floating">
+          <div class="floating-header">
+            <span class="floating-title">Live transcript</span>
+            <button class="floating-close" onclick="toggleTranscriptView()">×</button>
+          </div>
+          <div class="floating-body" id="transcript">
+            <!-- Live transcript lines injected here -->
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= Screen 3: Post-meeting ================= -->
+      <div id="screen-post" class="screen hidden">
+        <div class="main-content">
+          <div class="post-shell">
+            <div class="post-header">
+              <div class="post-back">
+                <button class="btn btn-ghost" onclick="showScreen('list')">← Back to meetings</button>
+              </div>
+              <div class="post-title-row">
+                <div class="display" id="post-title">Product standup</div>
+              </div>
+              <div class="post-meta-row">
+                <span class="post-meta-pill" id="post-meta">Today · 8 min</span>
+                <span class="post-meta-pill">Me</span>
+                <span class="post-meta-pill">+ Add to folder</span>
+              </div>
+            </div>
+
+            <div class="pill-tabs">
+              <button class="pill-tab" data-tab="mynotes" onclick="switchTab('mynotes')">My notes</button>
+              <button class="pill-tab" data-tab="enhanced" onclick="switchTab('enhanced')">Enhance Notes</button>
+              <button class="pill-tab" data-tab="transcript" onclick="switchTab('transcript')">Transcript</button>
+            </div>
+
+            <div class="post-content">
+              <div id="tab-mynotes" class="tab-panel">
+                <div class="my-notes-card" id="my-notes-document">
+                  <!-- Injected by JS -->
+                </div>
+              </div>
+              <div id="tab-enhanced" class="tab-panel hidden">
+                <div id="enhance-prompt" class="my-notes-card" style="text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;min-height:200px;">
+                  <div style="font-size:18px;font-weight:600;color:var(--ink-strong);">Enhance notes with AI</div>
+                  <div style="font-size:14px;color:var(--muted);max-width:360px;">Merge your notes with the transcript into a structured summary, action items, and key decisions.</div>
+                  <button class="btn btn-primary" onclick="simulateEnhance()">Enhance notes</button>
+                </div>
+                <div class="note-document hidden" id="enhanced-document">
+                  <!-- Injected by JS after enhance -->
+                </div>
+              </div>
+              <div id="tab-transcript" class="tab-panel hidden">
+                <div class="raw-transcript" id="raw-transcript">
+                  <!-- Injected by JS -->
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="bottom-bar">
+          <button class="mic-btn">🎙</button>
+          <input type="text" placeholder="Ask anything about this meeting…" />
+          <button class="action-btn">✉ Write follow up</button>
+        </div>
+        <div class="ai-disclaimer">Kiminola uses AI and can make mistakes.</div>
+      </div>
+
+    </main>
+
+  </div>
+
+  <div class="proto-helper">Click through screens to test the flow</div>
+
+  <script>
+    // ================= State =================
+    const state = {
+      currentScreen: 'list',
+      currentTab: 'mynotes',
+      transcriptViewOpen: false,
+      enhanced: false,
+      recording: {
+        active: false,
+        title: '',
+        startTime: null,
+        transcript: [],
+        notepad: '',
+        timerId: null,
+        simId: null,
+        partialLine: null
+      },
+      selectedMeeting: null
+    };
+
+    // ================= Sample data =================
+    const sampleMeetings = {
+      'Product standup': {
+        title: 'Product standup',
+        meta: 'Today · 8 min',
+        summary: 'The team is blocked on API credential rotation. Once resolved, the feature branch can merge this afternoon.',
+        actions: [
+          'You: follow up with DevOps on API credentials today.',
+          'Team: merge branch after credentials rotate.'
+        ],
+        notepad: 'DevOps API creds — follow up',
+        transcript: [
+          { speaker: 'others', text: 'So the blocker is really just the API credentials.' },
+          { speaker: 'you', text: 'I\'ll follow up with DevOps today and get those rotated.' },
+          { speaker: 'others', text: 'Great, then we can merge the branch this afternoon.' }
+        ]
+      },
+      '1:1 with Sarah': {
+        title: '1:1 with Sarah',
+        meta: 'Yesterday · 24 min',
+        summary: 'Sarah is considering a refactor of the onboarding flow. She will draft a proposal by Friday and review it with you next week.',
+        actions: [
+          'Sarah: draft onboarding refactor proposal by Friday.',
+          'You: review proposal and schedule follow-up by Monday.'
+        ],
+        notepad: 'Onboarding refactor — review props Friday',
+        transcript: [
+          { speaker: 'others', text: 'I think the onboarding flow is starting to confuse new users.' },
+          { speaker: 'you', text: 'What if we simplified the first-run experience to one screen?' },
+          { speaker: 'others', text: 'I like that. I\'ll draft a proposal by Friday and we can review it next week.' },
+          { speaker: 'you', text: 'Sounds good — ping me when it\'s ready.' }
+        ]
+      },
+      'Engineering sync': {
+        title: 'Engineering sync',
+        meta: 'Aug 10 · 41 min',
+        summary: 'The team agreed to adopt the new observability stack. Migration work starts next sprint, with a rollback plan required before go-live.',
+        actions: [
+          'You: prepare observability migration checklist.',
+          'Team: define rollback plan before next sprint review.'
+        ],
+        notepad: 'Observability migration — checklist + rollback',
+        transcript: [
+          { speaker: 'others', text: 'Our current logging is making incident response too slow.' },
+          { speaker: 'you', text: 'The new observability stack would give us tracing out of the box.' },
+          { speaker: 'others', text: 'Let\'s commit to the migration next sprint, but only with a rollback plan in place.' },
+          { speaker: 'you', text: 'Agreed. I\'ll write the checklist and we\'ll review it before kickoff.' }
+        ]
+      }
+    };
+
+    const liveSimulation = {
+      'Product standup': [
+        { speaker: 'others', text: 'So the blocker is really just the API credentials.', delay: 0 },
+        { speaker: 'you', text: 'I\'ll follow up with DevOps today and get those rotated.', delay: 1800 },
+        { speaker: 'others', text: 'Great, then we can merge the branch this afternoon.', delay: 3800 },
+        { speaker: 'you', text: 'I\'ll also update the runbook so this doesn\'t happen again.', delay: 6200 }
+      ],
+      '1:1 with Sarah': [
+        { speaker: 'others', text: 'I think the onboarding flow is starting to confuse new users.', delay: 0 },
+        { speaker: 'you', text: 'What if we simplified the first-run experience to one screen?', delay: 2200 },
+        { speaker: 'others', text: 'I like that. I\'ll draft a proposal by Friday.', delay: 4500 }
+      ],
+      'Engineering sync': [
+        { speaker: 'others', text: 'Our current logging is making incident response too slow.', delay: 0 },
+        { speaker: 'you', text: 'The new observability stack would give us tracing out of the box.', delay: 2000 },
+        { speaker: 'others', text: 'Let\'s commit to the migration next sprint.', delay: 4200 }
+      ]
+    };
+
+    // ================= Navigation =================
+    function showScreen(name) {
+      state.currentScreen = name;
+      document.querySelectorAll('.screen').forEach(el => el.classList.add('hidden'));
+      document.getElementById('screen-' + name).classList.remove('hidden');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    // ================= Idle actions =================
+    function startRecording(title) {
+      const meeting = sampleMeetings[title] || Object.values(sampleMeetings)[0];
+      state.recording.title = meeting.title;
+      state.recording.transcript = [];
+      state.recording.notepad = '';
+      state.recording.active = true;
+      state.recording.startTime = Date.now();
+      state.transcriptViewOpen = false;
+      document.body.classList.remove('transcript-open');
+
+      document.getElementById('record-title').textContent = meeting.title;
+      document.getElementById('transcript').innerHTML = '';
+      document.getElementById('notepad').value = '';
+      document.getElementById('transcript-floating').classList.add('hidden');
+      document.querySelector('.transcript-indicator').style.display = 'flex';
+
+      showScreen('record');
+      startTimer();
+      startSimulation(meeting.title);
+    }
+
+    function viewPost(title) {
+      state.selectedMeeting = sampleMeetings[title];
+      state.currentTab = 'mynotes';
+      state.enhanced = false;
+      renderPost();
+      showScreen('post');
+    }
+
+    // ================= Recording actions =================
+    function toggleTranscriptView() {
+      state.transcriptViewOpen = !state.transcriptViewOpen;
+      const floating = document.getElementById('transcript-floating');
+      const indicator = document.querySelector('.transcript-indicator');
+      if (state.transcriptViewOpen) {
+        floating.classList.remove('hidden');
+        indicator.style.display = 'none';
+        document.body.classList.add('transcript-open');
+      } else {
+        floating.classList.add('hidden');
+        indicator.style.display = 'flex';
+        document.body.classList.remove('transcript-open');
+      }
+    }
+
+    function stopRecording() {
+      state.recording.active = false;
+      clearInterval(state.recording.timerId);
+      clearTimeout(state.recording.simId);
+
+      // Build a pseudo-meeting from current recording state
+      const title = state.recording.title;
+      const notepad = document.getElementById('notepad').value.trim();
+      const transcript = state.recording.transcript.map(t => ({ ...t }));
+
+      state.selectedMeeting = {
+        title: title,
+        meta: 'Just now · ' + document.getElementById('record-timer').textContent.replace('Recording · ', ''),
+        summary: generateSummary(title),
+        actions: generateActions(title, notepad),
+        notepad: notepad || 'No notes captured during this meeting.',
+        transcript: transcript.length ? transcript : liveSimulation[title].map(t => ({ speaker: t.speaker, text: t.text }))
+      };
+
+      state.enhanced = false;
+      state.transcriptViewOpen = false;
+      document.body.classList.remove('transcript-open');
+      document.getElementById('transcript-floating').classList.add('hidden');
+      document.querySelector('.transcript-indicator').style.display = 'flex';
+      renderPost();
+      showScreen('post');
+    }
+
+    function cancelRecording() {
+      state.recording.active = false;
+      clearInterval(state.recording.timerId);
+      clearTimeout(state.recording.simId);
+      state.transcriptViewOpen = false;
+      document.body.classList.remove('transcript-open');
+      document.getElementById('transcript-floating').classList.add('hidden');
+      document.querySelector('.transcript-indicator').style.display = 'flex';
+      showScreen('list');
+    }
+
+    function startTimer() {
+      const el = document.getElementById('record-timer');
+      state.recording.timerId = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - state.recording.startTime) / 1000);
+        const m = Math.floor(elapsed / 60).toString().padStart(1, '0');
+        const s = (elapsed % 60).toString().padStart(2, '0');
+        el.textContent = 'Recording · ' + m + ':' + s;
+      }, 1000);
+    }
+
+    function startSimulation(title) {
+      const cues = liveSimulation[title] || liveSimulation['Product standup'];
+      cues.forEach(cue => {
+        state.recording.simId = setTimeout(() => {
+          if (!state.recording.active) return;
+          addTranscriptLine(cue.speaker, cue.text);
+        }, cue.delay);
+      });
+    }
+
+    function addTranscriptLine(speaker, text) {
+      // Finalize any partial line
+      const partial = document.querySelector('.transcript-line.partial');
+      if (partial) {
+        partial.classList.remove('partial');
+      }
+
+      const line = document.createElement('div');
+      line.className = 'transcript-line partial';
+      line.innerHTML = `
+        <div class="speaker ${speaker}">${speaker === 'you' ? 'You' : 'Others'}</div>
+        <div class="text">${escapeHtml(text)}</div>
+      `;
+
+      const container = document.getElementById('transcript');
+      container.appendChild(line);
+
+      // Auto-scroll only if the user is already near the bottom
+      const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 60;
+      if (nearBottom) {
+        container.scrollTop = container.scrollHeight;
+      }
+
+      state.recording.transcript.push({ speaker, text });
+
+      // After a short beat, settle the line (remove cursor) so it feels streamed
+      setTimeout(() => {
+        line.classList.remove('partial');
+      }, 1200);
+    }
+
+    // ================= Post-meeting =================
+    function renderPost() {
+      const m = state.selectedMeeting;
+      document.getElementById('post-title').textContent = m.title;
+      document.getElementById('post-meta').textContent = m.meta;
+
+      // My notes document
+      document.getElementById('my-notes-document').textContent = m.notepad || 'No notes captured during this meeting.';
+
+      // Raw transcript
+      document.getElementById('raw-transcript').innerHTML = m.transcript.map(t => `
+        <div class="raw-line">
+          <span class="tag ${t.speaker}">${t.speaker === 'you' ? 'You' : 'Others'}</span>
+          ${escapeHtml(t.text)}
+        </div>
+      `).join('');
+
+      // Enhanced notes start hidden until user clicks enhance
+      document.getElementById('enhance-prompt').classList.remove('hidden');
+      document.getElementById('enhanced-document').classList.add('hidden');
+
+      switchTab(state.currentTab || 'mynotes');
+    }
+
+    function simulateEnhance() {
+      const m = state.selectedMeeting;
+      const enhancedHtml = `
+        <h2>Summary</h2>
+        <p>${escapeHtml(m.summary)}</p>
+        <h2>Action items</h2>
+        <ul>
+          ${m.actions.map(a => '<li>' + escapeHtml(a) + '</li>').join('')}
+        </ul>
+        <h2>From your notepad</h2>
+        <p>${escapeHtml(m.notepad)}</p>
+      `;
+      document.getElementById('enhanced-document').innerHTML = enhancedHtml;
+      document.getElementById('enhance-prompt').classList.add('hidden');
+      document.getElementById('enhanced-document').classList.remove('hidden');
+      state.enhanced = true;
+    }
+
+    function switchTab(tab) {
+      state.currentTab = tab;
+
+      // Update pill tabs
+      document.querySelectorAll('.pill-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tab);
+      });
+
+      // Show/hide panels
+      document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.add('hidden'));
+      document.getElementById('tab-' + tab).classList.remove('hidden');
+    }
+
+    // ================= Helpers =================
+    function generateSummary(title) {
+      const map = {
+        'Product standup': 'API credential rotation is the main blocker; merge is expected this afternoon once resolved.',
+        '1:1 with Sarah': 'Sarah will draft an onboarding refactor proposal by Friday for review next week.',
+        'Engineering sync': 'Team agreed to adopt the new observability stack next sprint with a rollback plan.'
+      };
+      return map[title] || 'Meeting summary generated from transcript and notes.';
+    }
+
+    function generateActions(title, notepad) {
+      const map = {
+        'Product standup': ['You: follow up with DevOps on API credentials today.', 'Team: merge branch after credentials rotate.'],
+        '1:1 with Sarah': ['Sarah: draft onboarding refactor proposal by Friday.', 'You: review proposal and schedule follow-up by Monday.'],
+        'Engineering sync': ['You: prepare observability migration checklist.', 'Team: define rollback plan before next sprint review.']
+      };
+      const actions = map[title] || ['Review transcript for action items.'];
+      if (notepad.trim()) {
+        actions.push('From your notepad: ' + notepad);
+      }
+      return actions;
+    }
+
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    // ================= Theme =================
+    function initTheme() {
+      const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      const saved = localStorage.getItem('kiminola-proto-theme');
+      const theme = saved || (prefersDark ? 'dark' : 'light');
+      applyTheme(theme);
+    }
+
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      const btn = document.getElementById('theme-toggle');
+      if (btn) {
+        btn.textContent = theme === 'dark' ? '☀️' : '🌙';
+        btn.title = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+      }
+    }
+
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme') || 'light';
+      const next = current === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      localStorage.setItem('kiminola-proto-theme', next);
+    }
+
+    // ================= Sidebar =================
+    function initSidebar() {
+      const saved = localStorage.getItem('kiminola-proto-sidebar-collapsed');
+      if (saved === 'true') {
+        document.body.classList.add('sidebar-collapsed');
+      }
+      updateSidebarBtn();
+    }
+
+    function toggleSidebar() {
+      document.body.classList.toggle('sidebar-collapsed');
+      const collapsed = document.body.classList.contains('sidebar-collapsed');
+      localStorage.setItem('kiminola-proto-sidebar-collapsed', collapsed);
+      updateSidebarBtn();
+    }
+
+    function updateSidebarBtn() {
+      const btn = document.getElementById('sidebar-collapse-btn');
+      const collapsed = document.body.classList.contains('sidebar-collapsed');
+      btn.textContent = collapsed ? '⇥' : '⇤';
+      btn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+    }
+
+    function toggleSpace(el) {
+      const children = el.nextElementSibling;
+      if (children && children.classList.contains('space-children')) {
+        children.classList.toggle('collapsed');
+        el.classList.toggle('collapsed');
+      }
+    }
+
+    // ================= Init =================
+    initTheme();
+    initDate();
+    initSidebar();
+    showScreen('list');
+
+    function initDate() {
+      const now = new Date();
+      const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+      document.getElementById('today-number').textContent = now.getDate();
+      document.getElementById('today-weekday').textContent = days[now.getDay()];
+    }
+  </script>
+
+</body>
+</html>

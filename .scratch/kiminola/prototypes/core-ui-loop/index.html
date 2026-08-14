@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kiminola Core UI Loop — Prototype</title>
+  <style>
+    :root {
+      --bg: #f8f9fa;
+      --surface: #ffffff;
+      --text: #1a1a1a;
+      --text-secondary: #6b7280;
+      --border: #e5e7eb;
+      --accent: #111827;
+      --accent-text: #ffffff;
+      --you: #dbeafe;
+      --others: #f3e8ff;
+      --danger: #dc2626;
+      --danger-text: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    /* === Variant Switcher === */
+    .prototype-bar {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--accent);
+      color: var(--accent-text);
+      padding: 10px 18px;
+      border-radius: 999px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+      font-size: 14px;
+    }
+    .prototype-bar button {
+      background: rgba(255,255,255,0.15);
+      border: none;
+      color: inherit;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .prototype-bar button:hover { background: rgba(255,255,255,0.3); }
+    .prototype-bar .label { min-width: 140px; text-align: center; font-weight: 600; }
+
+    /* === Shared helpers === */
+    .hidden { display: none !important; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 18px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      background: var(--accent);
+      color: var(--accent-text);
+    }
+    .btn.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+    .btn.danger { background: var(--danger); color: var(--danger-text); }
+    .btn.large { padding: 14px 28px; font-size: 17px; border-radius: 10px; }
+
+    /* === Variant A: Minimal single-column === */
+    .variant-a { max-width: 720px; margin: 0 auto; padding: 40px 20px 100px; }
+    .variant-a h1 { font-size: 28px; font-weight: 600; margin: 0 0 8px; }
+    .variant-a .subtitle { color: var(--text-secondary); margin-bottom: 32px; }
+    .variant-a .empty-state {
+      text-align: center;
+      padding: 80px 20px;
+      border: 2px dashed var(--border);
+      border-radius: 16px;
+      margin-bottom: 24px;
+    }
+    .variant-a .meeting-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 20px;
+      margin-bottom: 12px;
+      cursor: pointer;
+    }
+    .variant-a .meeting-card .title { font-weight: 600; margin-bottom: 4px; }
+    .variant-a .meeting-card .meta { font-size: 13px; color: var(--text-secondary); }
+    .variant-a .recording-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+    .variant-a .recording-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--danger);
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .variant-a .recording-badge::before {
+      content: "";
+      width: 10px; height: 10px;
+      background: var(--danger);
+      border-radius: 50%;
+      animation: pulse 1.2s infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .variant-a .transcript {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+      min-height: 320px;
+      margin-bottom: 16px;
+    }
+    .variant-a .line { margin-bottom: 14px; }
+    .variant-a .line .speaker {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 2px;
+    }
+    .variant-a .line .speaker.you { color: #2563eb; }
+    .variant-a .line .speaker.others { color: #7c3aed; }
+    .variant-a .notepad {
+      width: 100%;
+      min-height: 90px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      font: inherit;
+      resize: vertical;
+    }
+    .variant-a .post-section { margin-bottom: 28px; }
+    .variant-a .post-section h2 { font-size: 18px; margin: 0 0 12px; }
+    .variant-a .notes {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .variant-a .notes ul { margin: 0; padding-left: 20px; }
+    .variant-a .notes li { margin-bottom: 8px; }
+
+    /* === Variant B: Sidebar + dashboard === */
+    .variant-b { display: flex; height: 100vh; }
+    .variant-b .sidebar {
+      width: 260px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+    }
+    .variant-b .sidebar h1 { font-size: 22px; margin: 0 0 24px; }
+    .variant-b .sidebar .new-btn { margin-bottom: 24px; }
+    .variant-b .sidebar .list { flex: 1; overflow: auto; }
+    .variant-b .sidebar .item {
+      padding: 12px;
+      border-radius: 8px;
+      margin-bottom: 8px;
+      cursor: pointer;
+    }
+    .variant-b .sidebar .item:hover, .variant-b .sidebar .item.active { background: var(--bg); }
+    .variant-b .sidebar .item .time { font-size: 12px; color: var(--text-secondary); }
+    .variant-b .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .variant-b .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .variant-b .topbar .title { font-weight: 600; }
+    .variant-b .workspace { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 0; overflow: hidden; }
+    .variant-b .panel { padding: 24px; overflow: auto; }
+    .variant-b .panel + .panel { border-left: 1px solid var(--border); }
+    .variant-b .panel h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); margin: 0 0 16px; }
+    .variant-b .transcript-line { display: flex; gap: 12px; margin-bottom: 14px; }
+    .variant-b .avatar {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; color: #1f2937;
+      flex-shrink: 0;
+    }
+    .variant-b .avatar.you { background: var(--you); }
+    .variant-b .avatar.others { background: var(--others); }
+    .variant-b .transcript-line .content { font-size: 14px; }
+    .variant-b .transcript-line .time { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+    .variant-b textarea {
+      width: 100%; flex: 1; min-height: 200px;
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px; font: inherit; resize: none;
+    }
+    .variant-b .notes-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 24px; overflow: auto; }
+    .variant-b .note-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    .variant-b .note-card h3 { margin: 0 0 12px; font-size: 16px; }
+
+    /* === Variant C: Conversation bubbles === */
+    .variant-c { max-width: 840px; margin: 0 auto; padding: 20px 20px 100px; }
+    .variant-c header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+    .variant-c header h1 { font-size: 24px; margin: 0; }
+    .variant-c .empty {
+      text-align: center;
+      padding: 100px 20px;
+    }
+    .variant-c .chat {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 24px;
+      min-height: 420px;
+      margin-bottom: 20px;
+    }
+    .variant-c .bubble {
+      max-width: 75%;
+      padding: 14px 18px;
+      border-radius: 18px;
+      margin-bottom: 16px;
+      position: relative;
+    }
+    .variant-c .bubble.you { background: var(--you); margin-left: auto; border-bottom-right-radius: 4px; }
+    .variant-c .bubble.others { background: var(--others); margin-right: auto; border-bottom-left-radius: 4px; }
+    .variant-c .bubble .label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase; margin-bottom: 4px;
+    }
+    .variant-c .bubble.you .label { color: #1e40af; text-align: right; }
+    .variant-c .bubble.others .label { color: #6b21a8; }
+    .variant-c .input-tray {
+      position: fixed;
+      bottom: 80px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(840px, calc(100% - 40px));
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      display: flex; gap: 12px;
+    }
+    .variant-c .input-tray textarea {
+      flex: 1; border: none; outline: none; font: inherit; resize: none; height: 48px; padding: 6px;
+    }
+    .variant-c .fab {
+      position: fixed;
+      bottom: 150px;
+      right: 24px;
+      width: 64px; height: 64px;
+      border-radius: 50%;
+      border: none;
+      background: var(--danger);
+      color: var(--danger-text);
+      font-size: 28px;
+      cursor: pointer;
+      box-shadow: 0 6px 20px rgba(220,38,38,0.35);
+    }
+    .variant-c .post-cards { display: grid; gap: 16px; }
+    .variant-c .post-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+    }
+    .variant-c .post-card h3 { margin: 0 0 10px; }
+
+    /* === Proto notice === */
+    .proto-notice {
+      background: #fef3c7;
+      color: #92400e;
+      padding: 10px 16px;
+      font-size: 13px;
+      text-align: center;
+      border-bottom: 1px solid #fde68a;
+    }
+  </style>
+</head>
+<body>
+
+<div class="proto-notice">🛠️ Throwaway prototype — open the same file with ?variant=A, ?variant=B, or ?variant=C</div>
+
+<!-- ================= Variant A: Minimal single-column ================= -->
+<div id="variant-a" class="variant-a hidden">
+
+  <!-- Idle / list -->
+  <div data-screen="list">
+    <h1>Kiminola</h1>
+    <div class="subtitle">Capture, transcribe, and enhance your meetings.</div>
+    <button class="btn large" onclick="go('a','record')">+ New meeting</button>
+    <div style="margin-top: 32px;">
+      <div style="font-weight:600; margin-bottom:12px;">Recent meetings</div>
+      <div class="meeting-card" onclick="go('a','post')">
+        <div class="title">Product standup</div>
+        <div class="meta">Today · 8 min · Notes ready</div>
+      </div>
+      <div class="meeting-card" onclick="go('a','post')">
+        <div class="title">1:1 with Sarah</div>
+        <div class="meta">Yesterday · 24 min · Notes ready</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recording -->
+  <div data-screen="record" class="hidden">
+    <div class="recording-header">
+      <div>
+        <div style="font-size:20px; font-weight:600;">Product standup</div>
+        <div style="color:var(--text-secondary); font-size:14px;">Recording · 0:04:12</div>
+      </div>
+      <div class="recording-badge">Recording</div>
+    </div>
+    <div class="transcript">
+      <div class="line"><div class="speaker others">Others</div>So the blocker is really just the API credentials.</div>
+      <div class="line"><div class="speaker you">You</div>I'll follow up with DevOps today and get those rotated.</div>
+      <div class="line"><div class="speaker others">Others</div>Great, then we can merge the branch this afternoon.</div>
+    </div>
+    <textarea class="notepad" placeholder="Type rough notes here (optional)...">DevOps API creds - follow up</textarea>
+    <div style="margin-top:16px; text-align:right;">
+      <button class="btn danger" onclick="go('a','post')">Stop & enhance</button>
+    </div>
+  </div>
+
+  <!-- Post-meeting -->
+  <div data-screen="post" class="hidden">
+    <h1>Product standup</h1>
+    <div class="subtitle">Today · 8 min</div>
+    <div style="margin-bottom:20px;">
+      <button class="btn secondary" onclick="go('a','list')">← Back to meetings</button>
+    </div>
+    <div class="post-section">
+      <h2>Enhanced notes</h2>
+      <div class="notes">
+        <ul>
+          <li><strong>Blocker:</strong> API credentials need rotation before the branch can merge.</li>
+          <li><strong>Action:</strong> You will follow up with DevOps today.</li>
+          <li><strong>Outcome:</strong> Merge expected this afternoon once credentials are sorted.</li>
+          <li><strong>From your notepad:</strong> DevOps API creds - follow up</li>
+        </ul>
+      </div>
+    </div>
+    <div class="post-section">
+      <h2>Raw transcript</h2>
+      <div class="transcript">
+        <div class="line"><div class="speaker others">Others</div>So the blocker is really just the API credentials.</div>
+        <div class="line"><div class="speaker you">You</div>I'll follow up with DevOps today and get those rotated.</div>
+        <div class="line"><div class="speaker others">Others</div>Great, then we can merge the branch this afternoon.</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ================= Variant B: Sidebar + dashboard ================= -->
+<div id="variant-b" class="variant-b hidden">
+  <aside class="sidebar">
+    <h1>Kiminola</h1>
+    <button class="btn new-btn" onclick="go('b','record')">+ New meeting</button>
+    <div class="list">
+      <div class="item active" onclick="go('b','post')">
+        <div>Product standup</div>
+        <div class="time">Today · 8 min</div>
+      </div>
+      <div class="item" onclick="go('b','post')">
+        <div>1:1 with Sarah</div>
+        <div class="time">Yesterday · 24 min</div>
+      </div>
+      <div class="item" onclick="go('b','post')">
+        <div>Engineering sync</div>
+        <div class="time">Aug 10 · 41 min</div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- Idle state inside dashboard -->
+    <div data-screen="list" class="topbar" style="display:none;"></div>
+
+    <!-- Recording -->
+    <div data-screen="record">
+      <div class="topbar">
+        <div>
+          <div class="title">Product standup</div>
+          <div style="font-size:13px; color:var(--text-secondary);">Recording · 0:04:12</div>
+        </div>
+        <button class="btn danger" onclick="go('b','post')">Stop & enhance</button>
+      </div>
+      <div class="workspace">
+        <div class="panel">
+          <h3>Live transcript</h3>
+          <div class="transcript-line">
+            <div class="avatar others">OT</div>
+            <div>
+              <div class="content">So the blocker is really just the API credentials.</div>
+              <div class="time">0:02:14</div>
+            </div>
+          </div>
+          <div class="transcript-line">
+            <div class="avatar you">YO</div>
+            <div>
+              <div class="content">I'll follow up with DevOps today and get those rotated.</div>
+              <div class="time">0:02:18</div>
+            </div>
+          </div>
+          <div class="transcript-line">
+            <div class="avatar others">OT</div>
+            <div>
+              <div class="content">Great, then we can merge the branch this afternoon.</div>
+              <div class="time">0:02:22</div>
+            </div>
+          </div>
+        </div>
+        <div class="panel" style="display:flex; flex-direction:column;">
+          <h3>Notepad</h3>
+          <textarea placeholder="Type rough notes here (optional)..."></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- Post-meeting -->
+    <div data-screen="post">
+      <div class="topbar">
+        <div class="title">Product standup · Enhanced notes</div>
+        <button class="btn secondary" onclick="go('b','list')">Back to list</button>
+      </div>
+      <div class="notes-grid">
+        <div class="note-card">
+          <h3>Summary</h3>
+          <p>The team is blocked on API credential rotation. Once resolved, the feature branch can merge this afternoon.</p>
+        </div>
+        <div class="note-card">
+          <h3>Action items</h3>
+          <ul>
+            <li>You: follow up with DevOps on API credentials today.</li>
+            <li>Team: merge branch after credentials rotate.</li>
+          </ul>
+        </div>
+        <div class="note-card">
+          <h3>From your notepad</h3>
+          <p>DevOps API creds - follow up</p>
+        </div>
+        <div class="note-card">
+          <h3>Raw transcript</h3>
+          <p style="font-size:13px; color:var(--text-secondary);">[Others] So the blocker is really just the API credentials.<br>[You] I'll follow up with DevOps today and get those rotated.<br>[Others] Great, then we can merge the branch this afternoon.</p>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ================= Variant C: Conversation bubbles ================= -->
+<div id="variant-c" class="variant-c hidden">
+
+  <!-- Idle / list -->
+  <div data-screen="list">
+    <header>
+      <h1>Kiminola</h1>
+      <button class="btn" onclick="go('c','record')">+ New</button>
+    </header>
+    <div class="empty">
+      <div style="font-size:18px; font-weight:600; margin-bottom:8px;">No meeting selected</div>
+      <div style="color:var(--text-secondary); margin-bottom:24px;">Start a new meeting or pick one from your history.</div>
+      <div class="post-cards">
+        <div class="post-card" onclick="go('c','post')" style="cursor:pointer;">
+          <h3>Product standup</h3>
+          <div style="color:var(--text-secondary); font-size:14px;">Today · 8 min · Notes ready</div>
+        </div>
+        <div class="post-card" onclick="go('c','post')" style="cursor:pointer;">
+          <h3>1:1 with Sarah</h3>
+          <div style="color:var(--text-secondary); font-size:14px;">Yesterday · 24 min · Notes ready</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recording -->
+  <div data-screen="record" class="hidden">
+    <header>
+      <div>
+        <h1 style="font-size:20px;">Product standup</h1>
+        <div style="color:var(--danger); font-size:13px; font-weight:600;">● Recording · 0:04:12</div>
+      </div>
+      <button class="btn danger" onclick="go('c','post')">Stop</button>
+    </header>
+    <div class="chat">
+      <div class="bubble others">
+        <div class="label">Others</div>
+        So the blocker is really just the API credentials.
+      </div>
+      <div class="bubble you">
+        <div class="label">You</div>
+        I'll follow up with DevOps today and get those rotated.
+      </div>
+      <div class="bubble others">
+        <div class="label">Others</div>
+        Great, then we can merge the branch this afternoon.
+      </div>
+    </div>
+    <div class="input-tray">
+      <textarea placeholder="Jot a quick note..."></textarea>
+      <button class="btn">Add</button>
+    </div>
+    <button class="fab" onclick="go('c','post')">■</button>
+  </div>
+
+  <!-- Post-meeting -->
+  <div data-screen="post" class="hidden">
+    <header>
+      <h1>Product standup</h1>
+      <button class="btn secondary" onclick="go('c','list')">Done</button>
+    </header>
+    <div class="post-cards">
+      <div class="post-card">
+        <h3>Summary</h3>
+        <p>The team is blocked on API credential rotation. Once resolved, the feature branch can merge this afternoon.</p>
+      </div>
+      <div class="post-card">
+        <h3>Action items</h3>
+        <ul>
+          <li>You: follow up with DevOps on API credentials today.</li>
+          <li>Team: merge branch after credentials rotate.</li>
+        </ul>
+      </div>
+      <div class="post-card">
+        <h3>From your notepad</h3>
+        <p>DevOps API creds - follow up</p>
+      </div>
+      <div class="post-card">
+        <h3>Raw transcript</h3>
+        <p style="font-size:14px; color:var(--text-secondary);">[Others] So the blocker is really just the API credentials.<br>[You] I'll follow up with DevOps today and get those rotated.<br>[Others] Great, then we can merge the branch this afternoon.</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ================= Variant switcher ================= -->
+<div class="prototype-bar">
+  <button onclick="setVariant(prev())">←</button>
+  <div class="label" id="variant-label">A — Minimal</div>
+  <button onclick="setVariant(next())">→</button>
+</div>
+
+<script>
+  const variants = [
+    { key: 'A', name: 'Minimal single-column', id: 'variant-a' },
+    { key: 'B', name: 'Sidebar dashboard', id: 'variant-b' },
+    { key: 'C', name: 'Conversation bubbles', id: 'variant-c' }
+  ];
+  const state = { A:'list', B:'list', C:'list' };
+
+  function getVariant() {
+    const p = new URLSearchParams(location.search).get('variant') || 'A';
+    return variants.find(v => v.key === p.toUpperCase()) || variants[0];
+  }
+
+  function setVariant(v) {
+    const target = typeof v === 'string' ? variants.find(x => x.key === v) : v;
+    if (!target) return;
+    history.replaceState(null, '', '?variant=' + target.key);
+    variants.forEach(v => document.getElementById(v.id).classList.add('hidden'));
+    document.getElementById(target.id).classList.remove('hidden');
+    document.getElementById('variant-label').textContent = target.key + ' — ' + target.name;
+    renderScreens(target.key);
+  }
+
+  function next() { const i = variants.indexOf(getVariant()); return variants[(i + 1) % variants.length]; }
+  function prev() { const i = variants.indexOf(getVariant()); return variants[(i - 1 + variants.length) % variants.length]; }
+
+  function go(variantKey, screen) {
+    state[variantKey.toUpperCase()] = screen;
+    renderScreens(variantKey.toUpperCase());
+  }
+
+  function renderScreens(key) {
+    const root = document.getElementById(variants.find(v => v.key === key).id);
+    root.querySelectorAll('[data-screen]').forEach(el => {
+      el.classList.toggle('hidden', el.dataset.screen !== state[key]);
+    });
+  }
+
+  document.addEventListener('keydown', e => {
+    if (['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) return;
+    if (e.key === 'ArrowRight') setVariant(next());
+    if (e.key === 'ArrowLeft') setVariant(prev());
+  });
+
+  setVariant(getVariant());
+</script>
+
+</body>
+</html>
