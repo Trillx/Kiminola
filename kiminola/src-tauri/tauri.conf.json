@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Kiminola",
+  "productName": "Kimi Nola",
   "version": "0.1.0",
   "identifier": "com.kiminola.app",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Kiminola",
+        "title": "Kimi Nola",
         "width": 1200,
         "height": 800,
         "minWidth": 900,

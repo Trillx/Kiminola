@@ -24,11 +24,28 @@ tauri-plugin-updater = "2"
 tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+async-trait = "0.1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
 keyring = { version = "3", features = ["windows-native"] }
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "stream", "json"] }
 sha2 = "0.10"
+hex = "0.4"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
+cpal = "0.15"
+rubato = "0.16"
+ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
+ndarray = "0.17"
+# Shared linking against the prebuilt sherpa-onnx C API (see .cargo/config.toml
+# SHERPA_ONNX_LIB_DIR); the default `static` feature expects static libs the
+# Windows shared distribution does not ship.
+sherpa-onnx = { version = "1.13.5", default-features = false, features = ["shared"] }
+windows = { version = "0.58", features = [
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+] }
 
