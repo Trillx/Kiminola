@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { TranscriptLine } from "$lib/mock";
+  import type { TranscriptLine } from "$lib/tauri";
 
   let {
     lines,
@@ -13,7 +13,31 @@
   } = $props();
 
   let bodyEl: HTMLDivElement | undefined = $state();
+  let sheetEl: HTMLDivElement | undefined = $state();
   let scrollHideTimer: ReturnType<typeof setTimeout> | undefined;
+
+  let latest = $derived(lines[lines.length - 1]);
+  let latestPartial = $derived(partialIndex >= 0 && partialIndex === lines.length - 1);
+
+  // Clicking anywhere outside the sheet (e.g. back into the notepad) drops it
+  // back to the strip; Escape does the same.
+  $effect(() => {
+    if (!open) return;
+    function onPointerDown(e: PointerEvent) {
+      if (sheetEl && !sheetEl.contains(e.target as Node)) {
+        open = false;
+      }
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") open = false;
+    }
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  });
 
   // Auto-scroll to new lines, but only when the user is already near the bottom.
   $effect(() => {
@@ -32,18 +56,27 @@
   }
 </script>
 
-{#if !open}
+{#if !open && lines.length === 0}
+  <!-- Nothing heard yet: quiet indicator only -->
   <button class="transcript-indicator" onclick={() => (open = true)}>
     <span class="dot"></span>
     <span>Live transcript</span>
   </button>
+{:else if !open}
+  <!-- Live strip: the latest line, one click away from the full sheet -->
+  <button class="transcript-strip" onclick={() => (open = true)} aria-label="Open live transcript">
+    <span class="dot"></span>
+    <span class="strip-who">{latest.channel === "you" ? "You" : "Others"}</span>
+    <span class="strip-text" class:partial={latestPartial}>{latest.text}</span>
+    <span class="strip-count">{lines.length} {lines.length === 1 ? "line" : "lines"}</span>
+  </button>
 {:else}
-  <div class="transcript-floating">
-    <div class="floating-header">
-      <span class="floating-title">Live transcript</span>
-      <button class="floating-close" onclick={() => (open = false)} aria-label="Close transcript">×</button>
+  <div class="transcript-sheet" bind:this={sheetEl}>
+    <div class="sheet-header">
+      <span class="sheet-title">Live transcript</span>
+      <button class="sheet-close" onclick={() => (open = false)} aria-label="Close transcript">×</button>
     </div>
-    <div class="floating-body" bind:this={bodyEl} onscroll={onScroll}>
+    <div class="sheet-body" bind:this={bodyEl} onscroll={onScroll}>
       {#each lines as line, i (i)}
         <div class="transcript-line" class:partial={i === partialIndex}>
           <div class="speaker {line.channel}">{line.channel === "you" ? "You" : "Others"}</div>

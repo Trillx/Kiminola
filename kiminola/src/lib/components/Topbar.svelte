@@ -1,5 +1,6 @@
 <script lang="ts">
   import { themeState, toggleTheme } from "$lib/theme.svelte";
+  import { Button } from "$lib/components/ui/button";
 </script>
 
 <div class="topbar">
@@ -11,5 +12,5 @@
   >
     {themeState.theme === "dark" ? "☀️" : "🌙"}
   </button>
-  <a class="btn btn-primary" href="/record">+ New meeting</a>
+  <Button href="/record">+ New meeting</Button>
 </div>
