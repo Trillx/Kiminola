@@ -1,7 +1,26 @@
-# Tauri + SvelteKit + TypeScript
+# Kimi Nola application
 
-This template should help get you started developing with Tauri, SvelteKit and TypeScript in Vite.
+This directory contains the Tauri 2 desktop application: a SvelteKit and TypeScript frontend in `src/` with the Rust backend in `src-tauri/`.
 
-## Recommended IDE Setup
+See the [repository README](../README.md) for the product overview, privacy boundary, architecture, prerequisites, and complete build instructions.
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer).
+## Common commands
+
+Run these commands from this directory:
+
+```powershell
+npm install
+npm run dev
+npm run check
+npm run build
+npm run tauri dev
+```
+
+Rust validation runs from `src-tauri/`:
+
+```powershell
+cargo check
+cargo test
+```
+
+On Windows ARM64, add `C:\Program Files\LLVM\bin` to `PATH` before running Cargo. The local sherpa-onnx shared-library path is configured in `src-tauri/.cargo/config.toml`.
