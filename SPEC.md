@@ -4,7 +4,9 @@
 
 ## 1. Product definition
 
-Kiminola is an open-source, Windows-first (x64 + ARM64) Granola alternative for **local meeting transcription** and **AI-enhanced notes**. It captures microphone and system audio as separate channels, transcribes on-device with a streaming ASR model, and lets the user optionally enhance their handwritten notes with a cloud LLM.
+Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + ARM64) Granola alternative for **local meeting transcription** and **AI-enhanced notes**. It captures microphone and system audio as separate channels, transcribes on-device with a streaming ASR model, and lets the user optionally enhance their handwritten notes with a cloud LLM.
+
+**Brand identity:** Oatwave — see `kiminola/branding/HANDOFF.md` (Rev A). Paper-cream light-first palette with charcoal dark mode; Gentium Book Plus / Archivo / IBM Plex Mono; one gold element per view.
 
 **Privacy line:** audio never leaves the machine. Transcript text leaves only when the user explicitly chooses a cloud LLM for enhancement.
 
