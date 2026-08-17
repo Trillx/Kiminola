@@ -4,3 +4,4 @@ build/
 .svelte-kit/
 *.log
 .DS_Store
+.scratch/kiminola/spike/models/nemotron/*.onnx
