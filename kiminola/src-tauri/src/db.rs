@@ -125,6 +125,24 @@ pub struct SpaceOut {
     pub meetings: Vec<SpaceMeetingRef>,
 }
 
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+pub struct NoteDraftSummary {
+    pub id: i64,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+pub struct NoteDraftDetail {
+    pub id: i64,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub raw_markdown: String,
+    pub meeting_id: Option<i64>,
+}
+
 async fn is_onboarding_complete_impl(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT value FROM settings WHERE key = 'onboarding_complete'"
@@ -160,12 +178,24 @@ pub async fn set_onboarding_complete(state: State<'_, DbState>, complete: bool) 
 
 /* ---------- core logic (testable without Tauri state) ---------- */
 
+#[allow(dead_code)]
 async fn save_meeting_impl(
     pool: &SqlitePool,
     title: &str,
     duration_seconds: i64,
     notepad: &str,
     segments: &[NewSegment],
+) -> Result<i64, String> {
+    save_meeting_with_draft_impl(pool, title, duration_seconds, notepad, segments, None).await
+}
+
+pub(crate) async fn save_meeting_with_draft_impl(
+    pool: &SqlitePool,
+    title: &str,
+    duration_seconds: i64,
+    notepad: &str,
+    segments: &[NewSegment],
+    note_draft_id: Option<i64>,
 ) -> Result<i64, String> {
     // File under the default (first) space until space management ships.
     let space_id: Option<i64> = sqlx::query_scalar("SELECT id FROM spaces ORDER BY id LIMIT 1")
@@ -196,13 +226,42 @@ async fn save_meeting_impl(
             .map_err(|e| e.to_string())?;
     }
 
+    let draft_markdown = if let Some(draft_id) = note_draft_id {
+        sqlx::query_scalar::<_, String>(
+            "SELECT raw_markdown FROM note_drafts
+             WHERE id = ? AND meeting_id IS NULL",
+        )
+        .bind(draft_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "note draft not found or already attached".to_string())?
+    } else {
+        String::new()
+    };
+    let saved_notepad = if note_draft_id.is_some() && notepad.is_empty() {
+        &draft_markdown
+    } else {
+        notepad
+    };
+
     sqlx::query("INSERT INTO notes (meeting_id, raw_markdown, updated_at) VALUES (?, ?, ?)")
         .bind(meeting_id)
-        .bind(notepad)
+        .bind(saved_notepad)
         .bind(now_iso())
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+
+    if let Some(draft_id) = note_draft_id {
+        sqlx::query("UPDATE note_drafts SET meeting_id = ?, updated_at = ? WHERE id = ?")
+            .bind(meeting_id)
+            .bind(now_iso())
+            .bind(draft_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
 
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(meeting_id)
@@ -270,6 +329,96 @@ async fn create_space_impl(pool: &SqlitePool, name: &str) -> Result<i64, String>
     .await
     .map_err(|e| e.to_string())?;
     Ok(id)
+}
+
+fn note_draft_title() -> String {
+    format!(
+        "Note draft · {}",
+        chrono::Local::now().format("%b %-d, %Y, %-I:%M %p")
+    )
+}
+
+pub(crate) async fn create_note_draft_impl(pool: &SqlitePool) -> Result<i64, String> {
+    let now = now_iso();
+    sqlx::query(
+        "INSERT INTO note_drafts (title, created_at, updated_at, raw_markdown)
+         VALUES (?, ?, ?, '')",
+    )
+    .bind(note_draft_title())
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("failed to create note draft: {e}"))?;
+    sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn list_note_drafts_impl(
+    pool: &SqlitePool,
+) -> Result<Vec<NoteDraftSummary>, String> {
+    sqlx::query_as::<_, NoteDraftSummary>(
+        "SELECT id, title, created_at, updated_at
+         FROM note_drafts
+         WHERE meeting_id IS NULL
+         ORDER BY updated_at DESC, id DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn get_note_draft_impl(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<NoteDraftDetail, String> {
+    sqlx::query_as::<_, NoteDraftDetail>(
+        "SELECT id, title, created_at, updated_at, raw_markdown, meeting_id
+         FROM note_drafts
+         WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "note draft not found".to_string())
+}
+
+pub(crate) async fn update_note_draft_impl(
+    pool: &SqlitePool,
+    id: i64,
+    raw_markdown: &str,
+) -> Result<(), String> {
+    let rows = sqlx::query(
+        "UPDATE note_drafts SET raw_markdown = ?, updated_at = ?
+         WHERE id = ? AND meeting_id IS NULL",
+    )
+    .bind(raw_markdown)
+    .bind(now_iso())
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .rows_affected();
+    if rows == 0 {
+        return Err("note draft not found or already attached".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) async fn delete_note_draft_impl(pool: &SqlitePool, id: i64) -> Result<(), String> {
+    let rows = sqlx::query("DELETE FROM note_drafts WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .rows_affected();
+    if rows == 0 {
+        return Err("note draft not found".to_string());
+    }
+    Ok(())
 }
 
 async fn list_spaces_impl(pool: &SqlitePool) -> Result<Vec<SpaceOut>, String> {
@@ -506,9 +655,18 @@ pub async fn save_meeting(
     duration_seconds: i64,
     notepad: String,
     segments: Vec<NewSegment>,
+    note_draft_id: Option<i64>,
 ) -> Result<i64, String> {
     let pool = ensure_pool(&state.pool).await?;
-    save_meeting_impl(&pool, &title, duration_seconds, &notepad, &segments).await
+    save_meeting_with_draft_impl(
+        &pool,
+        &title,
+        duration_seconds,
+        &notepad,
+        &segments,
+        note_draft_id,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -527,6 +685,45 @@ pub async fn get_meeting(state: State<'_, DbState>, id: i64) -> Result<MeetingDe
 pub async fn create_space(state: State<'_, DbState>, name: String) -> Result<i64, String> {
     let pool = ensure_pool(&state.pool).await?;
     create_space_impl(&pool, &name).await
+}
+
+#[tauri::command]
+pub async fn create_note_draft(state: State<'_, DbState>) -> Result<i64, String> {
+    let pool = ensure_pool(&state.pool).await?;
+    create_note_draft_impl(&pool).await
+}
+
+#[tauri::command]
+pub async fn list_note_drafts(
+    state: State<'_, DbState>,
+) -> Result<Vec<NoteDraftSummary>, String> {
+    let pool = ensure_pool(&state.pool).await?;
+    list_note_drafts_impl(&pool).await
+}
+
+#[tauri::command]
+pub async fn get_note_draft(
+    state: State<'_, DbState>,
+    id: i64,
+) -> Result<NoteDraftDetail, String> {
+    let pool = ensure_pool(&state.pool).await?;
+    get_note_draft_impl(&pool, id).await
+}
+
+#[tauri::command]
+pub async fn update_note_draft(
+    state: State<'_, DbState>,
+    id: i64,
+    raw_markdown: String,
+) -> Result<(), String> {
+    let pool = ensure_pool(&state.pool).await?;
+    update_note_draft_impl(&pool, id, &raw_markdown).await
+}
+
+#[tauri::command]
+pub async fn delete_note_draft(state: State<'_, DbState>, id: i64) -> Result<(), String> {
+    let pool = ensure_pool(&state.pool).await?;
+    delete_note_draft_impl(&pool, id).await
 }
 
 #[tauri::command]
@@ -694,6 +891,46 @@ mod tests {
         let (pool, path) = test_pool("missing").await;
         let err = get_meeting_impl(&pool, 999).await.unwrap_err();
         assert_eq!(err, "meeting not found");
+        drop(pool);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn note_draft_roundtrip_and_meeting_attach() {
+        let (pool, path) = test_pool("note-draft").await;
+        let draft_id = create_note_draft_impl(&pool).await.expect("create draft");
+
+        update_note_draft_impl(&pool, draft_id, "follow up with the team")
+            .await
+            .expect("update draft");
+        let draft = get_note_draft_impl(&pool, draft_id).await.expect("get draft");
+        assert_eq!(draft.raw_markdown, "follow up with the team");
+        assert!(draft.meeting_id.is_none());
+
+        let meeting_id = save_meeting_with_draft_impl(
+            &pool,
+            "Follow-up meeting",
+            60,
+            "",
+            &[],
+            Some(draft_id),
+        )
+        .await
+        .expect("save meeting with draft");
+        let meeting = get_meeting_impl(&pool, meeting_id).await.expect("get meeting");
+        assert_eq!(meeting.notepad, "follow up with the team");
+        assert!(list_note_drafts_impl(&pool)
+            .await
+            .expect("list drafts")
+            .is_empty());
+        assert_eq!(
+            get_note_draft_impl(&pool, draft_id)
+                .await
+                .expect("get attached draft")
+                .meeting_id,
+            Some(meeting_id)
+        );
+
         drop(pool);
         let _ = std::fs::remove_file(path);
     }

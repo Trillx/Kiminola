@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listMeetings, type MeetingSummary } from "$lib/tauri";
+  import { listMeetings, listNoteDrafts, type MeetingSummary, type NoteDraftSummary } from "$lib/tauri";
 
   const now = new Date();
   const month = now.toLocaleString("en-US", { month: "long" });
@@ -8,11 +8,12 @@
   const day = now.getDate();
 
   let meetings = $state<MeetingSummary[]>([]);
+  let drafts = $state<NoteDraftSummary[]>([]);
   let loaded = $state(false);
 
   onMount(async () => {
     try {
-      meetings = await listMeetings();
+      [meetings, drafts] = await Promise.all([listMeetings(), listNoteDrafts()]);
     } catch (err) {
       console.error("Failed to load meetings:", err);
     } finally {
@@ -49,7 +50,7 @@
   </div>
 
   <div class="section-title">Recent meetings</div>
-  {#if loaded && meetings.length === 0}
+  {#if loaded && meetings.length === 0 && drafts.length === 0}
     <div class="empty-state">
       No meetings yet — hit <strong>+ New meeting</strong> up top to record your first one.
     </div>
@@ -63,6 +64,22 @@
             <div class="meta">{meeting.space_name ?? ""}</div>
           </div>
           <div class="time">{dayLabel(meeting.created_at)}</div>
+        </a>
+      {/each}
+    </div>
+  {/if}
+
+  {#if drafts.length > 0}
+    <div class="section-title">Note drafts</div>
+    <div class="meeting-list">
+      {#each drafts as draft (draft.id)}
+        <a class="meeting-item" href="/note/{draft.id}">
+          <div class="doc-icon">✎</div>
+          <div class="details">
+            <div class="title">{draft.title}</div>
+            <div class="meta">Standalone notes</div>
+          </div>
+          <div class="time">{dayLabel(draft.updated_at)}</div>
         </a>
       {/each}
     </div>

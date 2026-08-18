@@ -8,6 +8,7 @@
   import { isOnboardingComplete, onShortcutTriggered, stopRecording } from "$lib/tauri";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import Topbar from "$lib/components/Topbar.svelte";
+  import MeetingPresencePrompt from "$lib/components/MeetingPresencePrompt.svelte";
 
   let { children } = $props();
 
@@ -63,6 +64,7 @@
     <main class="main">
       <Topbar />
       {@render children()}
+      <MeetingPresencePrompt />
     </main>
   </div>
 {/if}

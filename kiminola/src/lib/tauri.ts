@@ -62,6 +62,18 @@ export interface MeetingDetail {
   transcript: TranscriptLine[];
 }
 
+export interface NoteDraftSummary {
+  id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NoteDraftDetail extends NoteDraftSummary {
+  raw_markdown: string;
+  meeting_id: number | null;
+}
+
 export interface SpaceMeetingRef {
   id: number;
   title: string;
@@ -78,12 +90,14 @@ export async function saveMeeting(input: {
   durationSeconds: number;
   notepad: string;
   segments: TranscriptLine[];
+  noteDraftId?: number | null;
 }): Promise<number> {
   return invoke("save_meeting", {
     title: input.title,
     durationSeconds: input.durationSeconds,
     notepad: input.notepad,
     segments: input.segments,
+    noteDraftId: input.noteDraftId ?? null,
   });
 }
 
@@ -109,6 +123,26 @@ export async function createSpace(name: string): Promise<number> {
 
 export async function updateNotes(meetingId: number, rawMarkdown: string): Promise<void> {
   await invoke("update_notes", { meetingId, rawMarkdown });
+}
+
+export async function createNoteDraft(): Promise<number> {
+  return invoke("create_note_draft");
+}
+
+export async function listNoteDrafts(): Promise<NoteDraftSummary[]> {
+  return invoke("list_note_drafts");
+}
+
+export async function getNoteDraft(id: number): Promise<NoteDraftDetail> {
+  return invoke("get_note_draft", { id });
+}
+
+export async function updateNoteDraft(id: number, rawMarkdown: string): Promise<void> {
+  await invoke("update_note_draft", { id, rawMarkdown });
+}
+
+export async function deleteNoteDraft(id: number): Promise<void> {
+  await invoke("delete_note_draft", { id });
 }
 
 /* ---------- LLM provider (src-tauri llm.rs) ---------- */
@@ -260,4 +294,89 @@ export async function openMicrophonePrivacySettings(): Promise<void> {
 
 export function onShortcutTriggered(handler: () => void): Promise<UnlistenFn> {
   return listen<unknown>("shortcut:triggered", () => handler());
+}
+
+/* ---------- meeting presence companion (src-tauri meeting_presence.rs) ---------- */
+
+export type MeetingPresenceMode = "off" | "paused" | "detecting";
+
+export interface MeetingPrompt {
+  id: string;
+  app_label: string;
+  message: string;
+  not_recording_message: string;
+  confidence: "possible" | "likely";
+  evidence: ("app_or_visible_window" | "active_core_audio")[];
+}
+
+export interface MeetingPresenceHint {
+  app_label: string;
+  confidence: "possible" | "likely";
+  evidence: ("app_or_visible_window" | "active_core_audio")[];
+}
+
+export interface MeetingPresenceState {
+  enabled: boolean;
+  paused: boolean;
+  start_with_windows: boolean;
+  mode: MeetingPresenceMode;
+  hint: MeetingPresenceHint | null;
+  prompt: MeetingPrompt | null;
+}
+
+export interface MeetingPresenceAction {
+  action: "notes" | "start";
+  draft_id?: number;
+}
+
+export async function getMeetingPresenceState(): Promise<MeetingPresenceState> {
+  return invoke("get_meeting_presence_state");
+}
+
+export async function setMeetingPresenceEnabled(enabled: boolean): Promise<void> {
+  await invoke("set_meeting_presence_enabled", { enabled });
+}
+
+export async function setMeetingPresencePaused(paused: boolean): Promise<void> {
+  await invoke("set_meeting_presence_paused", { paused });
+}
+
+export async function setMeetingPresenceStartWithWindows(enabled: boolean): Promise<void> {
+  await invoke("set_meeting_presence_start_with_windows", { enabled });
+}
+
+export async function jotNotesFromMeetingPrompt(promptId: string): Promise<number> {
+  return invoke("jot_notes_from_meeting_prompt", { promptId });
+}
+
+export async function startRecordingFromMeetingPrompt(promptId: string): Promise<void> {
+  await invoke("start_recording_from_meeting_prompt", { promptId });
+}
+
+export async function dismissMeetingPrompt(promptId: string): Promise<void> {
+  await invoke("dismiss_meeting_prompt", { promptId });
+}
+
+export function onMeetingPresencePrompt(
+  handler: (prompt: MeetingPrompt) => void,
+): Promise<UnlistenFn> {
+  return listen<MeetingPrompt>("meeting-presence:prompt", (payload) => {
+    handler(payload.payload);
+  });
+}
+
+export function onMeetingPresenceState(
+  handler: (state: MeetingPresenceState) => void,
+): Promise<UnlistenFn> {
+  return listen<MeetingPresenceState>("meeting-presence:state", (payload) => {
+    handler(payload.payload);
+  });
+}
+
+export function onMeetingPresenceAction(
+  handler: (action: MeetingPresenceAction) => void,
+): Promise<UnlistenFn> {
+  return listen<MeetingPresenceAction>("meeting-presence:action", (payload) => {
+    handler(payload.payload);
+  });
 }

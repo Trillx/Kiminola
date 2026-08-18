@@ -65,6 +65,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   - `meetings` — id, title, space_id, created_at, duration_seconds
   - `transcript_segments` — id, meeting_id, channel ('you'|'others'), start_ms, end_ms, text
   - `notes` — id, meeting_id, raw_markdown, updated_at
+  - `note_drafts` — id, title, created_at, updated_at, raw_markdown, optional meeting_id
   - `spaces` — id, name, parent_id, created_at (adjacency list)
   - `templates` — id, name, prompt, is_builtin
   - `settings` — key, value
@@ -98,9 +99,34 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Onboarding feature tour
 - Microsoft Store / MSI / MSIX packaging
 - True per-speaker diarization
-- Meeting auto-detection / calendar integration
+- Calendar integration
 - Fully-offline local-LLM enhancement
 - Claude Pro/Max subscription OAuth
+
+## 8.1 Post-MVP: meeting presence prompts
+
+- Meeting presence is an opt-in background companion. Closing the main window
+  hides it and leaves the companion running; tray Quit exits fully.
+- Detection stays local and advisory. A prompt requires two independent
+  signals: a known process or visible app window plus an active Core Audio
+  session. A single signal remains a quiet possible hint with coarse evidence
+  labels; detection never starts recording. Prompts defer while Windows reports
+  presentation mode or a full-screen foreground app.
+- Initial friendly labels are Granola, Zoom, Microsoft Teams, Google Meet,
+  Webex, and a generic “another app” fallback. Raw executable names, window
+  titles, URLs, calendar metadata, and detector history are not persisted or
+  shown to the user.
+- A prompt says “You may be in a meeting. Want to jot notes?” and “Kimi Nola
+  is not recording.” Actions are Jot notes, Start recording, and Not now.
+  Start recording is always an explicit user action.
+- Jot notes creates a standalone Note draft in the same library. Drafts
+  autosave, survive restart, never expire silently, and may be explicitly
+  deleted. Starting and saving a meeting can attach the draft's notes.
+- At most one prompt is shown per detected app session. Not now suppresses
+  that session. Prompt actions are accepted only while their prompt ID is
+  current; stale or unknown actions are rejected without recording.
+- Settings expose Meeting detection and Start with Windows. Tray status is
+  “Detecting locally · not recording”, “Paused”, or “Off”.
 
 ## 9. Packaging & distribution
 

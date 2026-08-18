@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import LiveTranscript from "$lib/components/LiveTranscript.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -11,6 +12,7 @@
     pauseRecording,
     resumeRecording,
     saveMeeting,
+    getNoteDraft,
     onTranscriptEvent,
     type TranscriptEvent,
     type TranscriptLine,
@@ -27,6 +29,7 @@
   let transcriptOpen = $state(false);
   let paused = $state(false);
   let stopping = $state(false);
+  let noteDraftId = $state<number | null>(null);
 
   let timerText = $derived(
     `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`,
@@ -38,6 +41,9 @@
       if (!paused) elapsed += 1;
     }, 1000);
     let unlisten: (() => void) | undefined;
+
+    const draftParam = page.url.searchParams.get("draft");
+    const requestedDraftId = draftParam ? Number(draftParam) : NaN;
 
     const startPromise = onTranscriptEvent((event: TranscriptEvent) => {
       if (partialIndex >= 0 && partialIndex === lines.length - 1) {
@@ -55,10 +61,18 @@
       if (!event.is_partial) {
         partialIndex = -1;
       }
-    })
+      })
       .then((fn) => {
         unlisten = fn;
-        return startRecording();
+        if (!Number.isFinite(requestedDraftId)) {
+          return startRecording();
+        }
+        return getNoteDraft(requestedDraftId)
+          .then((draft) => {
+            noteDraftId = draft.id;
+            notepad = draft.raw_markdown;
+          })
+          .then(() => startRecording());
       })
       .catch((err) => {
         console.error("Failed to start recording:", err);
@@ -95,6 +109,7 @@
       durationSeconds: elapsed,
       notepad,
       segments: lines.map((l) => ({ ...l })),
+      noteDraftId,
     });
     goto(`/meeting/${id}?mode=${mode}`);
   }
@@ -107,6 +122,7 @@
       durationSeconds: elapsed,
       notepad,
       segments: lines.map((l) => ({ ...l })),
+      noteDraftId,
     });
     goto(`/meeting/${id}`);
   }

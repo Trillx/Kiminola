@@ -10,6 +10,12 @@
     createTemplate,
     updateTemplate,
     deleteTemplate,
+    getMeetingPresenceState,
+    onMeetingPresenceState,
+    setMeetingPresenceEnabled,
+    setMeetingPresencePaused,
+    setMeetingPresenceStartWithWindows,
+    type MeetingPresenceState,
     type Template,
   } from "$lib/tauri";
   import { Button } from "$lib/components/ui/button";
@@ -33,6 +39,15 @@
   let savingShortcut = $state(false);
   let shortcutSaved = $state(false);
   let appVersion = $state("");
+  let presence = $state<MeetingPresenceState>({
+    enabled: false,
+    paused: false,
+    start_with_windows: false,
+    mode: "off",
+    hint: null,
+    prompt: null,
+  });
+  let presenceError = $state("");
 
   // Templates state
   let templates = $state<Template[]>([]);
@@ -142,7 +157,37 @@
     getVersion()
       .then((v) => (appVersion = v))
       .catch((err) => console.error("Failed to load version:", err));
+
+    let unlisten: (() => void) | undefined;
+    onMeetingPresenceState((next) => (presence = next)).then((fn) => (unlisten = fn));
+    getMeetingPresenceState()
+      .then((next) => (presence = next))
+      .catch((err) => console.error("Failed to load meeting presence settings:", err));
+    return () => unlisten?.();
   });
+
+  function presenceLabel(): string {
+    if (presence.mode === "detecting") return "Detecting locally · not recording";
+    if (presence.mode === "paused") return "Paused";
+    return "Off";
+  }
+
+  async function changePresence(setting: "enabled" | "paused" | "startup", value: boolean) {
+    presenceError = "";
+    try {
+      if (setting === "enabled") await setMeetingPresenceEnabled(value);
+      if (setting === "paused") await setMeetingPresencePaused(value);
+      if (setting === "startup") await setMeetingPresenceStartWithWindows(value);
+      presence = await getMeetingPresenceState();
+    } catch (err) {
+      presenceError = String(err);
+      try {
+        presence = await getMeetingPresenceState();
+      } catch {
+        // Keep the last visible state if the refresh also fails.
+      }
+    }
+  }
 
   async function saveShortcut() {
     savingShortcut = true;
@@ -194,6 +239,40 @@
               {themeState.theme === "dark" ? "☀️ Switch to light" : "🌙 Switch to dark"}
             </button>
           </div>
+        </div>
+        <div class="my-notes-card provider-config presence-settings">
+          <div class="enhance-title">Meeting prompts</div>
+          <div class="enhance-copy">
+            Kimi Nola can look for meeting apps locally and ask before it does anything. It never
+            starts recording automatically.
+          </div>
+          <div class="field inline">
+            <span>Meeting detection</span>
+            <button class="btn btn-ghost" onclick={() => changePresence("enabled", !presence.enabled)}>
+              {presence.enabled ? "On" : "Off"}
+            </button>
+          </div>
+          <div class="field inline">
+            <span>Start with Windows</span>
+            <button
+              class="btn btn-ghost"
+              onclick={() => changePresence("startup", !presence.start_with_windows)}
+            >
+              {presence.start_with_windows ? "On" : "Off"}
+            </button>
+          </div>
+          <div class="field inline">
+            <span>Status</span>
+            <span class="enhance-copy">{presenceLabel()}</span>
+          </div>
+          {#if presence.enabled}
+            <div class="config-actions">
+              <Button variant="outline" onclick={() => changePresence("paused", !presence.paused)}>
+                {presence.paused ? "Resume detection" : "Pause detection"}
+              </Button>
+            </div>
+          {/if}
+          {#if presenceError}<div class="test-output error">{presenceError}</div>{/if}
         </div>
       {:else if active === "ai"}
         <div class="my-notes-card">
