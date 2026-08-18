@@ -474,7 +474,10 @@ async fn run_forwarder(
     internal_tx: mpsc::Sender<AudioBuffer>,
 ) {
     while let Some(buf) = source_rx.recv().await {
-        if internal_tx.try_send(buf).is_err() {
+        // Backpressure from ASR must pause forwarding, not terminate the
+        // forwarder. A full queue is temporary; only a closed consumer channel
+        // means the recording session is actually finished.
+        if internal_tx.send(buf).await.is_err() {
             break;
         }
     }
@@ -650,6 +653,35 @@ mod tests {
         Arc::new(FakeSink {
             events: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    #[tokio::test]
+    async fn audio_forwarder_survives_consumer_backpressure() {
+        let (source_tx, source_rx) = mpsc::channel(2);
+        let (internal_tx, mut internal_rx) = mpsc::channel(1);
+
+        source_tx
+            .send(AudioBuffer::Mic(vec![1.0]))
+            .await
+            .unwrap();
+        source_tx
+            .send(AudioBuffer::Mic(vec![2.0]))
+            .await
+            .unwrap();
+
+        let forwarder = tokio::spawn(run_forwarder(source_rx, internal_tx));
+
+        let first = internal_rx.recv().await.expect("first buffer should arrive");
+        assert!(matches!(first, AudioBuffer::Mic(samples) if samples == vec![1.0]));
+
+        let second = tokio::time::timeout(Duration::from_millis(500), internal_rx.recv())
+            .await
+            .expect("forwarder should wait for capacity instead of exiting")
+            .expect("second buffer should arrive after capacity is freed");
+        assert!(matches!(second, AudioBuffer::Mic(samples) if samples == vec![2.0]));
+
+        drop(source_tx);
+        forwarder.await.unwrap();
     }
 
     #[tokio::test]
