@@ -122,9 +122,12 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Jot notes creates a standalone Note draft in the same library. Drafts
   autosave, survive restart, never expire silently, and may be explicitly
   deleted. Starting and saving a meeting can attach the draft's notes.
-- At most one prompt is shown per detected app session. Not now suppresses
-  that session. Prompt actions are accepted only while their prompt ID is
-  current; stale or unknown actions are rejected without recording.
+- At most one prompt is shown per active meeting-presence episode for an app.
+  Any prompt action suppresses only that episode; after two consecutive
+  detector polls without active meeting audio, the next meeting may prompt
+  again even if the meeting app process remains open. Prompt actions are
+  accepted only while their prompt ID is current; stale or unknown actions
+  are rejected without recording.
 - Settings expose Meeting detection and Start with Windows. Tray status is
   “Detecting locally · not recording”, “Paused”, or “Off”.
 

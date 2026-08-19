@@ -54,10 +54,15 @@
     return () => unlisten?.();
   });
   let isOnboarding = $derived(page.url.pathname === "/onboarding");
+  let isMeetingPromptOverlay = $derived(
+    page.url.searchParams.get("window") === "meeting-prompt",
+  );
 </script>
 
 {#if isOnboarding}
   {@render children()}
+{:else if isMeetingPromptOverlay}
+  <MeetingPresencePrompt overlay />
 {:else}
   <div class="app" class:sidebar-collapsed={sidebarState.collapsed}>
     <Sidebar />

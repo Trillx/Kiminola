@@ -19,8 +19,13 @@ const START_WITH_WINDOWS_KEY: &str = "meeting_presence_start_with_windows";
 const EVENT_STATE: &str = "meeting-presence:state";
 const EVENT_PROMPT: &str = "meeting-presence:prompt";
 const EVENT_ACTION: &str = "meeting-presence:action";
+#[cfg(desktop)]
+const PROMPT_WINDOW_LABEL: &str = "meeting-prompt";
+#[cfg(target_os = "windows")]
+const TOAST_APPLICATION_ID: &str = "com.kiminola.app";
 const PROMPT_MESSAGE: &str = "You may be in a meeting. Want to jot notes?";
 const PROMPT_NOT_RECORDING_MESSAGE: &str = "Kimi Nola is not recording.";
+const INACTIVE_POLLS_BEFORE_SESSION_RESET: u8 = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -83,10 +88,11 @@ struct PendingPrompt {
 
 #[derive(Debug, Clone)]
 struct DetectionSession {
-    // Only suppression state survives a prompt; labels and evidence are kept
-    // on the current detection/prompt and are never retained here.
+    // Suppression and episode activity survive a prompt; labels and evidence
+    // are kept on the current detection/prompt and are never retained here.
     prompted: bool,
     suppressed: bool,
+    inactive_polls: u8,
 }
 
 #[derive(Default)]
@@ -421,6 +427,60 @@ fn emit_prompt(app: &tauri::AppHandle, prompt: &PendingPrompt) {
     );
 }
 
+#[cfg(desktop)]
+fn should_show_background_prompt(main_visible: bool, main_minimized: bool, main_focused: bool) -> bool {
+    !main_visible || main_minimized || !main_focused
+}
+
+#[cfg(desktop)]
+fn main_needs_background_prompt(app: &tauri::AppHandle) -> bool {
+    let Some(main) = app.get_webview_window("main") else {
+        return true;
+    };
+
+    should_show_background_prompt(
+        main.is_visible().unwrap_or(false),
+        main.is_minimized().unwrap_or(false),
+        main.is_focused().unwrap_or(false),
+    )
+}
+
+#[cfg(desktop)]
+pub(crate) fn sync_prompt_overlay(app: &tauri::AppHandle, state: &MeetingPresenceState) {
+    let Some(window) = app.get_webview_window(PROMPT_WINDOW_LABEL) else {
+        eprintln!("[meeting-presence] prompt overlay window is unavailable");
+        return;
+    };
+
+    if state.snapshot().prompt.is_none() || !main_needs_background_prompt(app) {
+        let _ = window.hide();
+        return;
+    }
+
+    if let (Ok(Some(monitor)), Ok(size)) = (window.current_monitor(), window.outer_size()) {
+        let work_area = monitor.work_area();
+        let margin = 20;
+        let x = work_area.position.x + work_area.size.width as i32 - size.width as i32 - margin;
+        let y = work_area.position.y + work_area.size.height as i32 - size.height as i32 - margin;
+        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)));
+    }
+
+    let _ = window.show();
+}
+
+#[cfg(desktop)]
+pub(crate) fn notify_background_prompt(app: &tauri::AppHandle, state: &MeetingPresenceState) {
+    sync_prompt_overlay(app, state);
+    if !main_needs_background_prompt(app) {
+        return;
+    }
+
+    let prompt = state.inner.data.lock().unwrap().prompt.clone();
+    if let Some(prompt) = prompt {
+        show_native_prompt(app, &prompt);
+    }
+}
+
 fn prompt_is_current(state: &MeetingPresenceState, prompt_id: &str) -> bool {
     state
         .inner
@@ -430,6 +490,27 @@ fn prompt_is_current(state: &MeetingPresenceState, prompt_id: &str) -> bool {
         .prompt
         .as_ref()
         .is_some_and(|prompt| prompt.id == prompt_id)
+}
+
+fn update_session_activity(session: &mut DetectionSession, active: bool) -> bool {
+    if active {
+        session.inactive_polls = 0;
+        return false;
+    }
+
+    if !session.prompted && !session.suppressed {
+        return false;
+    }
+
+    session.inactive_polls = session.inactive_polls.saturating_add(1);
+    if session.inactive_polls < INACTIVE_POLLS_BEFORE_SESSION_RESET {
+        return false;
+    }
+
+    session.prompted = false;
+    session.suppressed = false;
+    session.inactive_polls = 0;
+    true
 }
 
 fn apply_detections(
@@ -459,6 +540,12 @@ fn apply_detections(
         data.sessions
             .retain(|process_id, _| live_process_ids.contains(process_id));
 
+        for (process_id, session) in data.sessions.iter_mut() {
+            if update_session_activity(session, active_process_ids.contains(process_id)) {
+                changed = true;
+            }
+        }
+
         if let Some(prompt) = data.prompt.as_ref() {
             if !active_process_ids.contains(&prompt.process_id) {
                 data.prompt = None;
@@ -477,6 +564,7 @@ fn apply_detections(
                 DetectionSession {
                     prompted: false,
                     suppressed: false,
+                    inactive_polls: 0,
                 }
             });
         }
@@ -521,10 +609,13 @@ fn apply_detections(
     if changed {
         state.update_tray();
         emit_state(app, state);
+        #[cfg(desktop)]
+        sync_prompt_overlay(app, state);
     }
     if let Some(prompt) = prompt_to_emit {
         emit_prompt(app, &prompt);
-        show_native_prompt(app, &prompt);
+        #[cfg(desktop)]
+        notify_background_prompt(app, state);
     }
 }
 
@@ -552,6 +643,11 @@ fn start_detector(app: tauri::AppHandle, state: MeetingPresenceState) {
 }
 
 pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "windows")]
+    if let Err(error) = ensure_toast_shortcut() {
+        eprintln!("[meeting-presence] toast shortcut unavailable: {error}");
+    }
+
     let state = MeetingPresenceState::new();
     app.manage(state.clone());
 
@@ -653,19 +749,91 @@ fn tray_icon() -> Result<tauri::image::Image<'static>, Box<dyn std::error::Error
 }
 
 #[cfg(target_os = "windows")]
+fn ensure_toast_shortcut() -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::core::{Interface, PCWSTR, PROPVARIANT};
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+
+    fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
+        value.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok();
+    if let Err(error) = result {
+        return Err(format!("COM initialization failed: {error}"));
+    }
+
+    let result = (|| {
+        let appdata = std::env::var_os("APPDATA")
+            .ok_or_else(|| "APPDATA is unavailable".to_string())?;
+        let shortcut_dir = std::path::PathBuf::from(appdata)
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs");
+        std::fs::create_dir_all(&shortcut_dir).map_err(|error| error.to_string())?;
+
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let shortcut = shortcut_dir.join("Kimi Nola.lnk");
+        let executable_wide = wide(executable.as_os_str());
+        let shortcut_wide = wide(shortcut.as_os_str());
+        let description_wide = wide(std::ffi::OsStr::new("Local meeting notes"));
+
+        let shell_link: IShellLinkW = unsafe {
+            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+        }
+        .map_err(|error| error.to_string())?;
+        unsafe {
+            shell_link
+                .SetPath(PCWSTR(executable_wide.as_ptr()))
+                .map_err(|error| error.to_string())?;
+            shell_link
+                .SetDescription(PCWSTR(description_wide.as_ptr()))
+                .map_err(|error| error.to_string())?;
+        }
+
+        let property_store: IPropertyStore = shell_link.cast().map_err(|error| error.to_string())?;
+        let app_id: PROPVARIANT = TOAST_APPLICATION_ID.into();
+        unsafe {
+            property_store
+                .SetValue(&PKEY_AppUserModel_ID, &app_id)
+                .map_err(|error| error.to_string())?;
+            property_store.Commit().map_err(|error| error.to_string())?;
+        }
+
+        let persist_file: IPersistFile = shell_link.cast().map_err(|error| error.to_string())?;
+        unsafe {
+            persist_file
+                .Save(PCWSTR(shortcut_wide.as_ptr()), BOOL(1))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok::<(), String>(())
+    })();
+    unsafe { CoUninitialize() };
+    result
+}
+
+#[cfg(target_os = "windows")]
 fn show_native_prompt(app: &tauri::AppHandle, prompt: &PendingPrompt) {
     let app = app.clone();
     let prompt = prompt.clone();
     std::thread::spawn(move || {
         if let Err(error) = show_native_prompt_inner(&app, &prompt) {
             // Unpackaged NSIS installs may not have an AppUserModelID yet. The
-            // in-app prompt remains the canonical fallback in that case. If
-            // the window was hidden, reveal it so the user still gets an
-            // actionable on-screen prompt.
+            // app-owned background overlay remains the actionable fallback; do
+            // not focus or restore the main window from a notification error.
             eprintln!("[meeting-presence] native toast unavailable: {error}");
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
+            #[cfg(desktop)]
+            if let Some(state) = app.try_state::<MeetingPresenceState>() {
+                sync_prompt_overlay(&app, &state);
             }
         }
     });
@@ -684,21 +852,27 @@ fn show_native_prompt_inner(
     use windows::core::{HSTRING, IInspectable, Interface};
     use windows::Foundation::TypedEventHandler;
     use windows::UI::Notifications::{
-        ToastActivatedEventArgs, ToastNotification, ToastNotificationManager,
+        ToastActivatedEventArgs, ToastFailedEventArgs, ToastNotification, ToastNotificationManager,
     };
     use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
-
-    const APPLICATION_ID: &str = "com.kiminola.app";
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
     unsafe { RoInitialize(RO_INIT_MULTITHREADED)? };
     let result = (|| {
+        let application_id = HSTRING::from(TOAST_APPLICATION_ID);
+        if let Err(error) = unsafe { SetCurrentProcessExplicitAppUserModelID(&application_id) } {
+            eprintln!(
+                "[meeting-presence] process AppUserModelID could not be set HRESULT={:#010x}",
+                error.code().0 as u32
+            );
+        }
         let document = windows::Data::Xml::Dom::XmlDocument::new()?;
         document.LoadXml(&HSTRING::from(toast_xml(prompt)))?;
         let notification = ToastNotification::CreateToastNotification(&document)?;
         notification.SetTag(&HSTRING::from(prompt.id.as_str()))?;
 
         let notifier = match ToastNotificationManager::CreateToastNotifierWithId(
-            &HSTRING::from(APPLICATION_ID),
+            &application_id,
         ) {
             Ok(notifier) => notifier,
             Err(identity_error) => {
@@ -739,6 +913,22 @@ fn show_native_prompt_inner(
                 },
             );
         notification.Activated(&activated_handler)?;
+        let failed_handler: TypedEventHandler<ToastNotification, ToastFailedEventArgs> =
+            TypedEventHandler::new(
+                move |_toast: &Option<ToastNotification>, args: &Option<ToastFailedEventArgs>| {
+                    eprintln!(
+                        "[meeting-presence] native toast failed details_present={}",
+                        args.is_some()
+                    );
+                    Ok(())
+                },
+            );
+        notification.Failed(&failed_handler)?;
+        eprintln!(
+            "[meeting-presence] native toast submitted prompt={} setting={:?}",
+            prompt.id,
+            notifier.Setting().ok()
+        );
         notifier.Show(&notification)?;
 
         // Keep the WinRT notification and handler alive long enough for a
@@ -752,11 +942,15 @@ fn show_native_prompt_inner(
 }
 
 fn toast_xml(prompt: &PendingPrompt) -> String {
+    let app_label = xml_escape(&prompt.app_label);
+    let prompt_message = xml_escape(PROMPT_MESSAGE);
+    let not_recording_message = xml_escape(PROMPT_NOT_RECORDING_MESSAGE);
+
     format!(
-        r#"<toast launch="kiminola://meeting-prompt?prompt={}&amp;action=open">
+        r#"<toast duration="long" launch="kiminola://meeting-prompt?prompt={}&amp;action=open">
   <visual>
     <binding template="ToastGeneric">
-      <text>Kimi Nola</text>
+      <text>{}</text>
       <text>{}</text>
       <text>{}</text>
     </binding>
@@ -767,13 +961,23 @@ fn toast_xml(prompt: &PendingPrompt) -> String {
     <action content="Not now" arguments="kiminola://meeting-prompt?prompt={}&amp;action=not-now" activationType="foreground" />
   </actions>
 </toast>"#,
-        PROMPT_MESSAGE,
-        PROMPT_NOT_RECORDING_MESSAGE,
+        prompt.id,
+        app_label,
+        prompt_message,
+        not_recording_message,
         prompt.id,
         prompt.id,
         prompt.id,
-        prompt.id
     )
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn parse_toast_arguments(arguments: &str) -> (&str, &str) {
@@ -1237,8 +1441,52 @@ mod tests {
     use super::{
         friendly_app_label, is_known_meeting_process, DetectionSession, MeetingPresenceConfidence,
         MeetingPresenceEvidence, MeetingPresenceMode, MeetingPresenceState, PendingPrompt,
-        prompt_is_current,
+        prompt_is_current, should_show_background_prompt, toast_xml, update_session_activity,
+        PROMPT_MESSAGE,
+        PROMPT_NOT_RECORDING_MESSAGE,
     };
+
+    #[cfg(desktop)]
+    #[test]
+    fn background_prompt_is_required_when_main_is_unavailable_to_user() {
+        assert!(should_show_background_prompt(false, false, false));
+        assert!(should_show_background_prompt(true, true, false));
+        assert!(should_show_background_prompt(true, false, false));
+        assert!(!should_show_background_prompt(true, false, true));
+    }
+
+    #[test]
+    fn suppressed_session_rearms_after_meeting_audio_gap() {
+        let mut session = DetectionSession {
+            prompted: true,
+            suppressed: true,
+            inactive_polls: 0,
+        };
+
+        assert!(!update_session_activity(&mut session, false));
+        assert!(session.suppressed);
+        assert!(update_session_activity(&mut session, false));
+        assert!(!session.prompted);
+        assert!(!session.suppressed);
+    }
+
+    #[test]
+    fn toast_xml_shows_meeting_context_not_internal_prompt_id() {
+        let prompt = PendingPrompt {
+            id: "meeting-prompt-1".to_string(),
+            process_id: 42,
+            app_label: "Microsoft Teams".to_string(),
+            confidence: MeetingPresenceConfidence::Likely,
+            evidence: Vec::new(),
+        };
+
+        let xml = toast_xml(&prompt);
+        assert!(xml.contains("<text>Microsoft Teams</text>"));
+        assert!(xml.contains(PROMPT_MESSAGE));
+        assert!(xml.contains(PROMPT_NOT_RECORDING_MESSAGE));
+        assert!(!xml.contains("<text>meeting-prompt-1</text>"));
+        assert!(xml.contains("prompt=meeting-prompt-1"));
+    }
 
     #[test]
     fn known_apps_use_friendly_labels() {
@@ -1275,6 +1523,7 @@ mod tests {
                 DetectionSession {
                     prompted: true,
                     suppressed: false,
+                    inactive_polls: 0,
                 },
             );
             data.prompt = Some(PendingPrompt {

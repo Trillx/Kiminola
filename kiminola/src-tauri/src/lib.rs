@@ -54,8 +54,21 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::Focused(focused) if window.label() == "main" => {
+                if let Some(state) = window
+                    .app_handle()
+                    .try_state::<meeting_presence::MeetingPresenceState>()
+                {
+                    #[cfg(desktop)]
+                    if *focused {
+                        meeting_presence::sync_prompt_overlay(window.app_handle(), &state);
+                    } else {
+                        meeting_presence::notify_background_prompt(window.app_handle(), &state);
+                    }
+                }
+            }
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 if let Some(state) = window
                     .app_handle()
                     .try_state::<meeting_presence::MeetingPresenceState>()
@@ -63,9 +76,12 @@ pub fn run() {
                     if !state.is_quitting() {
                         api.prevent_close();
                         let _ = window.hide();
+                        #[cfg(desktop)]
+                        meeting_presence::notify_background_prompt(window.app_handle(), &state);
                     }
                 }
             }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             recording::start_recording,

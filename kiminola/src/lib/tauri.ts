@@ -1,5 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 export type TranscriptChannel = "you" | "others";
@@ -329,6 +329,14 @@ export interface MeetingPresenceAction {
   draft_id?: number;
 }
 
+const MEETING_PRESENCE_ACTION_EVENT = "meeting-presence:action";
+
+export async function sendMeetingPresenceActionToMain(
+  action: MeetingPresenceAction,
+): Promise<void> {
+  await emitTo("main", MEETING_PRESENCE_ACTION_EVENT, action);
+}
+
 export async function getMeetingPresenceState(): Promise<MeetingPresenceState> {
   return invoke("get_meeting_presence_state");
 }
@@ -376,7 +384,7 @@ export function onMeetingPresenceState(
 export function onMeetingPresenceAction(
   handler: (action: MeetingPresenceAction) => void,
 ): Promise<UnlistenFn> {
-  return listen<MeetingPresenceAction>("meeting-presence:action", (payload) => {
+  return listen<MeetingPresenceAction>(MEETING_PRESENCE_ACTION_EVENT, (payload) => {
     handler(payload.payload);
   });
 }
