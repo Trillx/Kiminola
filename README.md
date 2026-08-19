@@ -87,6 +87,17 @@ The desktop shell is Tauri 2. The Svelte frontend handles the library, recording
 | AI enhancement | Streaming OpenAI-compatible `ChatProvider` seam |
 | Secrets | Windows Credential Manager via `keyring` |
 
+## Install
+
+There is no public installer yet. The first Windows x64 and ARM64 installers will be published on [GitHub Releases](https://github.com/Trillx/Kiminola/releases). Until then, use the source setup below.
+
+When a release is available, choose:
+
+- **x64** for Intel and AMD Windows PCs
+- **ARM64** for Snapdragon and other Windows-on-ARM PCs
+
+The first launch downloads the pinned Nemotron speech model (about 632 MB) and stores it locally. An internet connection is required for that initial download; optional AI note enhancement also contacts only the provider you configure.
+
 ## Build from source
 
 ### Prerequisites
@@ -96,16 +107,23 @@ The desktop shell is Tauri 2. The Svelte frontend handles the library, recording
 - Rust stable with the MSVC toolchain
 - Visual Studio Build Tools with **Desktop development with C++**
 - LLVM installed at `C:\Program Files\LLVM`
-- sherpa-onnx 1.13.5 shared Windows libraries for your target architecture
+- sherpa-onnx 1.13.5 shared Windows libraries for your target architecture, available from the [upstream release assets](https://github.com/k2-fsa/sherpa-onnx/releases)
 
-The native sherpa-onnx library location is configured in [`kiminola/src-tauri/.cargo/config.toml`](./kiminola/src-tauri/.cargo/config.toml). Update `SHERPA_ONNX_LIB_DIR` for your checkout before building the Rust backend.
+The native sherpa-onnx package is not committed to this repository. Download and extract the matching x64 or ARM64 shared package under `kiminola/src-tauri/`, then set `SHERPA_ONNX_LIB_DIR` to its `lib` directory in the PowerShell session that runs Cargo or Tauri.
 
 ```powershell
 git clone https://github.com/Trillx/Kiminola.git
 cd Kiminola\kiminola
 npm install
+
+# Replace the example folder name with the package you downloaded.
+$sherpaRoot = Resolve-Path ".\src-tauri\sherpa-onnx-v1.13.5-win-arm64-shared-MD-Release"
+$env:SHERPA_ONNX_LIB_DIR = Join-Path $sherpaRoot.Path "lib"
+
 npm run tauri dev
 ```
+
+On ARM64, ensure `C:\Program Files\LLVM\bin` is on `PATH` before running Cargo. The repository Cargo config supplies the clang and libclang paths used by the ARM64 toolchain.
 
 Frontend-only development does not require the native Rust dependencies:
 
@@ -127,7 +145,9 @@ cargo check
 cargo test
 ```
 
-On Windows ARM64, ensure `C:\Program Files\LLVM\bin` is on `PATH` before running Cargo.
+For a packaged Windows build, run `npm run tauri build` from `kiminola/` after the validation commands.
+
+The commands above verify the frontend, Rust code, and build pipeline. They do not prove that live microphone capture, system-audio loopback, model loading, or transcription work on a particular machine. Changes to those areas should also be checked by launching `npm run tauri dev`, completing onboarding, recording a short test meeting, and confirming that the **You** and **Others** transcript lanes update.
 
 ## Project structure
 
@@ -156,7 +176,7 @@ Work outside the MVP—calendar integration, automatic meeting detection, audio 
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Before proposing a feature, check the MVP boundary in [`SPEC.md`](./SPEC.md). Please keep the privacy promise intact, avoid adding analytics, and run the frontend and Rust validation commands above.
+Issues and focused pull requests are welcome. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the development setup, validation checklist, bug-report details, and pull-request expectations. Before proposing a feature, check the MVP boundary in [`SPEC.md`](./SPEC.md). Please keep the privacy promise intact and avoid adding analytics.
 
 The visual identity is intentionally constrained. New product surfaces should follow [`kiminola/branding/HANDOFF.md`](./kiminola/branding/HANDOFF.md): no gradients, no off-palette colors, and one gold emphasis per view.
 
