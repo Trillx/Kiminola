@@ -118,3 +118,40 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_test_runtime {
+    use std::ffi::{c_void, OsStr};
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn FreeLibrary(module: *mut c_void) -> i32;
+        fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+        fn LoadLibraryW(name: *const u16) -> *mut c_void;
+    }
+
+    #[test]
+    fn common_controls_v6_is_active_for_test_harness() {
+        let library_name: Vec<u16> = OsStr::new("comctl32.dll")
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+
+        // The tray/menu dependency imports this symbol when Common Controls
+        // v6 is enabled. This assertion catches a test executable that was
+        // linked without the activation manifest required to resolve it.
+        let module = unsafe { LoadLibraryW(library_name.as_ptr()) };
+        assert!(!module.is_null(), "could not load comctl32.dll");
+
+        let symbol = b"TaskDialogIndirect\0";
+        let entry_point = unsafe { GetProcAddress(module, symbol.as_ptr()) };
+        unsafe {
+            FreeLibrary(module);
+        }
+        assert!(
+            !entry_point.is_null(),
+            "Common Controls v6 is not active for this test executable"
+        );
+    }
+}
