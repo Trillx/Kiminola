@@ -5,5 +5,5 @@
 CC_aarch64-pc-windows-msvc = { value = "C:\\Program Files\\LLVM\\bin\\clang-cl.exe", force = true }
 CXX_aarch64-pc-windows-msvc = { value = "C:\\Program Files\\LLVM\\bin\\clang-cl.exe", force = true }
 LIBCLANG_PATH = { value = "C:\\Program Files\\LLVM\\bin", force = true }
-# sherpa-onnx prebuilt win-arm64 libs (download from GitHub releases).
-SHERPA_ONNX_LIB_DIR = { value = "C:\\Users\\miker\\Apps\\Kimi Work\\Kiminola\\kiminola\\src-tauri\\sherpa-onnx-v1.13.5-win-arm64-shared-MD-Release\\lib", force = true }
+# Each checkout and target architecture uses a different downloaded sherpa-onnx
+# package. Set SHERPA_ONNX_LIB_DIR in the shell that invokes Cargo or Tauri.

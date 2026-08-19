@@ -23,4 +23,4 @@ cargo check
 cargo test
 ```
 
-On Windows ARM64, add `C:\Program Files\LLVM\bin` to `PATH` before running Cargo. The local sherpa-onnx shared-library path is configured in `src-tauri/.cargo/config.toml`.
+On Windows ARM64, add `C:\Program Files\LLVM\bin` to `PATH` before running Cargo. Set `SHERPA_ONNX_LIB_DIR` to the extracted package's `src-tauri\...\lib` directory before running Cargo or Tauri; the [repository README](../README.md#build-from-source) has the full setup.
