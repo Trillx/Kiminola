@@ -87,6 +87,17 @@ The desktop shell is Tauri 2. The Svelte frontend handles the library, recording
 | AI enhancement | Streaming OpenAI-compatible `ChatProvider` seam |
 | Secrets | Windows Credential Manager via `keyring` |
 
+## Install
+
+There is no public installer yet. The first Windows x64 and ARM64 installers will be published on [GitHub Releases](https://github.com/Trillx/Kiminola/releases). Until then, use the source setup below.
+
+When a release is available, choose:
+
+- **x64** for Intel and AMD Windows PCs
+- **ARM64** for Snapdragon and other Windows-on-ARM PCs
+
+The first launch downloads the pinned Nemotron speech model (about 632 MB) and stores it locally. An internet connection is required for that initial download; optional AI note enhancement also contacts only the provider you configure.
+
 ## Build from source
 
 ### Prerequisites
@@ -99,9 +110,7 @@ The desktop shell is Tauri 2. The Svelte frontend handles the library, recording
 - Internet access for the first native dependency bootstrap
 
 The native dependency bootstrap downloads the official sherpa-onnx 1.13.5
-shared package for the selected architecture, verifies its published SHA-256
-digest, stages the runtime DLLs for Tauri, and sets the linker environment.
-Dot-source it so the environment remains active for the next command:
+shared package for the selected architecture from the [upstream release assets](https://github.com/k2-fsa/sherpa-onnx/releases), verifies its published SHA-256 digest, stages the runtime DLLs for Tauri, and sets the linker environment. The native package is not committed to this repository.
 
 ```powershell
 git clone https://github.com/Trillx/Kiminola.git
@@ -111,8 +120,7 @@ npm install
 npm run tauri dev
 ```
 
-Use `aarch64-pc-windows-msvc` instead for an ARM64 build. The same bootstrap is
-required before `cargo check`, `cargo test`, or a release build.
+Use `aarch64-pc-windows-msvc` instead for an ARM64 build. The same bootstrap is required before `cargo check`, `cargo test`, or a release build; it also adds LLVM to `PATH` for the current PowerShell session.
 
 ### Build an installer locally
 
@@ -145,8 +153,9 @@ cargo check
 cargo test
 ```
 
-On Windows ARM64, run the bootstrap with `aarch64-pc-windows-msvc`; it also
-adds LLVM to `PATH` for the current PowerShell session.
+For a packaged Windows build, run `npm run tauri build` from `kiminola/` after the validation commands.
+
+The commands above verify the frontend, Rust code, and build pipeline. They do not prove that live microphone capture, system-audio loopback, model loading, or transcription work on a particular machine. Changes to those areas should also be checked by launching `npm run tauri dev`, completing onboarding, recording a short test meeting, and confirming that the **You** and **Others** transcript lanes update.
 
 ## Project structure
 
@@ -189,7 +198,7 @@ Work outside the MVP—calendar integration, automatic meeting detection, audio 
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Before proposing a feature, check the MVP boundary in [`SPEC.md`](./SPEC.md). Please keep the privacy promise intact, avoid adding analytics, and run the frontend and Rust validation commands above.
+Issues and focused pull requests are welcome. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the development setup, validation checklist, bug-report details, and pull-request expectations. Before proposing a feature, check the MVP boundary in [`SPEC.md`](./SPEC.md). Please keep the privacy promise intact and avoid adding analytics.
 
 The visual identity is intentionally constrained. New product surfaces should follow [`kiminola/branding/HANDOFF.md`](./kiminola/branding/HANDOFF.md): no gradients, no off-palette colors, and one gold emphasis per view.
 
