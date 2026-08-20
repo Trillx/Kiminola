@@ -36,7 +36,10 @@ chrono = { version = "0.4", features = ["serde"] }
 png = "0.17"
 cpal = "0.15"
 rubato = "0.16"
-ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
+# Native ONNX Runtime DLLs are supplied by scripts/prepare-native-deps.ps1.
+# Disable ort's automatic download/copy behavior so ort-sys and sherpa-onnx-sys
+# do not race while copying the same Windows runtime DLLs into Cargo output.
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "tracing", "api-27"] }
 ndarray = "0.17"
 # Shared linking against the prebuilt sherpa-onnx C API (see .cargo/config.toml
 # SHERPA_ONNX_LIB_DIR); the default `static` feature expects static libs the

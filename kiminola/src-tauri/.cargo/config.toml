@@ -2,8 +2,8 @@
 # aarch64-pc-windows-msvc; bindgen (sherpa-onnx FFI, wave 2) needs libclang.
 # Both live in the winget-installed LLVM, which is not on PATH by default.
 [env]
-CC_aarch64-pc-windows-msvc = { value = "C:\\Program Files\\LLVM\\bin\\clang-cl.exe", force = true }
-CXX_aarch64-pc-windows-msvc = { value = "C:\\Program Files\\LLVM\\bin\\clang-cl.exe", force = true }
-LIBCLANG_PATH = { value = "C:\\Program Files\\LLVM\\bin", force = true }
-# Each checkout and target architecture uses a different downloaded sherpa-onnx
-# package. Set SHERPA_ONNX_LIB_DIR in the shell that invokes Cargo or Tauri.
+CC_aarch64-pc-windows-msvc = { value = "C:\\Program Files\\LLVM\\bin\\clang-cl.exe", force = false }
+CXX_aarch64-pc-windows-msvc = { value = "C:\\Program Files\\LLVM\\bin\\clang-cl.exe", force = false }
+LIBCLANG_PATH = { value = "C:\\Program Files\\LLVM\\bin", force = false }
+# SHERPA_ONNX_LIB_DIR is supplied by scripts/prepare-native-deps.ps1 so clean
+# checkouts and both Windows architectures use the matching native package.

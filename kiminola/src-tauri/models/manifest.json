@@ -1,0 +1,32 @@
+{
+  "name": "sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8",
+  "repo": "csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25",
+  "revision": "main",
+  "total_bytes": 663919416,
+  "files": [
+    {
+      "name": "encoder.int8.onnx",
+      "path": "encoder.int8.onnx",
+      "bytes": 652916849,
+      "sha256": "71111f61b18e1e65e01e369434a5c0434868d2f44892742ae54240600c681209"
+    },
+    {
+      "name": "decoder.int8.onnx",
+      "path": "decoder.int8.onnx",
+      "bytes": 7257753,
+      "sha256": "0be9702c2f427a2b6bb241d298e0d3836a558de1f5b9fd3018f1cce6e2b3fa98"
+    },
+    {
+      "name": "joiner.int8.onnx",
+      "path": "joiner.int8.onnx",
+      "bytes": 1735862,
+      "sha256": "a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23"
+    },
+    {
+      "name": "tokens.txt",
+      "path": "tokens.txt",
+      "bytes": 8952,
+      "sha256": "PLACEHOLDER_FILL_BEFORE_RELEASE_tokens_txt"
+    }
+  ]
+}

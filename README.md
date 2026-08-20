@@ -107,23 +107,30 @@ The first launch downloads the pinned Nemotron speech model (about 632 MB) and s
 - Rust stable with the MSVC toolchain
 - Visual Studio Build Tools with **Desktop development with C++**
 - LLVM installed at `C:\Program Files\LLVM`
-- sherpa-onnx 1.13.5 shared Windows libraries for your target architecture, available from the [upstream release assets](https://github.com/k2-fsa/sherpa-onnx/releases)
+- Internet access for the first native dependency bootstrap
 
-The native sherpa-onnx package is not committed to this repository. Download and extract the matching x64 or ARM64 shared package under `kiminola/src-tauri/`, then set `SHERPA_ONNX_LIB_DIR` to its `lib` directory in the PowerShell session that runs Cargo or Tauri.
+The native dependency bootstrap downloads the official sherpa-onnx 1.13.5
+shared package for the selected architecture from the [upstream release assets](https://github.com/k2-fsa/sherpa-onnx/releases), verifies its published SHA-256 digest, stages the runtime DLLs for Tauri, and sets the linker environment. The native package is not committed to this repository.
 
 ```powershell
 git clone https://github.com/Trillx/Kiminola.git
 cd Kiminola\kiminola
 npm install
-
-# Replace the example folder name with the package you downloaded.
-$sherpaRoot = Resolve-Path ".\src-tauri\sherpa-onnx-v1.13.5-win-arm64-shared-MD-Release"
-$env:SHERPA_ONNX_LIB_DIR = Join-Path $sherpaRoot.Path "lib"
-
+. .\scripts\prepare-native-deps.ps1 -Target x86_64-pc-windows-msvc
 npm run tauri dev
 ```
 
-On ARM64, ensure `C:\Program Files\LLVM\bin` is on `PATH` before running Cargo. The repository Cargo config supplies the clang and libclang paths used by the ARM64 toolchain.
+Use `aarch64-pc-windows-msvc` instead for an ARM64 build. The same bootstrap is required before `cargo check`, `cargo test`, or a release build; it also adds LLVM to `PATH` for the current PowerShell session.
+
+### Build an installer locally
+
+```powershell
+cd kiminola
+. .\scripts\prepare-native-deps.ps1 -Target x86_64-pc-windows-msvc
+npm.cmd run tauri build -- --target x86_64-pc-windows-msvc
+```
+
+The NSIS installer is written under `kiminola/src-tauri/target/<target>/release/bundle/nsis/`.
 
 Frontend-only development does not require the native Rust dependencies:
 
@@ -139,6 +146,7 @@ npm run dev
 cd kiminola
 npm run check
 npm run build
+. .\scripts\prepare-native-deps.ps1 -Target x86_64-pc-windows-msvc
 
 cd src-tauri
 cargo check
@@ -167,10 +175,24 @@ Kiminola/
 ## Road to the first release
 
 - Finalize and verify every Model pack manifest hash
-- Make native sherpa-onnx setup portable across clean x64 and ARM64 checkouts
-- Add Windows x64 and ARM64 release CI
 - Produce signed NSIS installers and portable archives
 - Enable signed Tauri updater manifests through GitHub Releases
+
+### GitHub release automation
+
+Pull requests and pushes to `main` build both Windows installers. To create a
+release candidate, update the app version in
+`kiminola/src-tauri/tauri.conf.json`, commit it to `main`, and push the exact
+matching tag:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions then builds x64 and ARM64 NSIS installers and creates a draft
+GitHub Release with both assets. Test the draft before publishing it. Signing
+and updater manifests remain separate release-readiness steps.
 
 Work outside the MVP—calendar integration, automatic meeting detection, audio retention, semantic search, speaker diarization, and fully local LLM enhancement—remains intentionally deferred.
 

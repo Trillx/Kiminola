@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-release:
+    name: Release Windows ${{ matrix.arch }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: ARM64
+            target: aarch64-pc-windows-msvc
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches app version
+        shell: pwsh
+        working-directory: kiminola
+        run: |
+          $config = Get-Content -Raw 'src-tauri/tauri.conf.json' | ConvertFrom-Json
+          $expectedTag = "v$($config.version)"
+          if ($expectedTag -ne '${{ github.ref_name }}') {
+            throw "Release tag '${{ github.ref_name }}' does not match app version '$($config.version)'."
+          }
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: kiminola/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: kiminola/src-tauri
+          shared-key: ${{ matrix.target }}
+
+      - name: Install LLVM
+        shell: pwsh
+        run: choco install llvm --yes --no-progress
+
+      - name: Install frontend dependencies
+        working-directory: kiminola
+        run: npm.cmd ci
+
+      - name: Check frontend
+        working-directory: kiminola
+        run: npm.cmd run check
+
+      - name: Prepare native dependencies
+        working-directory: kiminola
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: .\scripts\prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
+
+      - name: Build and upload draft release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: kiminola
+          tagName: ${{ github.ref_name }}
+          releaseName: Kimi Nola ${{ github.ref_name }}
+          releaseBody: |
+            Windows x64 and ARM64 installers for Kimi Nola ${{ github.ref_name }}.
+
+            This release is a draft until the installers have been tested.
+          releaseDraft: true
+          generateReleaseNotes: true
+          uploadUpdaterJson: false
+          args: --target ${{ matrix.target }}
