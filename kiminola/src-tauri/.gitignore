@@ -9,4 +9,5 @@
 # Downloaded sherpa-onnx prebuilt libs and local model files (not committed)
 /sherpa-onnx-*/
 /sherpa-onnx-*.tar.bz2
-/models/
+/models/*
+!/models/manifest.json
