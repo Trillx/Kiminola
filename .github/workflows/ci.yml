@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-build:
+    name: Windows ${{ matrix.arch }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: ARM64
+            target: aarch64-pc-windows-msvc
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: kiminola/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: kiminola/src-tauri
+          shared-key: ${{ matrix.target }}
+
+      - name: Install LLVM
+        shell: pwsh
+        run: choco install llvm --yes --no-progress
+
+      - name: Install frontend dependencies
+        working-directory: kiminola
+        run: npm.cmd ci
+
+      - name: Check frontend
+        working-directory: kiminola
+        run: npm.cmd run check
+
+      - name: Prepare native dependencies
+        working-directory: kiminola
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: .\scripts\prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
+
+      - name: Build installer
+        working-directory: kiminola
+        run: npm.cmd run tauri build -- --target ${{ matrix.target }}
