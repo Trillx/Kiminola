@@ -1,0 +1,11 @@
+{
+  "strictness": 2,
+  "commentTypes": [
+    "logic",
+    "syntax",
+    "style"
+  ],
+  "triggerOnUpdates": true,
+  "shouldUpdateDescription": false,
+  "fixWithAI": true
+}
