@@ -8,6 +8,7 @@
   // Which spaces are expanded in the tree (all expanded by default).
   let collapsedSpaces = $state<Record<number, boolean>>({});
   let spacesList = $state<Space[]>([]);
+  let spacesLoadError = $state<string | null>(null);
 
   // Inline space creation
   let addingSpace = $state(false);
@@ -62,6 +63,22 @@
 
   let pathname = $derived(page.url.pathname);
 
+  function errorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === "string") return error;
+    return "The database request failed.";
+  }
+
+  async function loadSpaces() {
+    try {
+      spacesList = await listSpaces();
+      spacesLoadError = null;
+    } catch (err) {
+      spacesLoadError = errorMessage(err);
+      console.error("Failed to load spaces:", err);
+    }
+  }
+
   $effect(() => {
     if (addingSpace && spaceInputRef) {
       spaceInputRef.focus();
@@ -72,9 +89,16 @@
   // meeting being saved right before the app routes to its detail page.
   $effect(() => {
     pathname;
-    listSpaces()
-      .then((s) => (spacesList = s))
-      .catch((err) => console.error("Failed to load spaces:", err));
+    void loadSpaces();
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void loadSpaces();
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   });
 </script>
 
@@ -129,6 +153,13 @@
         onkeydown={onSpaceInputKeydown}
         onblur={confirmCreateSpace}
       />
+    {/if}
+
+    {#if spacesLoadError}
+      <div class="empty-state" role="status" style="margin: 8px 12px; padding: 12px; font-size: 12px;">
+        Spaces could not be loaded.
+        <button class="btn btn-ghost btn-sm" style="margin-top: 8px;" onclick={() => void loadSpaces()}>Retry</button>
+      </div>
     {/if}
 
     {#each spacesList as space (space.id)}
