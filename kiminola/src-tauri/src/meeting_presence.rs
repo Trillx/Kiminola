@@ -365,8 +365,25 @@ pub async fn start_recording_from_meeting_prompt(
     state: State<'_, MeetingPresenceState>,
     prompt_id: String,
 ) -> Result<(), String> {
-    state.claim_prompt(&prompt_id)?;
-    emit_state(&app, &state);
+    start_recording_from_prompt(&app, &state, &prompt_id)
+}
+
+fn start_recording_from_prompt(
+    app: &tauri::AppHandle,
+    state: &MeetingPresenceState,
+    prompt_id: &str,
+) -> Result<(), String> {
+    let prompt = state.claim_prompt(prompt_id)?;
+    #[cfg(desktop)]
+    {
+        show_main_window(app);
+        if let Err(error) = crate::window_layout::apply(app, prompt.process_id) {
+            // Window arrangement is a convenience around the explicit start
+            // action; a platform window quirk must never block recording.
+            eprintln!("[window-layout] companion layout unavailable: {error}");
+        }
+    }
+    emit_state(app, state);
     Ok(())
 }
 
@@ -1000,7 +1017,7 @@ fn parse_toast_arguments(arguments: &str) -> (&str, &str) {
     (prompt_id, action)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(desktop)]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -1044,9 +1061,7 @@ async fn apply_native_prompt_action(
             Ok(())
         }
         "start" => {
-            state.claim_prompt(prompt_id)?;
-            show_main_window(app);
-            emit_state(app, &state);
+            start_recording_from_prompt(app, &state, prompt_id)?;
             let _ = app.emit(EVENT_ACTION, serde_json::json!({ "action": "start" }));
             Ok(())
         }

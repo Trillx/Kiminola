@@ -9,6 +9,7 @@ mod recording;
 mod recording_session;
 mod resampler;
 mod shortcuts;
+mod window_layout;
 // Parked for now: sherpa-onnx endpointing drives the transcript, so nothing
 // consumes VAD output yet. Kept compiled for reuse (e.g. a speaking indicator).
 #[allow(dead_code)]

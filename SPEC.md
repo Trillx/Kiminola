@@ -56,6 +56,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Live transcript auto-scrolls; scrollbar hidden until user scrolls.
 - Global hotkey: configurable start/stop (Tauri global-shortcut plugin), sensible default.
 - Onboarding: minimal first-run wizard — mic permission → model download with progress → optional BYOK key (skippable).
+- Companion layout: when the user chooses **Start recording** from a Meeting prompt, Kimi Nola arranges the detected meeting window on the left at roughly two-thirds of the active display and its own Notepad window on the right at roughly one-third. The arrangement is a starting point: normal windows may be resized, true full-screen/presentation windows are not forced to change, and user movement/resizing is never overridden.
 
 ## 6. Data model & storage
 

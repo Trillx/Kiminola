@@ -13,6 +13,7 @@ Canonical language for the project. Implementation details do not belong here.
 - **Notepad** — the user's own rough notes typed in a Note draft or during a Meeting. Optional; enhancement works without it.
 - **Meeting presence hint** — a local, non-authoritative signal that a supported meeting application or its audio activity suggests the user may be in a meeting. It is not a Capture session and never records audio by itself.
 - **Meeting prompt** — a user-visible notification shown after a Meeting presence hint, offering a choice such as opening a Notepad or starting a Capture session. It never starts capture without explicit confirmation.
+- **Companion layout** — a temporary side-by-side arrangement used when the user starts a Capture session from a Meeting prompt: the meeting application remains visible alongside Kimi Nola's Notepad. It is a starting arrangement, not a locked layout; the user may resize or reposition the windows.
 - **Background companion** — Kimi Nola's resident mode after the main window closes, limited to local Meeting presence hints and prompts. It never captures audio and ends only when the user explicitly quits or disables it.
 - **Note enhancement** — the post-meeting LLM pass that produces structured notes: a baseline summary from the transcript alone, merged with the Notepad contents when present.
 - **Model pack** — a downloadable on-device ASR model the user installs to power transcription. Audio never leaves the machine.

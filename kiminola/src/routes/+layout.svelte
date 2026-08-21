@@ -11,6 +11,7 @@
   import MeetingPresencePrompt from "$lib/components/MeetingPresencePrompt.svelte";
 
   let { children } = $props();
+  let compactWindow = $state(false);
 
   // Reflect theme + sidebar state onto the document so the CSS variables
   // (--sidebar-width drives all fixed-position math) stay in sync.
@@ -19,10 +20,25 @@
   });
 
   $effect(() => {
+    const useCompactShell = compactWindow || sidebarState.collapsed;
     document.documentElement.style.setProperty(
       "--sidebar-width",
-      sidebarState.collapsed ? "0px" : "240px",
+      useCompactShell ? "0px" : "240px",
     );
+    document.documentElement.dataset.compactWindow = compactWindow ? "true" : "false";
+  });
+
+  // A companion layout can make the main window much narrower than the
+  // library's normal width. Collapse the navigation chrome at that width
+  // without changing the user's saved sidebar preference.
+  onMount(() => {
+    const media = window.matchMedia("(max-width: 760px)");
+    const syncCompactWindow = () => {
+      compactWindow = media.matches;
+    };
+    syncCompactWindow();
+    media.addEventListener("change", syncCompactWindow);
+    return () => media.removeEventListener("change", syncCompactWindow);
   });
 
   // Onboarding gate: the library is inaccessible until onboarding completes.

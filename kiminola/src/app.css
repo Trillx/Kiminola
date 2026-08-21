@@ -334,6 +334,22 @@ h1, h2, h3 {
   display: none;
 }
 
+/* Automatic compact shell for a narrow companion window. This is driven by
+   the viewport, while the user's persisted sidebar preference remains intact. */
+html[data-compact-window="true"] .sidebar {
+  width: 0;
+  padding: 20px 0 16px;
+  border-right: none;
+}
+
+html[data-compact-window="true"] .sidebar > *:not(.sidebar-collapse-btn) {
+  display: none;
+}
+
+html[data-compact-window="true"] .sidebar-collapse-btn {
+  left: 16px;
+}
+
 /* Floating edge collapse button (stays visible when collapsed) */
 .sidebar-collapse-btn {
   position: fixed;
@@ -1842,4 +1858,46 @@ h1, h2, h3 {
   color: var(--soft);
   z-index: 899;
   transition: left 200ms ease;
+}
+
+/* === Narrow companion window === */
+@media (max-width: 760px) {
+  .main-content {
+    padding: 24px 20px 100px;
+  }
+
+  .topbar {
+    padding: 12px 16px;
+  }
+
+  .recording-top {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .recording-title {
+    font-size: 20px;
+  }
+
+  .notepad-hero {
+    min-height: 280px;
+    padding: 16px;
+  }
+
+  .recording-actions {
+    flex-wrap: wrap;
+  }
+
+  .recording-actions .btn {
+    flex: 1 1 120px;
+  }
+
+  .transcript-strip,
+  .transcript-sheet {
+    width: calc(100vw - 24px);
+  }
+
+  .transcript-sheet {
+    height: min(60vh, 480px);
+  }
 }
