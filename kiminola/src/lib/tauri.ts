@@ -19,6 +19,10 @@ export interface AudioPressureEvent {
   loopback_dropped_samples: number;
 }
 
+export interface RecordingStartStatus {
+  meeting_audio_available: boolean;
+}
+
 export interface TranscriptLine {
   id?: number;
   utterance_id?: number;
@@ -30,8 +34,8 @@ export interface TranscriptLine {
   is_partial?: boolean;
 }
 
-export async function startRecording(): Promise<void> {
-  await invoke("start_recording");
+export async function startRecording(): Promise<RecordingStartStatus> {
+  return invoke("start_recording");
 }
 
 export async function stopRecording(): Promise<TranscriptEvent[]> {
@@ -42,8 +46,8 @@ export async function pauseRecording(): Promise<void> {
   await invoke("pause_recording");
 }
 
-export async function resumeRecording(): Promise<void> {
-  await invoke("resume_recording");
+export async function resumeRecording(): Promise<RecordingStartStatus> {
+  return invoke("resume_recording");
 }
 
 export function onTranscriptEvent(

@@ -8,8 +8,8 @@ use tokio::sync::Mutex;
 
 use crate::asr::{resolve_asr_model_dir, AsrEngine};
 use crate::recording_session::{
-    AudioPressureEvent, AudioSource, DefaultAudioSource, RecordingSession, TranscriptEvent,
-    TranscriptSink,
+    AudioPressureEvent, AudioSource, DefaultAudioSource, RecordingSession, RecordingStartStatus,
+    TranscriptEvent, TranscriptSink,
 };
 
 /// Shared Tauri state for recording.
@@ -169,7 +169,7 @@ impl TranscriptSink for TauriTranscriptSink {
 pub async fn start_recording(
     app: AppHandle,
     state: State<'_, RecordingState>,
-) -> Result<(), String> {
+) -> Result<RecordingStartStatus, String> {
     let mut session = state.session.lock().await;
     if session.is_some() {
         return Err("recording already in progress".into());
@@ -193,15 +193,18 @@ pub async fn start_recording(
     });
     let new_session = RecordingSession::new(audio_source, engine, sink);
 
-    if let Err(error) = new_session.start().await {
-        state.set_active(false);
-        return Err(error);
-    }
+    let start_status = match new_session.start().await {
+        Ok(status) => status,
+        Err(error) => {
+            state.set_active(false);
+            return Err(error);
+        }
+    };
     *session = Some(ActiveRecording {
         session: new_session,
         transcript_store,
     });
-    Ok(())
+    Ok(start_status)
 }
 
 /// Stops the active recording session and returns the authoritative latest
@@ -239,7 +242,9 @@ pub async fn pause_recording(state: State<'_, RecordingState>) -> Result<(), Str
 
 /// Resumes a paused recording session by rebuilding the capture streams.
 #[tauri::command]
-pub async fn resume_recording(state: State<'_, RecordingState>) -> Result<(), String> {
+pub async fn resume_recording(
+    state: State<'_, RecordingState>,
+) -> Result<RecordingStartStatus, String> {
     let session = state.session.lock().await;
     let Some(active) = session.as_ref() else {
         return Err("no recording in progress".into());
@@ -294,8 +299,7 @@ mod tests {
         let store = TranscriptEventStore::default();
         store.record(&event(8, 2, "recover this text"));
 
-        let snapshot =
-            snapshot_after_finalization(Err("flush timed out".into()), &store);
+        let snapshot = snapshot_after_finalization(Err("flush timed out".into()), &store);
 
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].text, "recover this text");

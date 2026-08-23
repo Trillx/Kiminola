@@ -48,6 +48,11 @@ pub struct AudioPressureEvent {
     pub loopback_dropped_samples: u64,
 }
 
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct RecordingStartStatus {
+    pub meeting_audio_available: bool,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AudioPressureCounters {
     mic_dropped_samples: AtomicU64,
@@ -285,15 +290,30 @@ fn build_mic_stream(
     let err_fn = |err| eprintln!("mic stream error: {err}");
 
     let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => {
-            build_input_stream::<f32>(&device, &stream_config, channels, audio_tx, pressure, err_fn)?
-        }
-        cpal::SampleFormat::I16 => {
-            build_input_stream::<i16>(&device, &stream_config, channels, audio_tx, pressure, err_fn)?
-        }
-        cpal::SampleFormat::U16 => {
-            build_input_stream::<u16>(&device, &stream_config, channels, audio_tx, pressure, err_fn)?
-        }
+        cpal::SampleFormat::F32 => build_input_stream::<f32>(
+            &device,
+            &stream_config,
+            channels,
+            audio_tx,
+            pressure,
+            err_fn,
+        )?,
+        cpal::SampleFormat::I16 => build_input_stream::<i16>(
+            &device,
+            &stream_config,
+            channels,
+            audio_tx,
+            pressure,
+            err_fn,
+        )?,
+        cpal::SampleFormat::U16 => build_input_stream::<u16>(
+            &device,
+            &stream_config,
+            channels,
+            audio_tx,
+            pressure,
+            err_fn,
+        )?,
         fmt => return Err(format!("unsupported sample format: {fmt}")),
     };
 
@@ -429,7 +449,7 @@ impl RecordingSession {
         *self.state.lock().await
     }
 
-    pub async fn start(&self) -> Result<(), String> {
+    pub async fn start(&self) -> Result<RecordingStartStatus, String> {
         {
             let mut state = self.state.lock().await;
             if *state != SessionState::Idle {
@@ -447,6 +467,9 @@ impl RecordingSession {
                 *self.state.lock().await = SessionState::Idle;
                 return Err(e);
             }
+        };
+        let start_status = RecordingStartStatus {
+            meeting_audio_available: stream.loopback_sample_rate > 0,
         };
 
         // Forward buffers from the source's ephemeral channel into the persistent
@@ -469,7 +492,7 @@ impl RecordingSession {
         *self.consumer_handle.lock().await = Some(handle);
 
         *self.state.lock().await = SessionState::Recording;
-        Ok(())
+        Ok(start_status)
     }
 
     pub async fn stop(&self) -> Result<(), String> {
@@ -522,7 +545,7 @@ impl RecordingSession {
         Ok(())
     }
 
-    pub async fn resume(&self) -> Result<(), String> {
+    pub async fn resume(&self) -> Result<RecordingStartStatus, String> {
         {
             let mut state = self.state.lock().await;
             if *state != SessionState::Paused {
@@ -546,12 +569,15 @@ impl RecordingSession {
                 return Err(e);
             }
         };
+        let start_status = RecordingStartStatus {
+            meeting_audio_available: stream.loopback_sample_rate > 0,
+        };
 
         let forwarder_rx = stream.audio_rx;
         tokio::spawn(run_forwarder(forwarder_rx, internal_tx));
 
         *self.state.lock().await = SessionState::Recording;
-        Ok(())
+        Ok(start_status)
     }
 }
 
@@ -1000,13 +1026,15 @@ mod tests {
 
         assert_eq!(session.state().await, SessionState::Idle);
 
-        session.start().await.unwrap();
+        let started = session.start().await.unwrap();
+        assert!(!started.meeting_audio_available);
         assert_eq!(session.state().await, SessionState::Recording);
 
         session.pause().await.unwrap();
         assert_eq!(session.state().await, SessionState::Paused);
 
-        session.resume().await.unwrap();
+        let resumed = session.resume().await.unwrap();
+        assert!(!resumed.meeting_audio_available);
         assert_eq!(session.state().await, SessionState::Recording);
 
         session.stop().await.unwrap();

@@ -56,6 +56,8 @@
   let controlBusy = $state(false);
   let controlError = $state<{ action: "pause" | "resume"; message: string } | null>(null);
   let audioPressure = $state<AudioPressureEvent | null>(null);
+  let meetingAudioAvailable = $state<boolean | null>(null);
+  let meetingAudioWarningDismissed = $state(false);
   let nativeSessionActive = false;
   let requestedDraftId = NaN;
   let noteDraftId = $state<number | null>(null);
@@ -178,9 +180,12 @@
     phase = "starting";
     startError = null;
     audioPressure = null;
+    meetingAudioAvailable = null;
+    meetingAudioWarningDismissed = false;
     try {
       if (noteDraftId === null) await prepareNoteDraft(requestedDraftId);
-      await startRecording();
+      const status = await startRecording();
+      meetingAudioAvailable = status.meeting_audio_available;
       nativeSessionActive = true;
       phase = "recording";
     } catch (error) {
@@ -270,7 +275,9 @@
     controlBusy = true;
     controlError = null;
     try {
-      await resumeRecording();
+      const status = await resumeRecording();
+      meetingAudioAvailable = status.meeting_audio_available;
+      meetingAudioWarningDismissed = false;
       phase = "recording";
     } catch (error) {
       controlError = {
@@ -424,6 +431,23 @@
       </div>
     {/if}
 
+    {#if meetingAudioAvailable === false && !meetingAudioWarningDismissed}
+      <div class="recording-source-warning" role="alert">
+        <div>
+          <strong>Other participants aren't being captured.</strong>
+          <span>
+            Your microphone is still recording, but Windows meeting audio is unavailable. Make
+            sure the call is playing through this computer, then pause and resume to retry.
+          </span>
+        </div>
+        <Button
+          size="sm"
+          variant="ghost"
+          onclick={() => (meetingAudioWarningDismissed = true)}>Dismiss</Button
+        >
+      </div>
+    {/if}
+
     {#if audioPressure}
       <div class="recording-audio-warning" role="alert">
         <div>
@@ -572,6 +596,7 @@
   .recording-start-error,
   .recording-finish-error,
   .recording-control-error,
+  .recording-source-warning,
   .recording-audio-warning {
     display: flex;
     align-items: center;
@@ -589,6 +614,7 @@
   .recording-start-error > div:first-child,
   .recording-finish-error > div:first-child,
   .recording-control-error > div:first-child,
+  .recording-source-warning > div:first-child,
   .recording-audio-warning > div:first-child {
     display: grid;
     gap: 3px;
@@ -597,6 +623,7 @@
   .recording-start-error span,
   .recording-finish-error span,
   .recording-control-error span,
+  .recording-source-warning span,
   .recording-audio-warning span {
     color: var(--text-muted);
   }
@@ -677,6 +704,7 @@
     .recording-start-error,
     .recording-finish-error,
     .recording-control-error,
+    .recording-source-warning,
     .recording-audio-warning {
       align-items: stretch;
       flex-direction: column;
