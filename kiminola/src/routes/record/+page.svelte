@@ -10,6 +10,13 @@
     recoverableTranscript,
   } from "$lib/transcript-state";
   import { createDraftAutosave, type DraftAutosave } from "$lib/draft-autosave";
+  import {
+    canStopRecording,
+    recordingPhaseLabel,
+    shouldAdvanceElapsed,
+    shouldDiscardAutoDraft,
+    type RecordingPhase,
+  } from "$lib/recording-ui-state";
   import { Button } from "$lib/components/ui/button";
   import { Textarea } from "$lib/components/ui/textarea";
   import * as Dialog from "$lib/components/ui/dialog";
@@ -23,6 +30,7 @@
     getNoteDraft,
     updateNoteDraftRecovery,
     deleteNoteDraft,
+    openMicrophonePrivacySettings,
     onTranscriptEvent,
     onRecordingQuitBlocked,
     type TranscriptEvent,
@@ -37,8 +45,10 @@
   let elapsed = $state(0);
   let lines = $state<TranscriptLine[]>([]);
   let transcriptOpen = $state(false);
-  let paused = $state(false);
-  let stopping = $state(false);
+  let phase = $state<RecordingPhase>("starting");
+  let startError = $state<string | null>(null);
+  let nativeSessionActive = false;
+  let requestedDraftId = NaN;
   let noteDraftId = $state<number | null>(null);
   let quitBlocked = $state(false);
   let recoveryDraftCreated = $state(false);
@@ -56,7 +66,14 @@
   let timerText = $derived(
     `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`,
   );
-  let statusLabel = $derived(paused ? "Paused" : "Recording");
+  let statusLabel = $derived(recordingPhaseLabel(phase));
+  let stopping = $derived(phase === "stopping");
+
+  function errorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === "string") return error;
+    return "Windows could not start the microphone.";
+  }
 
   function recoverySnapshot(): RecoverySnapshot {
     return {
@@ -136,9 +153,25 @@
     noteAutosave = undefined;
   }
 
+  async function prepareAndStart() {
+    phase = "starting";
+    startError = null;
+    try {
+      if (noteDraftId === null) await prepareNoteDraft(requestedDraftId);
+      await startRecording();
+      nativeSessionActive = true;
+      phase = "recording";
+    } catch (error) {
+      nativeSessionActive = false;
+      phase = "failed";
+      startError = errorMessage(error);
+      console.error("Failed to start recording:", error);
+    }
+  }
+
   onMount(() => {
     const timer = setInterval(() => {
-      if (!paused) {
+      if (shouldAdvanceElapsed(phase)) {
         elapsed += 1;
         if (elapsed % 5 === 0) checkpointRecovery();
       }
@@ -146,7 +179,7 @@
     let unlisten: (() => void)[] = [];
 
     const draftParam = page.url.searchParams.get("draft");
-    const requestedDraftId = draftParam ? Number(draftParam) : NaN;
+    requestedDraftId = draftParam ? Number(draftParam) : NaN;
 
     const startPromise = Promise.all([
       onTranscriptEvent((event: TranscriptEvent) => {
@@ -159,11 +192,12 @@
     ])
       .then(async (listeners) => {
         unlisten = listeners;
-        await prepareNoteDraft(requestedDraftId);
-        await startRecording();
+        await prepareAndStart();
       })
       .catch((err) => {
-        console.error("Failed to start recording:", err);
+        phase = "failed";
+        startError = errorMessage(err);
+        console.error("Failed to initialize recording:", err);
       });
 
     return () => {
@@ -178,26 +212,30 @@
       // so we don't try to stop a session that hasn't started yet.
       startPromise.finally(() => {
         for (const listener of unlisten) listener();
-        stopRecording().catch(() => {
-          // Best-effort cleanup; the backend may already have stopped.
-        });
+        if (nativeSessionActive) {
+          nativeSessionActive = false;
+          stopRecording().catch(() => {
+            // Best-effort cleanup; the backend may already have stopped.
+          });
+        }
       });
     };
   });
 
   async function pause() {
     await pauseRecording();
-    paused = true;
+    phase = "paused";
   }
 
   async function resume() {
     await resumeRecording();
-    paused = false;
+    phase = "recording";
   }
 
   async function finishAndNavigate(mode: "generate" | "enhance") {
-    stopping = true;
+    phase = "stopping";
     const finalEvents = await stopRecording();
+    nativeSessionActive = false;
     for (const event of finalEvents) {
       lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
     }
@@ -214,8 +252,9 @@
   }
 
   async function stopMeeting() {
-    stopping = true;
+    phase = "stopping";
     const finalEvents = await stopRecording();
+    nativeSessionActive = false;
     for (const event of finalEvents) {
       lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
     }
@@ -232,11 +271,15 @@
   }
 
   async function cancel() {
-    stopping = true;
-    if (!recoveryDraftCreated) await flushNoteCheckpoint();
+    const discardAutoDraft = shouldDiscardAutoDraft(recoveryDraftCreated, nativeSessionActive);
+    phase = "stopping";
+    if (!discardAutoDraft) await flushNoteCheckpoint();
     closeNoteAutosave();
-    await stopRecording();
-    if (recoveryDraftCreated && noteDraftId !== null) {
+    if (nativeSessionActive) {
+      await stopRecording();
+      nativeSessionActive = false;
+    }
+    if (discardAutoDraft && noteDraftId !== null) {
       await deleteNoteDraft(noteDraftId).catch((error) => {
         console.error("Failed to remove cancelled recovery draft:", error);
       });
@@ -246,8 +289,8 @@
 
   function onDialogOpenChange(open: boolean) {
     // Closing the pause dialog resumes recording.
-    if (!open && paused) {
-      resume();
+    if (!open && phase === "paused") {
+      void resume();
     }
   }
 </script>
@@ -263,13 +306,34 @@
         <div class="recording-title">{title}</div>
         <div class="recording-meta">{statusLabel} · {timerText}</div>
       </div>
-      <div class="recording-badge" class:paused>{statusLabel}</div>
+      <div
+        class="recording-badge"
+        class:paused={phase === "paused"}
+        class:inactive={phase !== "recording"}
+      >{statusLabel}</div>
     </div>
 
-    <div class="waveform" aria-hidden="true">
+    <div class="waveform" class:inactive={phase !== "recording"} aria-hidden="true">
       <span></span><span></span><span></span><span></span><span></span><span></span><span
       ></span><span></span><span></span><span></span><span></span><span></span>
     </div>
+
+    {#if phase === "failed"}
+      <div class="recording-start-error" role="alert">
+        <div>
+          <strong>Recording couldn't start.</strong>
+          <span>{startError}</span>
+        </div>
+        <div class="recording-start-error-actions">
+          <Button size="sm" onclick={prepareAndStart}>Try again</Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onclick={() => void openMicrophonePrivacySettings()}
+          >Microphone settings</Button>
+        </div>
+      </div>
+    {/if}
 
     <div class="notepad-hero">
       <div class="notepad-header">
@@ -287,9 +351,15 @@
     </div>
 
     <div class="recording-actions">
-      <Button variant="outline" onclick={cancel} disabled={stopping}>Cancel</Button>
-      <Button variant="secondary" onclick={pause} disabled={paused || stopping}>Pause</Button>
-      <Button variant="destructive" onclick={stopMeeting} disabled={stopping}>
+      <Button variant="outline" onclick={cancel} disabled={phase === "starting" || stopping}>
+        {phase === "failed" ? "Back to meetings" : "Cancel"}
+      </Button>
+      <Button variant="secondary" onclick={pause} disabled={phase !== "recording"}>Pause</Button>
+      <Button
+        variant="destructive"
+        onclick={stopMeeting}
+        disabled={!canStopRecording(phase) || stopping}
+      >
         Stop meeting
       </Button>
     </div>
@@ -306,7 +376,7 @@
   </div>
 </div>
 
-<Dialog.Root bind:open={paused} onOpenChange={onDialogOpenChange}>
+<Dialog.Root open={phase === "paused"} onOpenChange={onDialogOpenChange}>
   <Dialog.Content showCloseButton={false} class="sm:max-w-sm">
     <Dialog.Header>
       <Dialog.Title>Meeting paused</Dialog.Title>
@@ -356,6 +426,51 @@
     color: var(--soft);
   }
 
+  :global(.recording-badge.inactive) {
+    background: var(--surface);
+    color: var(--text-muted);
+  }
+
+  :global(.recording-badge.inactive::before) {
+    background: var(--soft);
+    animation: none;
+  }
+
+  :global(.waveform.inactive span) {
+    animation-play-state: paused;
+    opacity: 0.35;
+    transform: scaleY(0.15);
+  }
+
+  .recording-start-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+    padding: 14px 16px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .recording-start-error > div:first-child {
+    display: grid;
+    gap: 3px;
+  }
+
+  .recording-start-error span {
+    color: var(--text-muted);
+  }
+
+  .recording-start-error-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+  }
+
   .pause-timer {
     text-align: center;
     font-size: 14px;
@@ -400,5 +515,16 @@
 
   .recording-quit-warning span {
     color: var(--text-muted);
+  }
+
+  @media (max-width: 680px) {
+    .recording-start-error {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .recording-start-error-actions {
+      flex-wrap: wrap;
+    }
   }
 </style>
