@@ -85,6 +85,8 @@ jobs:
       - name: Verify tag matches all app versions
         shell: pwsh
         working-directory: kiminola
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           $config = Get-Content -Raw 'src-tauri/tauri.conf.json' | ConvertFrom-Json
           $package = Get-Content -Raw 'package.json' | ConvertFrom-Json
@@ -94,8 +96,8 @@ jobs:
             throw "App versions are not synchronized: $($versions -join ', ')."
           }
           $expectedTag = "v$($config.version)"
-          if ($expectedTag -ne '${{ github.ref_name }}') {
-            throw "Release tag '${{ github.ref_name }}' does not match app version '$($config.version)'."
+          if ($expectedTag -ne $env:RELEASE_TAG) {
+            throw "Release tag '$env:RELEASE_TAG' does not match app version '$($config.version)'."
           }
 
       - name: Verify updater signing secret
