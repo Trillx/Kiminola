@@ -40,6 +40,12 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Recording view: full-screen notepad; live transcript pill bottom-left; stop button reads "Stop meeting".
 - Post-meeting view: pill tabs **My notes** / **Enhance Notes** / **Transcript**. Default tab: **My notes**.
 - Theme: light/dark; dark mode uses warm amber accent on deep charcoal canvas.
+- Updates: after the main app launches, Kimi Nola performs one non-blocking
+  check against the published stable GitHub Release feed. A visible update
+  notice offers release details, but download and installation always require
+  explicit user approval. Installation is disabled and re-checked while the
+  active recording route is open; a passive Windows installer restarts the app
+  after a successful update. Settings also exposes a manual check.
 
 ### 4.2 Rust backend
 
@@ -49,7 +55,12 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - **Persistence**: sqlx + SQLite; tables for meetings, timestamped transcript segments, notes, spaces, templates, settings. Each Meeting has exactly one direct container (`space_id` or `parent_meeting_id`), and recursive location paths are computed for library views and exports.
 - **LLM enhancement**: ChatProvider trait with streaming SSE; sends transcript text + raw notes + template prompt to the configured cloud provider.
 - **Model manager**: downloads ASR model on first run from Hugging Face; verifies SHA-256; stores in `%LOCALAPPDATA%\Kiminola\models`.
-- **Updater**: Tauri updater plugin with GitHub Releases JSON manifest.
+- **Updater**: Tauri updater plugin with one embedded public key and the stable
+  `https://github.com/Trillx/Kiminola/releases/latest/download/latest.json`
+  endpoint. The release workflow signs the x64 and ARM64 NSIS artifacts and
+  publishes one manifest only after both architecture assets are present.
+  Drafts and prereleases are never offered by the client; releases move
+  forward only, and a bad release is corrected with a higher patch version.
 
 ## 5. UI/UX decisions
 
@@ -141,8 +152,13 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 ## 9. Packaging & distribution
 
 - **Installer**: NSIS `.exe` for x64 + ARM64; portable `.zip` secondary artifact.
-- **Signing**: SignPath.io OSS program primary; self-signed/unsigned fallback.
-- **Auto-update**: Tauri built-in updater + GitHub Releases JSON manifest.
+- **Signing**: SignPath.io OSS Authenticode signing is separate from the Tauri
+  updater signing key. The updater public key is committed; its private key and
+  password exist only in GitHub Actions secrets and an offline maintainer
+  backup.
+- **Auto-update**: Tauri built-in updater + GitHub Releases JSON manifest. Tag
+  pushes create a draft, build x64 and ARM64 assets in parallel, then generate
+  `latest.json` in a serialized validation job before manual publication.
 - **Channels**: GitHub Releases primary; winget secondary; Microsoft Store post-MVP.
 - **CI**: GitHub Actions — x64 native on `windows-latest`; ARM64 cross-compiled to `aarch64-pc-windows-msvc` from x64 runner. Fallback: manual/self-hosted ARM64 builds on Snapdragon X Elite.
 
@@ -158,3 +174,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - **Validation**: Snapdragon X Elite Copilot+ PC (32 GB) for ARM64; GitHub Actions for x64 CI.
 - **Spike results**: native ARM64 WASAPI loopback delivered non-silent packets; sherpa-onnx v1.13.5 Nemotron INT8 ran at 0.14 weighted RTF, 865 MiB peak working set, 2.6% normalized WER.
 - **Transcript regression matrix**: remote-only playback is `Others`; local-only mic speech is `You`; double-talk retains both lanes; speaker bleed does not create a duplicate `You` line; short acknowledgements are not over-suppressed; and stop waits for finalized text with monotonic audio-relative timing.
+- **Update regression**: on both x64 and ARM64, install a prior stable build,
+  preserve a meeting/database marker and the downloaded model, accept a signed
+  update, and verify the new app launches once with both data locations intact.
+  A green CI build is not runtime proof of updater safety.

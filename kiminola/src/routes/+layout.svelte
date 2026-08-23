@@ -9,7 +9,9 @@
   import Sidebar from "$lib/components/Sidebar.svelte";
   import Topbar from "$lib/components/Topbar.svelte";
   import MeetingPresencePrompt from "$lib/components/MeetingPresencePrompt.svelte";
+  import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import { libraryDestinationState, recordingHref } from "$lib/library-tree.svelte";
+  import { startAutomaticUpdateCheck } from "$lib/update.svelte";
 
   let { children } = $props();
   let compactWindow = $state(false);
@@ -72,6 +74,10 @@
   let isMeetingPromptOverlay = $derived(
     page.url.searchParams.get("window") === "meeting-prompt",
   );
+
+  $effect(() => {
+    if (!isOnboarding && !isMeetingPromptOverlay) startAutomaticUpdateCheck();
+  });
 </script>
 
 {#if isOnboarding}
@@ -85,6 +91,7 @@
       <Topbar />
       {@render children()}
       <MeetingPresencePrompt />
+      <UpdateBanner />
     </main>
   </div>
 {/if}
