@@ -34,6 +34,7 @@
     updateNoteDraftRecovery,
     deleteNoteDraft,
     openMicrophonePrivacySettings,
+    openModelFolder,
     onTranscriptEvent,
     onAudioPressure,
     onRecordingQuitBlocked,
@@ -58,6 +59,8 @@
   let audioPressure = $state<AudioPressureEvent | null>(null);
   let meetingAudioAvailable = $state<boolean | null>(null);
   let meetingAudioWarningDismissed = $state(false);
+  let transcriptionAvailable = $state<boolean | null>(null);
+  let transcriptionWarningDismissed = $state(false);
   let nativeSessionActive = false;
   let requestedDraftId = NaN;
   let noteDraftId = $state<number | null>(null);
@@ -182,10 +185,13 @@
     audioPressure = null;
     meetingAudioAvailable = null;
     meetingAudioWarningDismissed = false;
+    transcriptionAvailable = null;
+    transcriptionWarningDismissed = false;
     try {
       if (noteDraftId === null) await prepareNoteDraft(requestedDraftId);
       const status = await startRecording();
       meetingAudioAvailable = status.meeting_audio_available;
+      transcriptionAvailable = status.transcription_available;
       nativeSessionActive = true;
       phase = "recording";
     } catch (error) {
@@ -278,6 +284,8 @@
       const status = await resumeRecording();
       meetingAudioAvailable = status.meeting_audio_available;
       meetingAudioWarningDismissed = false;
+      transcriptionAvailable = status.transcription_available;
+      transcriptionWarningDismissed = false;
       phase = "recording";
     } catch (error) {
       controlError = {
@@ -448,6 +456,29 @@
       </div>
     {/if}
 
+    {#if transcriptionAvailable === false && !transcriptionWarningDismissed}
+      <div class="recording-transcription-warning" role="alert">
+        <div>
+          <strong>Live transcription isn't available.</strong>
+          <span>
+            The local speech model could not load. Your typed notes still save for recovery, but
+            spoken audio will not appear in the transcript. Finish this meeting, then reinstall
+            the model pack from setup.
+          </span>
+        </div>
+        <div class="recording-start-error-actions">
+          <Button size="sm" variant="outline" onclick={() => void openModelFolder()}>
+            Open model folder
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onclick={() => (transcriptionWarningDismissed = true)}>Dismiss</Button
+          >
+        </div>
+      </div>
+    {/if}
+
     {#if audioPressure}
       <div class="recording-audio-warning" role="alert">
         <div>
@@ -597,6 +628,7 @@
   .recording-finish-error,
   .recording-control-error,
   .recording-source-warning,
+  .recording-transcription-warning,
   .recording-audio-warning {
     display: flex;
     align-items: center;
@@ -615,6 +647,7 @@
   .recording-finish-error > div:first-child,
   .recording-control-error > div:first-child,
   .recording-source-warning > div:first-child,
+  .recording-transcription-warning > div:first-child,
   .recording-audio-warning > div:first-child {
     display: grid;
     gap: 3px;
@@ -624,6 +657,7 @@
   .recording-finish-error span,
   .recording-control-error span,
   .recording-source-warning span,
+  .recording-transcription-warning span,
   .recording-audio-warning span {
     color: var(--text-muted);
   }
@@ -705,6 +739,7 @@
     .recording-finish-error,
     .recording-control-error,
     .recording-source-warning,
+    .recording-transcription-warning,
     .recording-audio-warning {
       align-items: stretch;
       flex-direction: column;

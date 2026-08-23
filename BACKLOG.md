@@ -4,7 +4,7 @@ Ordered by user impact: data loss and crashes first, then broken flows, test gap
 
 ## Queued
 
-- [ ] **P1 · Surface unavailable local transcription.** Recording intentionally continues when the on-device ASR model cannot load, but the UI does not explain that no live transcript will be produced.
+- [ ] **P1 · Retry ASR loading after in-app model installation.** The launch-time ASR cache can permanently retain `None`, so downloading the model during onboarding may still require an unexplained app restart before transcription works.
 - [ ] **P2 · Surface transcript-finalization warnings.** A timed-out final ASR flush now preserves and saves the latest snapshot, but the warning is only written to the local log.
 - [ ] **P2 · Base elapsed duration on a monotonic clock.** The one-second UI interval can drift while the app is suspended or the window is hidden.
 
@@ -18,3 +18,4 @@ Ordered by user impact: data loss and crashes first, then broken flows, test gap
 - [x] **P1 · Surface pause and resume failures.** In-flight capture controls cannot race Stop; pause failure leaves recording active with an explanation, while resume failure keeps the paused dialog open with retry and microphone-settings actions. Verified 2026-08-23.
 - [x] **P1 · Detect audio capture queue pressure.** Microphone and meeting-audio callbacks now count dropped samples without blocking, emit throttled source-specific health events, and warn when transcript gaps may have occurred. Verified 2026-08-23.
 - [x] **P1 · Surface loopback capture availability.** Start and resume now report whether Windows meeting audio opened successfully; microphone-only sessions warn that other participants are not being captured and explain how to retry. Verified 2026-08-23.
+- [x] **P1 · Surface unavailable local transcription.** Start and resume now report whether the on-device ASR engine is present; capture continues safely while the recording view explains that spoken content will not be transcribed and links to the local model folder. Verified 2026-08-23.

@@ -21,6 +21,7 @@ export interface AudioPressureEvent {
 
 export interface RecordingStartStatus {
   meeting_audio_available: boolean;
+  transcription_available: boolean;
 }
 
 export interface TranscriptLine {

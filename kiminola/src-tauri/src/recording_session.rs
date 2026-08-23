@@ -51,6 +51,7 @@ pub struct AudioPressureEvent {
 #[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct RecordingStartStatus {
     pub meeting_audio_available: bool,
+    pub transcription_available: bool,
 }
 
 #[derive(Debug, Default)]
@@ -470,6 +471,7 @@ impl RecordingSession {
         };
         let start_status = RecordingStartStatus {
             meeting_audio_available: stream.loopback_sample_rate > 0,
+            transcription_available: self.asr_engine.is_some(),
         };
 
         // Forward buffers from the source's ephemeral channel into the persistent
@@ -571,6 +573,7 @@ impl RecordingSession {
         };
         let start_status = RecordingStartStatus {
             meeting_audio_available: stream.loopback_sample_rate > 0,
+            transcription_available: self.asr_engine.is_some(),
         };
 
         let forwarder_rx = stream.audio_rx;
@@ -1028,6 +1031,7 @@ mod tests {
 
         let started = session.start().await.unwrap();
         assert!(!started.meeting_audio_available);
+        assert!(!started.transcription_available);
         assert_eq!(session.state().await, SessionState::Recording);
 
         session.pause().await.unwrap();
@@ -1035,6 +1039,7 @@ mod tests {
 
         let resumed = session.resume().await.unwrap();
         assert!(!resumed.meeting_audio_available);
+        assert!(!resumed.transcription_available);
         assert_eq!(session.state().await, SessionState::Recording);
 
         session.stop().await.unwrap();
@@ -1101,7 +1106,8 @@ mod tests {
         let sink = fake_sink();
         let session = RecordingSession::new(source, Some(engine), sink.clone());
 
-        session.start().await.unwrap();
+        let started = session.start().await.unwrap();
+        assert!(started.transcription_available);
 
         let mut found = false;
         for _ in 0..200 {
