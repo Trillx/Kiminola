@@ -24,6 +24,11 @@ export interface RecordingStartStatus {
   transcription_available: boolean;
 }
 
+export interface RecordingStopResult {
+  transcript: TranscriptEvent[];
+  finalization_warning: string | null;
+}
+
 export interface TranscriptLine {
   id?: number;
   utterance_id?: number;
@@ -39,7 +44,7 @@ export async function startRecording(): Promise<RecordingStartStatus> {
   return invoke("start_recording");
 }
 
-export async function stopRecording(): Promise<TranscriptEvent[]> {
+export async function stopRecording(): Promise<RecordingStopResult> {
   return invoke("stop_recording");
 }
 

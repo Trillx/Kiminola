@@ -25,6 +25,12 @@ struct ActiveRecording {
     transcript_store: Arc<TranscriptEventStore>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct RecordingStopResult {
+    pub transcript: Vec<TranscriptEvent>,
+    pub finalization_warning: Option<String>,
+}
+
 #[derive(Default)]
 struct TranscriptEventStore {
     latest: SyncMutex<HashMap<u64, TranscriptEvent>>,
@@ -49,17 +55,22 @@ impl TranscriptEventStore {
     }
 }
 
-fn snapshot_after_finalization(
+fn result_after_finalization(
     stop_result: Result<(), String>,
     store: &TranscriptEventStore,
-) -> Vec<TranscriptEvent> {
-    if let Err(error) = stop_result {
+) -> RecordingStopResult {
+    let finalization_warning = stop_result.err().map(|error| {
         // A final ASR flush can time out after the live transcript has already
         // accumulated useful revisions. Returning that authoritative snapshot
         // is safer than trapping the frontend before it can persist anything.
         eprintln!("[recording] transcript finalization warning: {error}");
+        "The final speech-processing pass did not finish, so the last few words may be missing."
+            .to_string()
+    });
+    RecordingStopResult {
+        transcript: store.snapshot(),
+        finalization_warning,
     }
-    store.snapshot()
 }
 
 const PENDING_LOOPBACK_TARGET_TTL: Duration = Duration::from_secs(60);
@@ -230,15 +241,18 @@ pub async fn start_recording(
 #[tauri::command]
 pub async fn stop_recording(
     state: State<'_, RecordingState>,
-) -> Result<Vec<TranscriptEvent>, String> {
+) -> Result<RecordingStopResult, String> {
     let mut session = state.session.lock().await;
     let Some(active) = session.take() else {
         state.set_active(false);
-        return Ok(Vec::new());
+        return Ok(RecordingStopResult {
+            transcript: Vec::new(),
+            finalization_warning: None,
+        });
     };
     let stop_result = active.session.stop().await;
     state.set_active(false);
-    Ok(snapshot_after_finalization(
+    Ok(result_after_finalization(
         stop_result,
         &active.transcript_store,
     ))
@@ -349,10 +363,20 @@ mod tests {
         let store = TranscriptEventStore::default();
         store.record(&event(8, 2, "recover this text"));
 
-        let snapshot = snapshot_after_finalization(Err("flush timed out".into()), &store);
+        let result = result_after_finalization(Err("flush timed out".into()), &store);
 
-        assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].text, "recover this text");
+        assert_eq!(result.transcript.len(), 1);
+        assert_eq!(result.transcript[0].text, "recover this text");
+        assert!(result.finalization_warning.is_some());
+    }
+
+    #[test]
+    fn successful_finalization_has_no_warning() {
+        let store = TranscriptEventStore::default();
+        let result = result_after_finalization(Ok(()), &store);
+
+        assert!(result.transcript.is_empty());
+        assert!(result.finalization_warning.is_none());
     }
 
     #[test]

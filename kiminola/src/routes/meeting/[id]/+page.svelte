@@ -37,6 +37,7 @@
   let notFound = $state(false);
   let tab = $state<Tab>("mynotes");
   let notes = $state("");
+  let showTranscriptFinalizationWarning = $state(false);
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Inline title editing
@@ -143,10 +144,12 @@
   $effect(() => {
     const id = Number(page.params.id);
     const mode = page.url.searchParams.get("mode");
+    const warning = page.url.searchParams.get("warning");
     meeting = null;
     notFound = false;
     tab = "mynotes";
     notes = "";
+    showTranscriptFinalizationWarning = warning === "transcript-finalization";
     enhancedMd = "";
     enhancedHtml = "";
     enhancedGenerated = false;
@@ -416,6 +419,33 @@
         {/if}
       </div>
 
+      {#if showTranscriptFinalizationWarning}
+        <div class="finalization-warning" role="alert">
+          <div>
+            <strong>Meeting saved, but the transcript may end early.</strong>
+            <span>
+              The final speech-processing pass did not finish, so the last few words may be
+              missing. Your notes and the rest of the transcript were saved.
+            </span>
+          </div>
+          <div class="finalization-warning-actions">
+            <Button
+              size="sm"
+              variant="outline"
+              onclick={() => {
+                tab = "transcript";
+                showTranscriptFinalizationWarning = false;
+              }}>Review transcript</Button
+            >
+            <Button
+              size="sm"
+              variant="ghost"
+              onclick={() => (showTranscriptFinalizationWarning = false)}>Dismiss</Button
+            >
+          </div>
+        </div>
+      {/if}
+
       <Tabs.Root value={tab} onValueChange={(value) => (tab = value as Tab)} class="w-full">
         <Tabs.List class="pill-tabs-list">
           <Tabs.Trigger value="mynotes" class="pill-tab">My notes</Tabs.Trigger>
@@ -615,6 +645,45 @@
     margin-top: 8px;
     font-size: 13px;
     color: var(--text-muted);
+  }
+
+  .finalization-warning {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 16px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .finalization-warning > div:first-child {
+    display: grid;
+    gap: 3px;
+  }
+
+  .finalization-warning span {
+    color: var(--text-muted);
+  }
+
+  .finalization-warning-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+  }
+
+  @media (max-width: 680px) {
+    .finalization-warning {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .finalization-warning-actions {
+      flex-wrap: wrap;
+    }
   }
 
   .export-reveal {

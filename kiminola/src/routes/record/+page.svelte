@@ -54,6 +54,7 @@
   let phase = $state<RecordingPhase>("starting");
   let startError = $state<string | null>(null);
   let finishError = $state<string | null>(null);
+  let transcriptFinalizationWarning = $state<string | null>(null);
   let controlBusy = $state(false);
   let controlError = $state<{ action: "pause" | "resume"; message: string } | null>(null);
   let audioPressure = $state<AudioPressureEvent | null>(null);
@@ -182,6 +183,7 @@
   async function prepareAndStart() {
     phase = "starting";
     startError = null;
+    transcriptFinalizationWarning = null;
     audioPressure = null;
     meetingAudioAvailable = null;
     meetingAudioWarningDismissed = false;
@@ -306,9 +308,10 @@
     let meetingId: number;
     try {
       if (nativeSessionActive) {
-        const finalEvents = await stopRecording();
+        const stopResult = await stopRecording();
         nativeSessionActive = false;
-        for (const event of finalEvents) {
+        transcriptFinalizationWarning = stopResult.finalization_warning;
+        for (const event of stopResult.transcript) {
           lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
         }
       }
@@ -329,8 +332,11 @@
 
     closeNoteAutosave();
     pendingFinishMode = null;
-    const suffix = mode === "save" ? "" : `?mode=${mode}`;
-    await goto(`/meeting/${meetingId}${suffix}`);
+    const params = new URLSearchParams();
+    if (mode !== "save") params.set("mode", mode);
+    if (transcriptFinalizationWarning) params.set("warning", "transcript-finalization");
+    const query = params.toString();
+    await goto(`/meeting/${meetingId}${query ? `?${query}` : ""}`);
   }
 
   function retryFinish() {
