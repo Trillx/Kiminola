@@ -181,6 +181,7 @@
             snapshot.rawMarkdown,
             snapshot.durationSeconds,
             snapshot.transcript,
+            recordingLocation,
           );
         } catch (error) {
           console.error("Failed to checkpoint recording notes:", error);
@@ -201,6 +202,11 @@
   async function prepareNoteDraft(requestedDraftId: number) {
     if (Number.isFinite(requestedDraftId)) {
       const draft = await getNoteDraft(requestedDraftId);
+      recordingLocation = recordingLocationFromSearchParams(
+        page.url.searchParams,
+        libraryDestinationState.last,
+        draft.recovery_location,
+      );
       noteDraftId = draft.id;
       notepad = draft.raw_markdown;
       restoreElapsedDuration(draft.recovery_duration_seconds);
@@ -211,7 +217,11 @@
     }
 
     try {
-      const draftId = await createNoteDraft();
+      recordingLocation = recordingLocationFromSearchParams(
+        page.url.searchParams,
+        libraryDestinationState.last,
+      );
+      const draftId = await createNoteDraft(recordingLocation);
       noteDraftId = draftId;
       recoveryDraftCreated = true;
       configureNoteAutosave(draftId);
@@ -326,7 +336,7 @@
     requestedDraftId = draftParam ? Number(draftParam) : NaN;
     recordingLocation = recordingLocationFromSearchParams(
       page.url.searchParams,
-      libraryDestinationState.last,
+      null,
     );
 
     const startPromise = Promise.all([

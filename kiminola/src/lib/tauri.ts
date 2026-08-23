@@ -114,6 +114,7 @@ export interface NoteDraftDetail extends NoteDraftSummary {
   meeting_id: number | null;
   recovery_duration_seconds: number;
   recovery_transcript: TranscriptLine[];
+  recovery_location: LibraryLocation | null;
 }
 
 export type LibraryLocation =
@@ -175,7 +176,7 @@ export async function renameSpace(spaceId: number, name: string): Promise<void> 
 
 export async function moveLibraryNode(
   node: LibraryLocation,
-  destination: LibraryLocation,
+  destination: LibraryLocation | null,
 ): Promise<void> {
   await invoke("move_library_node", { node, destination });
 }
@@ -184,8 +185,8 @@ export async function updateNotes(meetingId: number, rawMarkdown: string): Promi
   await invoke("update_notes", { meetingId, rawMarkdown });
 }
 
-export async function createNoteDraft(): Promise<number> {
-  return invoke("create_note_draft");
+export async function createNoteDraft(location: LibraryLocation | null = null): Promise<number> {
+  return invoke("create_note_draft", { location });
 }
 
 export async function listNoteDrafts(): Promise<NoteDraftSummary[]> {
@@ -205,12 +206,14 @@ export async function updateNoteDraftRecovery(
   rawMarkdown: string,
   durationSeconds: number,
   transcript: TranscriptLine[],
+  location: LibraryLocation | null = null,
 ): Promise<void> {
   await invoke("update_note_draft_recovery", {
     id,
     rawMarkdown,
     durationSeconds,
     transcript,
+    location,
   });
 }
 

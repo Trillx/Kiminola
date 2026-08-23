@@ -7,6 +7,7 @@ export {
   locationFromSearchParams,
   recordingLocationFromSearchParams,
   moveOptions,
+  destinationKey,
   nodeKey,
   nodeRef,
   type LibraryDestinationOption,

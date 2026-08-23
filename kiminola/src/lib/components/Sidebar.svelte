@@ -16,7 +16,7 @@
     recordingHref,
     rememberMeetingLocation,
   } from "$lib/library-tree.svelte";
-  import { moveOptions, nodeKey, nodeRef } from "$lib/library-tree";
+  import { destinationKey, moveOptions, nodeKey, nodeRef } from "$lib/library-tree";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import * as Dialog from "$lib/components/ui/dialog";
@@ -179,13 +179,13 @@
     moveDialogOpen = true;
   }
 
-  async function performMove(source: LibraryLocation, destination: LibraryLocation) {
-    if (source.kind === destination.kind && source.id === destination.id) return;
+  async function performMove(source: LibraryLocation, destination: LibraryLocation | null) {
+    if (destination && source.kind === destination.kind && source.id === destination.id) return;
     actionBusy = true;
     actionError = null;
     try {
       await moveLibraryNode(source, destination);
-      expandNode(destination);
+      if (destination) expandNode(destination);
       moveDialogOpen = false;
       movingNode = null;
       await loadTree();
@@ -197,7 +197,7 @@
     }
   }
 
-  async function chooseMoveDestination(destination: LibraryLocation) {
+  async function chooseMoveDestination(destination: LibraryLocation | null) {
     if (!movingNode || actionBusy) return;
     await performMove(nodeRef(movingNode), destination);
   }
@@ -370,7 +370,7 @@
       {#if moveDestinationOptions.length === 0}
         <div class="move-empty">No valid destinations are available.</div>
       {:else}
-        {#each moveDestinationOptions as option (nodeKey(option.location))}
+        {#each moveDestinationOptions as option (destinationKey(option.location))}
           <button
             class="move-option"
             class:disabled={option.disabled}

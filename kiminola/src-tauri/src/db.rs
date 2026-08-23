@@ -69,6 +69,21 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+fn encode_library_location(location: Option<&LibraryLocation>) -> Result<Option<String>, String> {
+    location
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| format!("encode recovery location: {e}"))
+}
+
+fn decode_library_location(value: Option<&str>) -> Result<Option<LibraryLocation>, String> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| format!("decode recovery location: {e}"))
+}
+
 /* ---------- domain types ---------- */
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -193,6 +208,7 @@ pub struct NoteDraftDetail {
     pub meeting_id: Option<i64>,
     pub recovery_duration_seconds: i64,
     pub recovery_transcript: Vec<NewSegment>,
+    pub recovery_location: Option<LibraryLocation>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -205,6 +221,7 @@ struct NoteDraftRow {
     meeting_id: Option<i64>,
     recovery_duration_seconds: i64,
     recovery_transcript_json: String,
+    recovery_location_json: Option<String>,
 }
 
 async fn is_onboarding_complete_impl(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
@@ -252,23 +269,53 @@ pub async fn set_onboarding_complete(
 /* ---------- core logic (testable without Tauri state) ---------- */
 
 async fn default_space_id_impl(pool: &SqlitePool) -> Result<i64, String> {
-    if let Some(id) = sqlx::query_scalar::<_, i64>(
+    if let Some(value) = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM settings WHERE key = 'default_space_id'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    {
+        if let Ok(id) = value.parse::<i64>() {
+            if sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?
+                .is_some()
+            {
+                return Ok(id);
+            }
+        }
+    }
+
+    let id = if let Some(id) = sqlx::query_scalar::<_, i64>(
         "SELECT id FROM spaces WHERE name = 'Personal' ORDER BY id LIMIT 1",
     )
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?
     {
-        return Ok(id);
-    }
+        id
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO spaces (name, created_at) VALUES ('Personal', ?) RETURNING id",
+        )
+        .bind(now_iso())
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?
+    };
 
-    sqlx::query_scalar::<_, i64>(
-        "INSERT INTO spaces (name, created_at) VALUES ('Personal', ?) RETURNING id",
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('default_space_id', ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
     )
-    .bind(now_iso())
-    .fetch_one(pool)
+    .bind(id.to_string())
+    .execute(pool)
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    Ok(id)
 }
 
 async fn resolve_meeting_location_impl(
@@ -656,15 +703,21 @@ fn note_draft_title() -> String {
     )
 }
 
-pub(crate) async fn create_note_draft_impl(pool: &SqlitePool) -> Result<i64, String> {
+pub(crate) async fn create_note_draft_with_location_impl(
+    pool: &SqlitePool,
+    location: Option<&LibraryLocation>,
+) -> Result<i64, String> {
     let now = now_iso();
+    let location_json = encode_library_location(location)?;
     sqlx::query(
-        "INSERT INTO note_drafts (title, created_at, updated_at, raw_markdown)
-         VALUES (?, ?, ?, '')",
+        "INSERT INTO note_drafts
+            (title, created_at, updated_at, raw_markdown, recovery_location_json)
+         VALUES (?, ?, ?, '', ?)",
     )
     .bind(note_draft_title())
     .bind(&now)
     .bind(&now)
+    .bind(location_json)
     .execute(pool)
     .await
     .map_err(|e| format!("failed to create note draft: {e}"))?;
@@ -672,6 +725,10 @@ pub(crate) async fn create_note_draft_impl(pool: &SqlitePool) -> Result<i64, Str
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn create_note_draft_impl(pool: &SqlitePool) -> Result<i64, String> {
+    create_note_draft_with_location_impl(pool, None).await
 }
 
 pub(crate) async fn list_note_drafts_impl(
@@ -694,7 +751,8 @@ pub(crate) async fn get_note_draft_impl(
 ) -> Result<NoteDraftDetail, String> {
     let row = sqlx::query_as::<_, NoteDraftRow>(
         "SELECT id, title, created_at, updated_at, raw_markdown, meeting_id,
-                recovery_duration_seconds, recovery_transcript_json
+                recovery_duration_seconds, recovery_transcript_json,
+                recovery_location_json
          FROM note_drafts
          WHERE id = ?",
     )
@@ -705,6 +763,7 @@ pub(crate) async fn get_note_draft_impl(
     .ok_or_else(|| "note draft not found".to_string())?;
     let recovery_transcript = serde_json::from_str(&row.recovery_transcript_json)
         .map_err(|e| format!("invalid recovery transcript: {e}"))?;
+    let recovery_location = decode_library_location(row.recovery_location_json.as_deref())?;
     Ok(NoteDraftDetail {
         id: row.id,
         title: row.title,
@@ -714,6 +773,7 @@ pub(crate) async fn get_note_draft_impl(
         meeting_id: row.meeting_id,
         recovery_duration_seconds: row.recovery_duration_seconds,
         recovery_transcript,
+        recovery_location,
     })
 }
 
@@ -745,17 +805,20 @@ pub(crate) async fn update_note_draft_recovery_impl(
     raw_markdown: &str,
     duration_seconds: i64,
     transcript: &[NewSegment],
+    location: Option<&LibraryLocation>,
 ) -> Result<(), String> {
     let transcript_json =
         serde_json::to_string(transcript).map_err(|e| format!("encode recovery transcript: {e}"))?;
+    let location_json = encode_library_location(location)?;
     let rows = sqlx::query(
         "UPDATE note_drafts SET raw_markdown = ?, recovery_duration_seconds = ?,
-             recovery_transcript_json = ?, updated_at = ?
+             recovery_transcript_json = ?, recovery_location_json = ?, updated_at = ?
          WHERE id = ? AND meeting_id IS NULL",
     )
     .bind(raw_markdown)
     .bind(duration_seconds.max(0))
     .bind(transcript_json)
+    .bind(location_json)
     .bind(now_iso())
     .bind(id)
     .execute(pool)
@@ -971,15 +1034,33 @@ async fn list_library_tree_impl(pool: &SqlitePool) -> Result<Vec<LibraryNode>, S
 async fn move_library_node_impl(
     pool: &SqlitePool,
     node: LibraryLocation,
-    destination: LibraryLocation,
+    destination: Option<LibraryLocation>,
 ) -> Result<(), String> {
-    if node == destination {
+    if destination == Some(node) {
         return Err("an item cannot contain itself".to_string());
     }
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     match (node, destination) {
-        (LibraryLocation::Space { id }, LibraryLocation::Space { id: destination_id }) => {
+        (LibraryLocation::Space { id }, None) => {
+            let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            if exists.is_none() {
+                return Err("Space not found".to_string());
+            }
+            sqlx::query("UPDATE spaces SET parent_id = NULL WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        (
+            LibraryLocation::Space { id },
+            Some(LibraryLocation::Space { id: destination_id }),
+        ) => {
             let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
                 .bind(id)
                 .fetch_optional(&mut *tx)
@@ -1021,10 +1102,16 @@ async fn move_library_node_impl(
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        (LibraryLocation::Space { .. }, LibraryLocation::Meeting { .. }) => {
+        (LibraryLocation::Space { .. }, Some(LibraryLocation::Meeting { .. })) => {
             return Err("Spaces can only move into Spaces".to_string());
         }
-        (LibraryLocation::Meeting { id }, LibraryLocation::Space { id: destination_id }) => {
+        (LibraryLocation::Meeting { .. }, None) => {
+            return Err("Meetings can only move into Spaces or Meetings".to_string());
+        }
+        (
+            LibraryLocation::Meeting { id },
+            Some(LibraryLocation::Space { id: destination_id }),
+        ) => {
             let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM meetings WHERE id = ?")
                 .bind(id)
                 .fetch_optional(&mut *tx)
@@ -1053,7 +1140,10 @@ async fn move_library_node_impl(
             .await
             .map_err(|e| e.to_string())?;
         }
-        (LibraryLocation::Meeting { id }, LibraryLocation::Meeting { id: destination_id }) => {
+        (
+            LibraryLocation::Meeting { id },
+            Some(LibraryLocation::Meeting { id: destination_id }),
+        ) => {
             let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM meetings WHERE id = ?")
                 .bind(id)
                 .fetch_optional(&mut *tx)
@@ -1366,9 +1456,12 @@ pub async fn create_space(
 }
 
 #[tauri::command]
-pub async fn create_note_draft(state: State<'_, DbState>) -> Result<i64, String> {
+pub async fn create_note_draft(
+    state: State<'_, DbState>,
+    location: Option<LibraryLocation>,
+) -> Result<i64, String> {
     let pool = ensure_pool(&state.pool).await?;
-    create_note_draft_impl(&pool).await
+    create_note_draft_with_location_impl(&pool, location.as_ref()).await
 }
 
 #[tauri::command]
@@ -1400,6 +1493,7 @@ pub async fn update_note_draft_recovery(
     raw_markdown: String,
     duration_seconds: i64,
     transcript: Vec<NewSegment>,
+    location: Option<LibraryLocation>,
 ) -> Result<(), String> {
     let pool = ensure_pool(&state.pool).await?;
     update_note_draft_recovery_impl(
@@ -1408,6 +1502,7 @@ pub async fn update_note_draft_recovery(
         &raw_markdown,
         duration_seconds,
         &transcript,
+        location.as_ref(),
     )
     .await
 }
@@ -1444,7 +1539,7 @@ pub async fn rename_space(
 pub async fn move_library_node(
     state: State<'_, DbState>,
     node: LibraryLocation,
-    destination: LibraryLocation,
+    destination: Option<LibraryLocation>,
 ) -> Result<(), String> {
     let pool = ensure_pool(&state.pool).await?;
     move_library_node_impl(&pool, node, destination).await
@@ -1698,7 +1793,7 @@ mod tests {
         move_library_node_impl(
             &pool,
             LibraryLocation::Meeting { id: child_id },
-            LibraryLocation::Space { id: engineering_id },
+            Some(LibraryLocation::Space { id: engineering_id }),
         )
         .await
         .expect("move child to Space");
@@ -1715,7 +1810,7 @@ mod tests {
         move_library_node_impl(
             &pool,
             LibraryLocation::Space { id: engineering_id },
-            LibraryLocation::Space { id: personal_id },
+            Some(LibraryLocation::Space { id: personal_id }),
         )
         .await
         .expect("reparent Engineering Space");
@@ -1724,10 +1819,26 @@ mod tests {
             .expect("get reparented child");
         assert_eq!(child.location_path.as_deref(), Some("Personal / Engineering"));
 
+        move_library_node_impl(&pool, LibraryLocation::Space { id: engineering_id }, None)
+            .await
+            .expect("move Engineering Space to library root");
+        let child = get_meeting_impl(&pool, child_id)
+            .await
+            .expect("get root-level child");
+        assert_eq!(child.location_path.as_deref(), Some("Engineering"));
+
+        move_library_node_impl(
+            &pool,
+            LibraryLocation::Space { id: engineering_id },
+            Some(LibraryLocation::Space { id: personal_id }),
+        )
+        .await
+        .expect("move Engineering Space back under Personal");
+
         move_library_node_impl(
             &pool,
             LibraryLocation::Meeting { id: child_id },
-            LibraryLocation::Meeting { id: parent_id },
+            Some(LibraryLocation::Meeting { id: parent_id }),
         )
         .await
         .expect("move child under parent Meeting");
@@ -1738,7 +1849,7 @@ mod tests {
         let cycle_error = move_library_node_impl(
             &pool,
             LibraryLocation::Meeting { id: parent_id },
-            LibraryLocation::Meeting { id: grandchild_id },
+            Some(LibraryLocation::Meeting { id: grandchild_id }),
         )
         .await
         .expect_err("reject Meeting descendant cycle");
@@ -1747,7 +1858,7 @@ mod tests {
         let invalid_space_target = move_library_node_impl(
             &pool,
             LibraryLocation::Space { id: work_id },
-            LibraryLocation::Meeting { id: parent_id },
+            Some(LibraryLocation::Meeting { id: parent_id }),
         )
         .await
         .expect_err("reject Space into Meeting");
@@ -1786,6 +1897,7 @@ mod tests {
             "follow up with the team",
             37,
             &recovery_transcript,
+            None,
         )
         .await
         .expect("update recovery snapshot");
@@ -1822,6 +1934,48 @@ mod tests {
                 .meeting_id,
             Some(meeting_id)
         );
+
+        drop(pool);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn recording_recovery_preserves_library_location() {
+        let (pool, path) = test_pool("note-draft-location").await;
+        let space_id = create_space_impl(&pool, "Recovery", None)
+            .await
+            .expect("create recovery Space");
+        let location = LibraryLocation::Space { id: space_id };
+        let draft_id = create_note_draft_with_location_impl(&pool, Some(&location))
+            .await
+            .expect("create recovery draft");
+
+        update_note_draft_recovery_impl(&pool, draft_id, "notes", 12, &[], Some(&location))
+            .await
+            .expect("save recovery location");
+        let draft = get_note_draft_impl(&pool, draft_id)
+            .await
+            .expect("get recovery draft");
+        assert_eq!(draft.recovery_location, Some(location));
+
+        drop(pool);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn renamed_default_space_remains_the_recording_fallback() {
+        let (pool, path) = test_pool("renamed-default-space").await;
+        let default_id = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM spaces WHERE name = 'Personal' ORDER BY id LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("seeded default Space");
+
+        rename_space_impl(&pool, default_id, "Home")
+            .await
+            .expect("rename default Space");
+        assert_eq!(default_space_id_impl(&pool).await.expect("default Space"), default_id);
 
         drop(pool);
         let _ = std::fs::remove_file(path);

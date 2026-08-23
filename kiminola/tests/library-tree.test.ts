@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // @ts-expect-error Node's strip-types test runner imports the TypeScript source directly.
-import { canDropNode, locationFromSearchParams, moveOptions, nodeKey, recordingHrefForLocation, recordingLocationFromSearchParams } from "../src/lib/library-tree.ts";
+import { canDropNode, destinationKey, locationFromSearchParams, moveOptions, recordingHrefForLocation, recordingLocationFromSearchParams } from "../src/lib/library-tree.ts";
 
 const tree = [
   {
@@ -47,15 +47,18 @@ test("validates recursive library drop targets and cycles", () => {
 
 test("move options expose valid containers and disable invalid ones", () => {
   const options = moveOptions(tree, { kind: "meeting", id: 10 });
-  const engineering = options.find((option) => nodeKey(option.location) === "space:2");
-  const child = options.find((option) => nodeKey(option.location) === "meeting:11");
+  const engineering = options.find((option) => destinationKey(option.location) === "space:2");
+  const child = options.find((option) => destinationKey(option.location) === "meeting:11");
   assert.equal(engineering?.disabled, false);
   assert.equal(child?.disabled, true);
 
   const spaceOptions = moveOptions(tree, { kind: "space", id: 2 });
+  const root = spaceOptions.find((option) => option.location === null);
+  assert.equal(root?.label, "Library root");
+  assert.equal(root?.disabled, false);
   assert.equal(
     spaceOptions
-      .filter((option) => option.location.kind === "meeting")
+      .filter((option) => option.location?.kind === "meeting")
       .every((option) => option.disabled),
     true,
   );
@@ -86,6 +89,14 @@ test("recording destinations round-trip through the URL", () => {
       { kind: "meeting", id: 10 },
     ),
     { kind: "meeting", id: 10 },
+  );
+  assert.deepEqual(
+    recordingLocationFromSearchParams(
+      new URLSearchParams(),
+      { kind: "meeting", id: 10 },
+      { kind: "space", id: 2 },
+    ),
+    { kind: "space", id: 2 },
   );
   assert.equal(locationFromSearchParams(new URLSearchParams("spaceId=nope")), null);
 });

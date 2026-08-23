@@ -23,8 +23,9 @@ export function locationFromSearchParams(params: URLSearchParams): LibraryLocati
 export function recordingLocationFromSearchParams(
   params: URLSearchParams,
   lastLocation: LibraryLocation | null,
+  recoveryLocation: LibraryLocation | null = null,
 ): LibraryLocation | null {
-  return locationFromSearchParams(params) ?? lastLocation;
+  return locationFromSearchParams(params) ?? recoveryLocation ?? lastLocation;
 }
 
 export function nodeRef(node: LibraryNode): LibraryLocation {
@@ -33,6 +34,10 @@ export function nodeRef(node: LibraryNode): LibraryLocation {
 
 export function nodeKey(ref: LibraryLocation): string {
   return `${ref.kind}:${ref.id}`;
+}
+
+export function destinationKey(location: LibraryLocation | null): string {
+  return location ? nodeKey(location) : "library-root";
 }
 
 function containsNode(node: LibraryNode, target: LibraryLocation): boolean {
@@ -61,7 +66,7 @@ export function canDropNode(
 }
 
 export interface LibraryDestinationOption {
-  location: LibraryLocation;
+  location: LibraryLocation | null;
   label: string;
   depth: number;
   disabled: boolean;
@@ -74,6 +79,17 @@ export function moveOptions(
   if (!source) return [];
   const sourceLocation = source;
   const options: LibraryDestinationOption[] = [];
+  if (sourceLocation.kind === "space") {
+    const isAlreadyAtRoot = tree.some(
+      (node) => node.kind === "space" && node.id === sourceLocation.id,
+    );
+    options.push({
+      location: null,
+      label: "Library root",
+      depth: 0,
+      disabled: isAlreadyAtRoot,
+    });
+  }
   function visit(nodes: LibraryNode[], depth: number, path: string[]) {
     for (const node of nodes) {
       const location = nodeRef(node);
