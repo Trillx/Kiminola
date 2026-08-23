@@ -10,6 +10,8 @@ test("keeps saved meetings visible when note drafts fail to load", async () => {
     created_at: "2026-08-21T15:00:00Z",
     duration_seconds: 60,
     space_name: "Personal",
+    location_path: "Personal",
+    parent_meeting_id: null,
   };
 
   const result = await loadLibraryData({

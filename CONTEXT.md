@@ -5,6 +5,9 @@ Canonical language for the project. Implementation details do not belong here.
 ## Terms
 
 - **Meeting** — a single recorded conversation the user captures with Kiminola. Has one capture session, one transcript, and one set of notes.
+- **Space** — an organizational library container. Spaces may contain nested Spaces and Meetings.
+- **Meeting hierarchy** — the organizational parent/child relationship between Meetings. A child Meeting remains a separate recording with its own transcript and notes; hierarchy does not roll content up.
+- **Library location** — the single direct container assigned to a Meeting: either a Space or another Meeting, never both.
 - **Capture session** — the active recording of a Meeting, from manual start to manual stop.
 - **Mic channel** — the audio channel captured from the user's microphone. Labeled **"You"** in the transcript.
 - **System channel** — the audio channel captured from system/loopback audio (what the meeting app plays). Labeled **"Others"** in the transcript.

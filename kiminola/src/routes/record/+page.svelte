@@ -50,6 +50,9 @@
     type TranscriptEvent,
     type TranscriptLine,
   } from "$lib/tauri";
+  import { libraryDestinationState } from "$lib/library-tree.svelte";
+  import { recordingLocationFromSearchParams } from "$lib/library-tree";
+  import type { LibraryLocation } from "$lib/tauri";
 
   // Title is fixed when the recording starts and saved with the meeting.
   const startedAt = new Date();
@@ -77,6 +80,10 @@
   let nativeSessionActive = false;
   let requestedDraftId = NaN;
   let noteDraftId = $state<number | null>(null);
+  // Capture the destination once when this recording episode starts. Sidebar
+  // navigation can change the last-used destination while recording, but it
+  // must not move the meeting being finalized.
+  let recordingLocation = $state<LibraryLocation | null>(null);
   let quitBlocked = $state(false);
   let recoveryDraftCreated = $state(false);
   let noteSaveStatus = $state("");
@@ -317,6 +324,10 @@
 
     const draftParam = page.url.searchParams.get("draft");
     requestedDraftId = draftParam ? Number(draftParam) : NaN;
+    recordingLocation = recordingLocationFromSearchParams(
+      page.url.searchParams,
+      libraryDestinationState.last,
+    );
 
     const startPromise = Promise.all([
       onTranscriptEvent((event: TranscriptEvent) => {
@@ -435,6 +446,7 @@
         notepad,
         segments: finalizedTranscript(lines),
         noteDraftId,
+        location: recordingLocation,
       });
     } catch (error) {
       phase = "finish_failed";

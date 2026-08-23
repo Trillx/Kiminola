@@ -51,7 +51,11 @@ pub fn notes_markdown(meeting: &MeetingDetail) -> String {
     let mut out = String::from("---\n");
     out.push_str(&format!("title: \"{}\"\n", yaml_escape(&meeting.title)));
     out.push_str(&format!("date: {}\n", date_prefix(&meeting.created_at)));
-    if let Some(space) = &meeting.space_name {
+    if let Some(space) = meeting
+        .location_path
+        .as_ref()
+        .or(meeting.space_name.as_ref())
+    {
         out.push_str(&format!("space: \"{}\"\n", yaml_escape(space)));
     }
     out.push_str(&format!(
@@ -172,6 +176,8 @@ mod tests {
             created_at: "2026-08-16T14:32:00.000Z".into(),
             duration_seconds: 2730,
             space_name: Some("Engineering".into()),
+            location_path: None,
+            parent_meeting_id: None,
             notepad: "raw notes".into(),
             enhanced_markdown: Some("## Summary\nEnhanced.".into()),
             transcript: vec![
@@ -210,6 +216,14 @@ mod tests {
             "unexpected frontmatter: {md}"
         );
         assert!(md.ends_with("## Summary\nEnhanced.\n"));
+    }
+
+    #[test]
+    fn notes_markdown_uses_the_computed_library_location_path() {
+        let mut m = meeting();
+        m.location_path = Some("Work / Planning".into());
+        let md = notes_markdown(&m);
+        assert!(md.contains("space: \"Work / Planning\""));
     }
 
     #[test]

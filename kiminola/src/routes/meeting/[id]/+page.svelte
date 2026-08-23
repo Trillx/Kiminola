@@ -405,8 +405,8 @@
         </div>
         <div class="post-meta-row">
           <span class="post-meta-pill">{formatMeta(meeting)}</span>
-          {#if meeting.space_name}
-            <span class="post-meta-pill">{meeting.space_name}</span>
+          {#if meeting.location_path ?? meeting.space_name}
+            <span class="post-meta-pill">{meeting.location_path ?? meeting.space_name}</span>
           {/if}
         </div>
         {#if exportStatus}
