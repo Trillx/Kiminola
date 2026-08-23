@@ -3,6 +3,7 @@ export type RecordingPhase =
   | "recording"
   | "paused"
   | "failed"
+  | "finish_failed"
   | "stopping";
 
 const PHASE_LABELS: Record<RecordingPhase, string> = {
@@ -10,6 +11,7 @@ const PHASE_LABELS: Record<RecordingPhase, string> = {
   recording: "Recording",
   paused: "Paused",
   failed: "Couldn't start",
+  finish_failed: "Save failed",
   stopping: "Finishing",
 };
 
@@ -23,6 +25,10 @@ export function shouldAdvanceElapsed(phase: RecordingPhase): boolean {
 
 export function canStopRecording(phase: RecordingPhase): boolean {
   return phase === "recording" || phase === "paused";
+}
+
+export function canRetryFinish(phase: RecordingPhase): boolean {
+  return phase === "finish_failed";
 }
 
 export function shouldDiscardAutoDraft(

@@ -48,6 +48,19 @@ impl TranscriptEventStore {
     }
 }
 
+fn snapshot_after_finalization(
+    stop_result: Result<(), String>,
+    store: &TranscriptEventStore,
+) -> Vec<TranscriptEvent> {
+    if let Err(error) = stop_result {
+        // A final ASR flush can time out after the live transcript has already
+        // accumulated useful revisions. Returning that authoritative snapshot
+        // is safer than trapping the frontend before it can persist anything.
+        eprintln!("[recording] transcript finalization warning: {error}");
+    }
+    store.snapshot()
+}
+
 const PENDING_LOOPBACK_TARGET_TTL: Duration = Duration::from_secs(60);
 
 struct PendingLoopbackTarget {
@@ -182,19 +195,24 @@ pub async fn start_recording(
 
 /// Stops the active recording session and returns the authoritative latest
 /// revision of every utterance. The response closes the event-delivery race at
-/// save time: the frontend can merge this snapshot before persisting.
+/// save time: the frontend can merge this snapshot before persisting. Repeated
+/// calls are safe and return an empty delta, which lets the UI recover when the
+/// first command completed but its IPC response was lost.
 #[tauri::command]
 pub async fn stop_recording(
     state: State<'_, RecordingState>,
 ) -> Result<Vec<TranscriptEvent>, String> {
     let mut session = state.session.lock().await;
     let Some(active) = session.take() else {
-        return Err("no recording in progress".into());
+        state.set_active(false);
+        return Ok(Vec::new());
     };
     let stop_result = active.session.stop().await;
     state.set_active(false);
-    stop_result?;
-    Ok(active.transcript_store.snapshot())
+    Ok(snapshot_after_finalization(
+        stop_result,
+        &active.transcript_store,
+    ))
 }
 
 /// Pauses the active recording session. Capture streams are stopped but the
@@ -258,6 +276,18 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].revision, 2);
         assert_eq!(snapshot[0].text, "final");
+    }
+
+    #[test]
+    fn finalization_warning_keeps_the_latest_transcript_snapshot() {
+        let store = TranscriptEventStore::default();
+        store.record(&event(8, 2, "recover this text"));
+
+        let snapshot =
+            snapshot_after_finalization(Err("flush timed out".into()), &store);
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].text, "recover this text");
     }
 
     #[test]

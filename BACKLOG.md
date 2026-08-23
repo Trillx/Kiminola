@@ -4,9 +4,9 @@ Ordered by user impact: data loss and crashes first, then broken flows, test gap
 
 ## Queued
 
-- [ ] **P1 · Make stop-and-save failures retryable.** A failed stop or database save leaves the recording page disabled without a visible recovery action.
 - [ ] **P1 · Surface pause and resume failures.** Capture restart errors currently reject the button action without giving the user an explanation or recovery path.
 - [ ] **P2 · Detect microphone queue pressure.** The capture callback silently drops microphone buffers when the bounded queue is full (`recording_session.rs` TODO).
+- [ ] **P2 · Surface transcript-finalization warnings.** A timed-out final ASR flush now preserves and saves the latest snapshot, but the warning is only written to the local log.
 - [ ] **P2 · Base elapsed duration on a monotonic clock.** The one-second UI interval can drift while the app is suspended or the window is hidden.
 
 ## Completed
@@ -15,3 +15,4 @@ Ordered by user impact: data loss and crashes first, then broken flows, test gap
 - [x] **P0 · Continuously save recording notes for recovery.** Every recording now uses a serialized, debounced SQLite note draft; normal saves attach it, intentional cancellation removes only auto-created drafts, and crashes leave a library-visible recovery copy. Verified 2026-08-22.
 - [x] **P0 · Persist in-progress transcript checkpoints.** Recovery drafts now atomically store notes, elapsed duration, and the latest transcript text; interrupted sessions display their transcript and can continue with correctly offset timing. Verified 2026-08-23.
 - [x] **P1 · Surface recording startup failures.** The recording lifecycle now remains in Starting until native capture succeeds; failures stop the timer and waveform, disable invalid controls, preserve recovery notes, and offer retry plus Windows microphone settings. Verified 2026-08-23.
+- [x] **P1 · Make stop-and-save failures retryable.** Stop is idempotent, finalization warnings return the best transcript snapshot, recovery drafts make meeting saves idempotent, and save failures expose retry/open-recovery actions without duplicating meetings. Verified 2026-08-23.

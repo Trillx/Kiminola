@@ -224,6 +224,23 @@ pub(crate) async fn save_meeting_with_draft_impl(
     segments: &[NewSegment],
     note_draft_id: Option<i64>,
 ) -> Result<i64, String> {
+    if let Some(draft_id) = note_draft_id {
+        let attached_meeting = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT meeting_id FROM note_drafts WHERE id = ?",
+        )
+        .bind(draft_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "note draft not found".to_string())?;
+        if let Some(meeting_id) = attached_meeting {
+            // The previous save committed but its IPC response may have been
+            // lost. Treat the attached draft as the idempotency key so a UI
+            // retry returns the existing meeting instead of duplicating it.
+            return Ok(meeting_id);
+        }
+    }
+
     // File under the default (first) space until space management ships.
     let space_id: Option<i64> = sqlx::query_scalar("SELECT id FROM spaces ORDER BY id LIMIT 1")
         .fetch_optional(pool)
@@ -1029,6 +1046,11 @@ mod tests {
             save_meeting_with_draft_impl(&pool, "Follow-up meeting", 60, "", &[], Some(draft_id))
                 .await
                 .expect("save meeting with draft");
+        let retried_meeting_id =
+            save_meeting_with_draft_impl(&pool, "Follow-up meeting", 60, "", &[], Some(draft_id))
+                .await
+                .expect("retry attached draft save");
+        assert_eq!(retried_meeting_id, meeting_id);
         let meeting = get_meeting_impl(&pool, meeting_id)
             .await
             .expect("get meeting");
@@ -1037,6 +1059,7 @@ mod tests {
             .await
             .expect("list drafts")
             .is_empty());
+        assert_eq!(list_meetings_impl(&pool).await.expect("list meetings").len(), 1);
         assert_eq!(
             get_note_draft_impl(&pool, draft_id)
                 .await

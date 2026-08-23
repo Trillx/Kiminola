@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // @ts-expect-error Node's strip-types test runner imports the TypeScript source directly.
-import { canStopRecording, recordingPhaseLabel, shouldAdvanceElapsed, shouldDiscardAutoDraft } from "../src/lib/recording-ui-state.ts";
+import { canRetryFinish, canStopRecording, recordingPhaseLabel, shouldAdvanceElapsed, shouldDiscardAutoDraft } from "../src/lib/recording-ui-state.ts";
 
 test("only an active recording advances elapsed time", () => {
   assert.equal(shouldAdvanceElapsed("starting"), false);
   assert.equal(shouldAdvanceElapsed("failed"), false);
   assert.equal(shouldAdvanceElapsed("paused"), false);
   assert.equal(shouldAdvanceElapsed("stopping"), false);
+  assert.equal(shouldAdvanceElapsed("finish_failed"), false);
   assert.equal(shouldAdvanceElapsed("recording"), true);
 });
 
@@ -23,6 +24,13 @@ test("failure and transition labels never claim the app is recording", () => {
   assert.equal(recordingPhaseLabel("starting"), "Starting");
   assert.equal(recordingPhaseLabel("failed"), "Couldn't start");
   assert.equal(recordingPhaseLabel("stopping"), "Finishing");
+  assert.equal(recordingPhaseLabel("finish_failed"), "Save failed");
+});
+
+test("only a failed finish exposes the save retry", () => {
+  assert.equal(canRetryFinish("finish_failed"), true);
+  assert.equal(canRetryFinish("failed"), false);
+  assert.equal(canRetryFinish("stopping"), false);
 });
 
 test("leaving after startup failure preserves the recovery draft", () => {

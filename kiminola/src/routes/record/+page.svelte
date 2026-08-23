@@ -12,6 +12,7 @@
   import { createDraftAutosave, type DraftAutosave } from "$lib/draft-autosave";
   import {
     canStopRecording,
+    canRetryFinish,
     recordingPhaseLabel,
     shouldAdvanceElapsed,
     shouldDiscardAutoDraft,
@@ -47,6 +48,7 @@
   let transcriptOpen = $state(false);
   let phase = $state<RecordingPhase>("starting");
   let startError = $state<string | null>(null);
+  let finishError = $state<string | null>(null);
   let nativeSessionActive = false;
   let requestedDraftId = NaN;
   let noteDraftId = $state<number | null>(null);
@@ -54,6 +56,9 @@
   let recoveryDraftCreated = $state(false);
   let noteSaveStatus = $state("");
   let transcriptOffsetMs = 0;
+
+  type FinishMode = "save" | "generate" | "enhance";
+  let pendingFinishMode: FinishMode | null = null;
 
   interface RecoverySnapshot {
     rawMarkdown: string;
@@ -69,10 +74,10 @@
   let statusLabel = $derived(recordingPhaseLabel(phase));
   let stopping = $derived(phase === "stopping");
 
-  function errorMessage(error: unknown): string {
+  function errorMessage(error: unknown, fallback: string): string {
     if (error instanceof Error) return error.message;
     if (typeof error === "string") return error;
-    return "Windows could not start the microphone.";
+    return fallback;
   }
 
   function recoverySnapshot(): RecoverySnapshot {
@@ -164,7 +169,7 @@
     } catch (error) {
       nativeSessionActive = false;
       phase = "failed";
-      startError = errorMessage(error);
+      startError = errorMessage(error, "Windows could not start the microphone.");
       console.error("Failed to start recording:", error);
     }
   }
@@ -196,7 +201,7 @@
       })
       .catch((err) => {
         phase = "failed";
-        startError = errorMessage(err);
+        startError = errorMessage(err, "The recording page could not initialize.");
         console.error("Failed to initialize recording:", err);
       });
 
@@ -232,42 +237,55 @@
     phase = "recording";
   }
 
-  async function finishAndNavigate(mode: "generate" | "enhance") {
+  async function finishMeeting(mode: FinishMode) {
     phase = "stopping";
-    const finalEvents = await stopRecording();
-    nativeSessionActive = false;
-    for (const event of finalEvents) {
-      lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
+    finishError = null;
+    pendingFinishMode = mode;
+
+    let meetingId: number;
+    try {
+      if (nativeSessionActive) {
+        const finalEvents = await stopRecording();
+        nativeSessionActive = false;
+        for (const event of finalEvents) {
+          lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
+        }
+      }
+      await flushNoteCheckpoint();
+      meetingId = await saveMeeting({
+        title,
+        durationSeconds: elapsed,
+        notepad,
+        segments: finalizedTranscript(lines),
+        noteDraftId,
+      });
+    } catch (error) {
+      phase = "finish_failed";
+      finishError = errorMessage(error, "The meeting could not be finalized or saved.");
+      console.error("Failed to finish meeting:", error);
+      return;
     }
-    await flushNoteCheckpoint();
+
     closeNoteAutosave();
-    const id = await saveMeeting({
-      title,
-      durationSeconds: elapsed,
-      notepad,
-      segments: finalizedTranscript(lines),
-      noteDraftId,
-    });
-    goto(`/meeting/${id}?mode=${mode}`);
+    pendingFinishMode = null;
+    const suffix = mode === "save" ? "" : `?mode=${mode}`;
+    await goto(`/meeting/${meetingId}${suffix}`);
   }
 
-  async function stopMeeting() {
-    phase = "stopping";
-    const finalEvents = await stopRecording();
-    nativeSessionActive = false;
-    for (const event of finalEvents) {
-      lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
+  function retryFinish() {
+    if (pendingFinishMode && canRetryFinish(phase)) {
+      void finishMeeting(pendingFinishMode);
     }
+  }
+
+  async function openRecoveryDraft() {
     await flushNoteCheckpoint();
     closeNoteAutosave();
-    const id = await saveMeeting({
-      title,
-      durationSeconds: elapsed,
-      notepad,
-      segments: finalizedTranscript(lines),
-      noteDraftId,
-    });
-    goto(`/meeting/${id}`);
+    if (nativeSessionActive) {
+      await stopRecording().catch(() => undefined);
+      nativeSessionActive = false;
+    }
+    await goto(noteDraftId === null ? "/" : `/note/${noteDraftId}`);
   }
 
   async function cancel() {
@@ -335,6 +353,21 @@
       </div>
     {/if}
 
+    {#if phase === "finish_failed"}
+      <div class="recording-finish-error" role="alert">
+        <div>
+          <strong>The meeting isn't saved yet.</strong>
+          <span>{finishError} Your recovery copy is still available.</span>
+        </div>
+        <div class="recording-start-error-actions">
+          <Button size="sm" onclick={retryFinish}>Retry saving</Button>
+          <Button size="sm" variant="outline" onclick={openRecoveryDraft}>
+            Open recovery copy
+          </Button>
+        </div>
+      </div>
+    {/if}
+
     <div class="notepad-hero">
       <div class="notepad-header">
         <span class="notepad-label">My notes</span>
@@ -352,12 +385,16 @@
 
     <div class="recording-actions">
       <Button variant="outline" onclick={cancel} disabled={phase === "starting" || stopping}>
-        {phase === "failed" ? "Back to meetings" : "Cancel"}
+        {phase === "failed"
+          ? "Back to meetings"
+          : phase === "finish_failed"
+            ? "Keep recovery copy"
+            : "Cancel"}
       </Button>
       <Button variant="secondary" onclick={pause} disabled={phase !== "recording"}>Pause</Button>
       <Button
         variant="destructive"
-        onclick={stopMeeting}
+        onclick={() => void finishMeeting("save")}
         disabled={!canStopRecording(phase) || stopping}
       >
         Stop meeting
@@ -384,14 +421,14 @@
     <div class="pause-timer">{timerText}</div>
     <div class="pause-actions">
       <Button class="w-full" onclick={resume} disabled={stopping}>Resume recording</Button>
-      <Button class="w-full" variant="secondary" onclick={() => finishAndNavigate('generate')} disabled={stopping}>
+      <Button class="w-full" variant="secondary" onclick={() => void finishMeeting('generate')} disabled={stopping}>
         Generate meeting notes
       </Button>
-      <Button class="w-full" variant="secondary" onclick={() => finishAndNavigate('enhance')} disabled={stopping}>
+      <Button class="w-full" variant="secondary" onclick={() => void finishMeeting('enhance')} disabled={stopping}>
         Enhance meeting notes
       </Button>
     </div>
-    <Button variant="ghost" class="pause-stop-link w-full" onclick={stopMeeting} disabled={stopping}>
+    <Button variant="ghost" class="pause-stop-link w-full" onclick={() => void finishMeeting('save')} disabled={stopping}>
       Stop meeting without generating notes
     </Button>
   </Dialog.Content>
@@ -442,7 +479,8 @@
     transform: scaleY(0.15);
   }
 
-  .recording-start-error {
+  .recording-start-error,
+  .recording-finish-error {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -456,12 +494,14 @@
     font-size: 13px;
   }
 
-  .recording-start-error > div:first-child {
+  .recording-start-error > div:first-child,
+  .recording-finish-error > div:first-child {
     display: grid;
     gap: 3px;
   }
 
-  .recording-start-error span {
+  .recording-start-error span,
+  .recording-finish-error span {
     color: var(--text-muted);
   }
 
@@ -518,7 +558,8 @@
   }
 
   @media (max-width: 680px) {
-    .recording-start-error {
+    .recording-start-error,
+    .recording-finish-error {
       align-items: stretch;
       flex-direction: column;
     }
