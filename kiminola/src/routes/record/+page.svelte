@@ -66,6 +66,8 @@
   let finishError = $state<string | null>(null);
   let transcriptFinalizationWarning = $state<string | null>(null);
   let controlBusy = $state(false);
+  let controlSettled: Promise<void> = Promise.resolve();
+  let resolveControlSettled: (() => void) | null = null;
   let controlError = $state<{ action: "pause" | "resume"; message: string } | null>(null);
   let audioPressure = $state<AudioPressureEvent | null>(null);
   let meetingAudioAvailable = $state<boolean | null>(null);
@@ -232,6 +234,23 @@
     noteAutosave = undefined;
   }
 
+  function beginControlOperation() {
+    controlBusy = true;
+    controlSettled = new Promise<void>((resolve) => {
+      resolveControlSettled = resolve;
+    });
+  }
+
+  function endControlOperation() {
+    controlBusy = false;
+    resolveControlSettled?.();
+    resolveControlSettled = null;
+  }
+
+  async function waitForControlToSettle() {
+    await controlSettled;
+  }
+
   async function completeStartupRecoveryExit(): Promise<boolean> {
     const destination = startupRecoveryExitTarget;
     if (!destination) return false;
@@ -354,12 +373,13 @@
 
   async function pause() {
     if (!canPauseRecording(phase, controlBusy)) return;
-    controlBusy = true;
+    beginControlOperation();
     controlError = null;
     try {
       await pauseRecording();
       freezeElapsedTiming();
       phase = "paused";
+      await flushNoteCheckpoint();
     } catch (error) {
       controlError = {
         action: "pause",
@@ -367,13 +387,13 @@
       };
       console.error("Failed to pause recording:", error);
     } finally {
-      controlBusy = false;
+      endControlOperation();
     }
   }
 
   async function resume() {
     if (!canResumeRecording(phase, controlBusy)) return;
-    controlBusy = true;
+    beginControlOperation();
     controlError = null;
     try {
       const status = await resumeRecording();
@@ -390,11 +410,12 @@
       };
       console.error("Failed to resume recording:", error);
     } finally {
-      controlBusy = false;
+      endControlOperation();
     }
   }
 
   async function finishMeeting(mode: FinishMode) {
+    await waitForControlToSettle();
     freezeElapsedTiming();
     phase = "stopping";
     finishError = null;
@@ -438,6 +459,7 @@
   }
 
   async function openRecoveryDraft() {
+    await waitForControlToSettle();
     freezeElapsedTiming();
     phase = "stopping";
     await flushNoteCheckpoint();
@@ -471,6 +493,7 @@
   async function keepRecoveryAndLeave() {
     const destination = pendingNavigationTarget ?? "/";
     navigationDialogOpen = false;
+    await waitForControlToSettle();
     if (phase === "starting") {
       startupRecoveryExitTarget = destination;
       pendingNavigationTarget = null;
@@ -499,6 +522,7 @@
   }
 
   async function cancel() {
+    await waitForControlToSettle();
     const discardAutoDraft = shouldDiscardAutoDraft(recoveryDraftCreated, nativeSessionActive);
     freezeElapsedTiming();
     phase = "stopping";
@@ -742,7 +766,10 @@
       <Dialog.Description>
         {#if phase === "starting"}
           Stay while Windows finishes startup, or prepare a recovery copy and leave without
-          creating an empty meeting.
+            creating an empty meeting.
+        {:else if controlBusy}
+          Windows is finishing the current pause or resume request. Leave actions wait for that
+          transition before stopping capture.
         {:else if phase === "finish_failed"}
           Retry the save, keep the recovery copy and leave, or stay here without losing your work.
         {:else}
@@ -758,11 +785,15 @@
             ? "Stay here"
             : "Continue recording"}
       </Button>
-      <Button variant="secondary" onclick={() => void keepRecoveryAndLeave()}>
+      <Button
+        variant="secondary"
+        onclick={() => void keepRecoveryAndLeave()}
+        disabled={controlBusy}
+      >
         Keep recovery copy and leave
       </Button>
-      {#if canHandleStopShortcut(phase, false)}
-        <Button onclick={finishBeforeLeaving}>
+      {#if canHandleStopShortcut(phase, controlBusy)}
+        <Button onclick={finishBeforeLeaving} disabled={controlBusy}>
           {phase === "finish_failed" ? "Retry saving" : "Finish and save"}
         </Button>
       {/if}

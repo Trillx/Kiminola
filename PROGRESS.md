@@ -1,5 +1,12 @@
 # Kimi Nola improvement progress
 
+## Final summary — 2026-08-23
+
+- Iterations: 18 autonomous implementation iterations and 19 commits after the approved `430a56d` baseline (18 implementation commits plus this final documentation closure); the frozen backlog now has no open items.
+- Bugs fixed: recording lifecycle races and unsafe exits; lost notes, transcripts, audio, and finalization state; unavailable or stale local ASR; and model-pack integrity failures that size checks could miss.
+- Top three open items: none.
+- Final validation: frontend tests (22 passed), Svelte check (0 errors, 0 warnings), Rust library tests (46 passed, 2 ignored), Rust check, touched-file Rust formatting, and production build all passed. Crate-wide formatter audit still reports pre-existing differences in untouched Rust files; those unrelated files were preserved.
+
 Append one concise line per committed iteration: date, change, reason, and validation result.
 
 - 2026-08-22 — Blocked tray Quit during active recording so in-memory transcript and notes cannot be discarded accidentally; restored and focused the recording view with an accessible explanation. PASS: 40 Rust tests, 8 frontend tests, Rust check, Svelte check (0 errors/warnings), and production build.
