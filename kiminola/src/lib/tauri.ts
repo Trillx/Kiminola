@@ -85,6 +85,8 @@ export interface MeetingSummary {
   created_at: string;
   duration_seconds: number;
   space_name: string | null;
+  location_path: string | null;
+  parent_meeting_id: number | null;
 }
 
 export interface MeetingDetail {
@@ -93,6 +95,8 @@ export interface MeetingDetail {
   created_at: string;
   duration_seconds: number;
   space_name: string | null;
+  location_path: string | null;
+  parent_meeting_id: number | null;
   notepad: string;
   enhanced_markdown: string | null;
   transcript: TranscriptLine[];
@@ -110,18 +114,23 @@ export interface NoteDraftDetail extends NoteDraftSummary {
   meeting_id: number | null;
   recovery_duration_seconds: number;
   recovery_transcript: TranscriptLine[];
+  recovery_location: LibraryLocation | null;
 }
 
-export interface SpaceMeetingRef {
-  id: number;
-  title: string;
-}
+export type LibraryLocation =
+  | { kind: "space"; id: number }
+  | { kind: "meeting"; id: number };
 
-export interface Space {
-  id: number;
-  name: string;
-  meetings: SpaceMeetingRef[];
-}
+export type LibraryNode =
+  | { kind: "space"; id: number; name: string; children: LibraryNode[] }
+  | {
+      kind: "meeting";
+      id: number;
+      title: string;
+      created_at: string;
+      duration_seconds: number;
+      children: LibraryNode[];
+    };
 
 export async function saveMeeting(input: {
   title: string;
@@ -129,6 +138,7 @@ export async function saveMeeting(input: {
   notepad: string;
   segments: TranscriptLine[];
   noteDraftId?: number | null;
+  location?: LibraryLocation | null;
 }): Promise<number> {
   return invoke("save_meeting", {
     title: input.title,
@@ -136,6 +146,7 @@ export async function saveMeeting(input: {
     notepad: input.notepad,
     segments: input.segments,
     noteDraftId: input.noteDraftId ?? null,
+    location: input.location ?? null,
   });
 }
 
@@ -151,20 +162,31 @@ export async function renameMeeting(meetingId: number, title: string): Promise<v
   await invoke("rename_meeting", { meetingId, title });
 }
 
-export async function listSpaces(): Promise<Space[]> {
-  return invoke("list_spaces");
+export async function listLibraryTree(): Promise<LibraryNode[]> {
+  return invoke("list_library_tree");
 }
 
-export async function createSpace(name: string): Promise<number> {
-  return invoke("create_space", { name });
+export async function createSpace(name: string, parentSpaceId?: number | null): Promise<number> {
+  return invoke("create_space", { name, parentSpaceId: parentSpaceId ?? null });
+}
+
+export async function renameSpace(spaceId: number, name: string): Promise<void> {
+  await invoke("rename_space", { spaceId, name });
+}
+
+export async function moveLibraryNode(
+  node: LibraryLocation,
+  destination: LibraryLocation | null,
+): Promise<void> {
+  await invoke("move_library_node", { node, destination });
 }
 
 export async function updateNotes(meetingId: number, rawMarkdown: string): Promise<void> {
   await invoke("update_notes", { meetingId, rawMarkdown });
 }
 
-export async function createNoteDraft(): Promise<number> {
-  return invoke("create_note_draft");
+export async function createNoteDraft(location: LibraryLocation | null = null): Promise<number> {
+  return invoke("create_note_draft", { location });
 }
 
 export async function listNoteDrafts(): Promise<NoteDraftSummary[]> {
@@ -184,12 +206,14 @@ export async function updateNoteDraftRecovery(
   rawMarkdown: string,
   durationSeconds: number,
   transcript: TranscriptLine[],
+  location: LibraryLocation | null = null,
 ): Promise<void> {
   await invoke("update_note_draft_recovery", {
     id,
     rawMarkdown,
     durationSeconds,
     transcript,
+    location,
   });
 }
 

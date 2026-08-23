@@ -92,7 +92,9 @@
             <div class="search-result-title">{meeting.title}</div>
             <div class="search-result-meta">
               <span>{formatMeta(meeting)}</span>
-              {#if meeting.space_name}<span>· {meeting.space_name}</span>{/if}
+              {#if meeting.location_path ?? meeting.space_name}
+                <span>· {meeting.location_path ?? meeting.space_name}</span>
+              {/if}
             </div>
           </button>
         {/each}

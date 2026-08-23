@@ -1,6 +1,6 @@
 # Kiminola — Build-Ready Spec
 
-**Status:** Ready for implementation. All wayfinder decision tickets are resolved (see `.scratch/kiminola/map.md` and `issues/`).
+**Status:** Ready for implementation. All wayfinder decision tickets are resolved (see `.scratch/kiminola/map.md` and `issues/`). The library hierarchy decision is also adopted: Spaces and Meetings form a recursive organizational tree with validated reparenting.
 
 ## 1. Product definition
 
@@ -46,14 +46,15 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - **Audio pipeline**: WASAPI process-tree loopback when a meeting prompt supplies a PID, with classic default-output fallback, plus cpal mic → independent resampling → 16 kHz mono → sherpa-onnx streaming ASR per lane. The lanes are never mixed before ASR.
 - **Transcript events**: each lane emits stable utterance IDs, monotonically increasing revisions, partial/final state, and audio-relative segment timing. On stop, capture queues drain, both ASR lanes flush, and the backend returns an authoritative final snapshot before persistence.
 - **Echo reconciliation**: finalized mic/system segments are compared only when their audio windows overlap. High-confidence text matches retain the system (`Others`) copy; short acknowledgements and non-overlapping repetition are never automatically suppressed. This is a local transcript correction, not speaker diarization or audio retention.
-- **Persistence**: sqlx + SQLite; tables for meetings, timestamped transcript segments, notes, spaces, templates, settings.
+- **Persistence**: sqlx + SQLite; tables for meetings, timestamped transcript segments, notes, spaces, templates, settings. Each Meeting has exactly one direct container (`space_id` or `parent_meeting_id`), and recursive location paths are computed for library views and exports.
 - **LLM enhancement**: ChatProvider trait with streaming SSE; sends transcript text + raw notes + template prompt to the configured cloud provider.
 - **Model manager**: downloads ASR model on first run from Hugging Face; verifies SHA-256; stores in `%LOCALAPPDATA%\Kiminola\models`.
 - **Updater**: Tauri updater plugin with GitHub Releases JSON manifest.
 
 ## 5. UI/UX decisions
 
-- Sidebar navigation: **Home** only; Spaces is an expandable tree with meetings nested underneath.
+- Sidebar navigation: **Home** only; Spaces is a recursive tree. Spaces may contain nested Spaces and Meetings, and Meetings may contain child Meetings at arbitrary depth. Context menus and drag-and-drop use the same validated move operation; sibling ordering is not user-controlled in this pass.
+- New meetings inherit an explicit Space or Meeting destination from the action that started them. Global New meeting and the shortcut use the last explicit destination, falling back to Personal. The destination is captured when recording starts.
 - Removed from prototype: Invite, Shared with me, Chat — out of MVP scope.
 - Live transcript auto-scrolls; scrollbar hidden until user scrolls.
 - Global hotkey: configurable start/stop (Tauri global-shortcut plugin), sensible default.
@@ -67,11 +68,11 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - **SQLite single store** via sqlx + migrations.
 - **Location**: `%LOCALAPPDATA%\Kiminola\data` for user data; `%LOCALAPPDATA%\Kiminola\models` for ASR models.
 - **Schema** (initial):
-  - `meetings` — id, title, space_id, created_at, duration_seconds
+  - `meetings` — id, title, nullable `space_id`, nullable `parent_meeting_id`, created_at, duration_seconds. Exactly one location column is set for saved Meetings.
   - `transcript_segments` — id, meeting_id, channel ('you'|'others'), start_ms, end_ms, text
   - `notes` — id, meeting_id, raw_markdown, updated_at
   - `note_drafts` — id, title, created_at, updated_at, raw_markdown, optional meeting_id, recovery_duration_seconds, recovery_transcript_json
-  - `spaces` — id, name, parent_id, created_at (adjacency list)
+  - `spaces` — id, name, parent_id, created_at (adjacency list). Spaces can contain Spaces; Meetings can be direct children of Spaces or Meetings.
   - `templates` — id, name, prompt, is_builtin
   - `settings` — key, value
   - `search_index` — FTS5 virtual table over meeting titles, notes, transcript segments
@@ -89,6 +90,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 **IN:**
 - Meeting library + FTS5 search over titles, notes, transcripts
+- Recursive Spaces/Meetings organization, context menus, validated drag-and-drop reparenting, and computed location paths in Home, detail, and Markdown export
 - Export: clipboard copy + `.md` notes / `.txt` transcript
 - Summary templates: general default + built-in library (1:1, hiring, weekly team, customer discovery, VC pitch) + user-created custom templates
 - Inline transcript editing

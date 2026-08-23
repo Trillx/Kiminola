@@ -2,6 +2,7 @@
 //! spaces, settings. Single bundled database under
 //! `%LOCALAPPDATA%\Kiminola\data\kiminola.db`, migrated on first use.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -68,6 +69,21 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+fn encode_library_location(location: Option<&LibraryLocation>) -> Result<Option<String>, String> {
+    location
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| format!("encode recovery location: {e}"))
+}
+
+fn decode_library_location(value: Option<&str>) -> Result<Option<LibraryLocation>, String> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| format!("decode recovery location: {e}"))
+}
+
 /* ---------- domain types ---------- */
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -78,13 +94,15 @@ pub struct NewSegment {
     pub end_ms: Option<i64>,
 }
 
-#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct MeetingSummary {
     pub id: i64,
     pub title: String,
     pub created_at: String,
     pub duration_seconds: i64,
     pub space_name: Option<String>,
+    pub location_path: Option<String>,
+    pub parent_meeting_id: Option<i64>,
 }
 
 #[derive(Debug, sqlx::FromRow, serde::Serialize)]
@@ -103,9 +121,52 @@ pub struct MeetingDetail {
     pub created_at: String,
     pub duration_seconds: i64,
     pub space_name: Option<String>,
+    pub location_path: Option<String>,
+    pub parent_meeting_id: Option<i64>,
     pub notepad: String,
     pub enhanced_markdown: Option<String>,
     pub transcript: Vec<SegmentOut>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LibraryLocation {
+    Space { id: i64 },
+    Meeting { id: i64 },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LibraryNode {
+    Space {
+        id: i64,
+        name: String,
+        children: Vec<LibraryNode>,
+    },
+    Meeting {
+        id: i64,
+        title: String,
+        created_at: String,
+        duration_seconds: i64,
+        children: Vec<LibraryNode>,
+    },
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct SpaceLocationRow {
+    id: i64,
+    name: String,
+    parent_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct MeetingLocationRow {
+    id: i64,
+    title: String,
+    created_at: String,
+    duration_seconds: i64,
+    space_id: Option<i64>,
+    parent_meeting_id: Option<i64>,
 }
 
 #[derive(Debug, sqlx::FromRow, serde::Serialize)]
@@ -147,6 +208,7 @@ pub struct NoteDraftDetail {
     pub meeting_id: Option<i64>,
     pub recovery_duration_seconds: i64,
     pub recovery_transcript: Vec<NewSegment>,
+    pub recovery_location: Option<LibraryLocation>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -159,6 +221,7 @@ struct NoteDraftRow {
     meeting_id: Option<i64>,
     recovery_duration_seconds: i64,
     recovery_transcript_json: String,
+    recovery_location_json: Option<String>,
 }
 
 async fn is_onboarding_complete_impl(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
@@ -205,6 +268,87 @@ pub async fn set_onboarding_complete(
 
 /* ---------- core logic (testable without Tauri state) ---------- */
 
+async fn default_space_id_impl(pool: &SqlitePool) -> Result<i64, String> {
+    if let Some(value) = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM settings WHERE key = 'default_space_id'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    {
+        if let Ok(id) = value.parse::<i64>() {
+            if sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?
+                .is_some()
+            {
+                return Ok(id);
+            }
+        }
+    }
+
+    let id = if let Some(id) = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM spaces WHERE name = 'Personal' ORDER BY id LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    {
+        id
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO spaces (name, created_at) VALUES ('Personal', ?) RETURNING id",
+        )
+        .bind(now_iso())
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?
+    };
+
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('default_space_id', ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(id.to_string())
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+async fn resolve_meeting_location_impl(
+    pool: &SqlitePool,
+    location: Option<LibraryLocation>,
+) -> Result<(Option<i64>, Option<i64>), String> {
+    match location {
+        Some(LibraryLocation::Space { id }) => {
+            let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            if exists.is_none() {
+                return Err("destination Space not found".to_string());
+            }
+            Ok((Some(id), None))
+        }
+        Some(LibraryLocation::Meeting { id }) => {
+            let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM meetings WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            if exists.is_none() {
+                return Err("destination Meeting not found".to_string());
+            }
+            Ok((None, Some(id)))
+        }
+        None => Ok((Some(default_space_id_impl(pool).await?), None)),
+    }
+}
+
 #[allow(dead_code)]
 async fn save_meeting_impl(
     pool: &SqlitePool,
@@ -224,6 +368,27 @@ pub(crate) async fn save_meeting_with_draft_impl(
     segments: &[NewSegment],
     note_draft_id: Option<i64>,
 ) -> Result<i64, String> {
+    save_meeting_with_location_impl(
+        pool,
+        title,
+        duration_seconds,
+        notepad,
+        segments,
+        note_draft_id,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn save_meeting_with_location_impl(
+    pool: &SqlitePool,
+    title: &str,
+    duration_seconds: i64,
+    notepad: &str,
+    segments: &[NewSegment],
+    note_draft_id: Option<i64>,
+    location: Option<LibraryLocation>,
+) -> Result<i64, String> {
     if let Some(draft_id) = note_draft_id {
         let attached_meeting = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT meeting_id FROM note_drafts WHERE id = ?",
@@ -241,19 +406,16 @@ pub(crate) async fn save_meeting_with_draft_impl(
         }
     }
 
-    // File under the default (first) space until space management ships.
-    let space_id: Option<i64> = sqlx::query_scalar("SELECT id FROM spaces ORDER BY id LIMIT 1")
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (space_id, parent_meeting_id) = resolve_meeting_location_impl(pool, location).await?;
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let meeting_id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO meetings (title, space_id, created_at, duration_seconds)
-         VALUES (?, ?, ?, ?) RETURNING id",
+        "INSERT INTO meetings (title, space_id, parent_meeting_id, created_at, duration_seconds)
+         VALUES (?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(title)
     .bind(space_id)
+    .bind(parent_meeting_id)
     .bind(now_iso())
     .bind(duration_seconds)
     .fetch_one(&mut *tx)
@@ -316,28 +478,143 @@ pub(crate) async fn save_meeting_with_draft_impl(
     Ok(meeting_id)
 }
 
-async fn list_meetings_impl(pool: &SqlitePool) -> Result<Vec<MeetingSummary>, String> {
-    sqlx::query_as::<_, MeetingSummary>(
-        "SELECT m.id, m.title, m.created_at, m.duration_seconds, s.name AS space_name
-         FROM meetings m LEFT JOIN spaces s ON s.id = m.space_id
-         ORDER BY m.created_at DESC, m.id DESC",
+async fn load_space_location_rows(pool: &SqlitePool) -> Result<Vec<SpaceLocationRow>, String> {
+    sqlx::query_as::<_, SpaceLocationRow>(
+        "SELECT id, name, parent_id
+         FROM spaces
+         ORDER BY created_at ASC, id ASC",
     )
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())
 }
 
+async fn load_meeting_location_rows(pool: &SqlitePool) -> Result<Vec<MeetingLocationRow>, String> {
+    sqlx::query_as::<_, MeetingLocationRow>(
+        "SELECT id, title, created_at, duration_seconds, space_id, parent_meeting_id
+         FROM meetings
+         ORDER BY created_at DESC, id DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Default)]
+struct ResolvedLocation {
+    space_name: Option<String>,
+    location_path: Option<String>,
+}
+
+fn resolve_location_path(
+    meeting_id: i64,
+    spaces: &HashMap<i64, SpaceLocationRow>,
+    meetings: &HashMap<i64, MeetingLocationRow>,
+) -> Result<ResolvedLocation, String> {
+    let mut meeting_names = Vec::new();
+    let mut current_meeting = Some(meeting_id);
+    let mut root_space_id = None;
+    let mut visited_meetings = HashSet::new();
+
+    while let Some(id) = current_meeting {
+        if !visited_meetings.insert(id) {
+            return Err("meeting hierarchy contains a cycle".to_string());
+        }
+        let row = meetings
+            .get(&id)
+            .ok_or_else(|| "meeting hierarchy references a missing meeting".to_string())?;
+        meeting_names.push(row.title.clone());
+        if let Some(parent_id) = row.parent_meeting_id {
+            current_meeting = Some(parent_id);
+        } else {
+            root_space_id = row.space_id;
+            current_meeting = None;
+        }
+    }
+
+    let mut space_names = Vec::new();
+    let mut current_space = root_space_id;
+    let mut visited_spaces = HashSet::new();
+    while let Some(id) = current_space {
+        if !visited_spaces.insert(id) {
+            return Err("Space hierarchy contains a cycle".to_string());
+        }
+        let row = spaces
+            .get(&id)
+            .ok_or_else(|| "meeting hierarchy references a missing Space".to_string())?;
+        space_names.push(row.name.clone());
+        current_space = row.parent_id;
+    }
+
+    space_names.reverse();
+    meeting_names.reverse();
+    // A location path describes the container, not the meeting itself. This
+    // keeps the same value useful in the home list, detail metadata, and
+    // Markdown frontmatter.
+    meeting_names.pop();
+    let space_name = space_names.last().cloned();
+    let mut segments = space_names;
+    segments.extend(meeting_names);
+
+    Ok(ResolvedLocation {
+        space_name,
+        location_path: (!segments.is_empty()).then(|| segments.join(" / ")),
+    })
+}
+
+fn meeting_summary(
+    row: MeetingLocationRow,
+    spaces: &HashMap<i64, SpaceLocationRow>,
+    meetings: &HashMap<i64, MeetingLocationRow>,
+) -> Result<MeetingSummary, String> {
+    let location = resolve_location_path(row.id, spaces, meetings)?;
+    Ok(MeetingSummary {
+        id: row.id,
+        title: row.title,
+        created_at: row.created_at,
+        duration_seconds: row.duration_seconds,
+        space_name: location.space_name,
+        location_path: location.location_path,
+        parent_meeting_id: row.parent_meeting_id,
+    })
+}
+
+async fn list_meetings_impl(pool: &SqlitePool) -> Result<Vec<MeetingSummary>, String> {
+    let space_rows = load_space_location_rows(pool).await?;
+    let meeting_rows = load_meeting_location_rows(pool).await?;
+    let spaces = space_rows.into_iter().map(|row| (row.id, row)).collect();
+    let meetings: HashMap<_, _> = meeting_rows
+        .iter()
+        .cloned()
+        .map(|row| (row.id, row))
+        .collect();
+    meeting_rows
+        .into_iter()
+        .map(|row| meeting_summary(row, &spaces, &meetings))
+        .collect()
+}
+
 pub(crate) async fn get_meeting_impl(pool: &SqlitePool, id: i64) -> Result<MeetingDetail, String> {
-    let meeting = sqlx::query_as::<_, MeetingSummary>(
-        "SELECT m.id, m.title, m.created_at, m.duration_seconds, s.name AS space_name
-         FROM meetings m LEFT JOIN spaces s ON s.id = m.space_id
-         WHERE m.id = ?",
+    let meeting_row = sqlx::query_as::<_, MeetingLocationRow>(
+        "SELECT id, title, created_at, duration_seconds, space_id, parent_meeting_id
+         FROM meetings
+         WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?
     .ok_or_else(|| "meeting not found".to_string())?;
+
+    let space_rows = load_space_location_rows(pool).await?;
+    let meeting_rows = load_meeting_location_rows(pool).await?;
+    let spaces = space_rows.into_iter().map(|row| (row.id, row)).collect();
+    let meetings: HashMap<_, _> = meeting_rows
+        .iter()
+        .cloned()
+        .map(|row| (row.id, row))
+        .collect();
+    let location = resolve_location_path(meeting_row.id, &spaces, &meetings)?;
 
     let transcript = sqlx::query_as::<_, SegmentOut>(
         "SELECT id, channel, text, start_ms, end_ms
@@ -357,27 +634,66 @@ pub(crate) async fn get_meeting_impl(pool: &SqlitePool, id: i64) -> Result<Meeti
             .unwrap_or((String::new(), None));
 
     Ok(MeetingDetail {
-        id: meeting.id,
-        title: meeting.title,
-        created_at: meeting.created_at,
-        duration_seconds: meeting.duration_seconds,
-        space_name: meeting.space_name,
+        id: meeting_row.id,
+        title: meeting_row.title,
+        created_at: meeting_row.created_at,
+        duration_seconds: meeting_row.duration_seconds,
+        space_name: location.space_name,
+        location_path: location.location_path,
+        parent_meeting_id: meeting_row.parent_meeting_id,
         notepad,
         enhanced_markdown,
         transcript,
     })
 }
 
-async fn create_space_impl(pool: &SqlitePool, name: &str) -> Result<i64, String> {
+async fn create_space_impl(
+    pool: &SqlitePool,
+    name: &str,
+    parent_space_id: Option<i64>,
+) -> Result<i64, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Space name cannot be empty".to_string());
+    }
+    if let Some(parent_id) = parent_space_id {
+        let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
+            .bind(parent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        if exists.is_none() {
+            return Err("parent Space not found".to_string());
+        }
+    }
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO spaces (name, created_at) VALUES (?, ?) RETURNING id",
+        "INSERT INTO spaces (name, parent_id, created_at) VALUES (?, ?, ?) RETURNING id",
     )
-    .bind(name)
+    .bind(trimmed)
+    .bind(parent_space_id)
     .bind(now_iso())
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
     Ok(id)
+}
+
+async fn rename_space_impl(pool: &SqlitePool, space_id: i64, name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Space name cannot be empty".to_string());
+    }
+    let rows = sqlx::query("UPDATE spaces SET name = ? WHERE id = ?")
+        .bind(trimmed)
+        .bind(space_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .rows_affected();
+    if rows == 0 {
+        return Err("Space not found".to_string());
+    }
+    Ok(())
 }
 
 fn note_draft_title() -> String {
@@ -387,15 +703,21 @@ fn note_draft_title() -> String {
     )
 }
 
-pub(crate) async fn create_note_draft_impl(pool: &SqlitePool) -> Result<i64, String> {
+pub(crate) async fn create_note_draft_with_location_impl(
+    pool: &SqlitePool,
+    location: Option<&LibraryLocation>,
+) -> Result<i64, String> {
     let now = now_iso();
+    let location_json = encode_library_location(location)?;
     sqlx::query(
-        "INSERT INTO note_drafts (title, created_at, updated_at, raw_markdown)
-         VALUES (?, ?, ?, '')",
+        "INSERT INTO note_drafts
+            (title, created_at, updated_at, raw_markdown, recovery_location_json)
+         VALUES (?, ?, ?, '', ?)",
     )
     .bind(note_draft_title())
     .bind(&now)
     .bind(&now)
+    .bind(location_json)
     .execute(pool)
     .await
     .map_err(|e| format!("failed to create note draft: {e}"))?;
@@ -403,6 +725,10 @@ pub(crate) async fn create_note_draft_impl(pool: &SqlitePool) -> Result<i64, Str
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn create_note_draft_impl(pool: &SqlitePool) -> Result<i64, String> {
+    create_note_draft_with_location_impl(pool, None).await
 }
 
 pub(crate) async fn list_note_drafts_impl(
@@ -425,7 +751,8 @@ pub(crate) async fn get_note_draft_impl(
 ) -> Result<NoteDraftDetail, String> {
     let row = sqlx::query_as::<_, NoteDraftRow>(
         "SELECT id, title, created_at, updated_at, raw_markdown, meeting_id,
-                recovery_duration_seconds, recovery_transcript_json
+                recovery_duration_seconds, recovery_transcript_json,
+                recovery_location_json
          FROM note_drafts
          WHERE id = ?",
     )
@@ -436,6 +763,7 @@ pub(crate) async fn get_note_draft_impl(
     .ok_or_else(|| "note draft not found".to_string())?;
     let recovery_transcript = serde_json::from_str(&row.recovery_transcript_json)
         .map_err(|e| format!("invalid recovery transcript: {e}"))?;
+    let recovery_location = decode_library_location(row.recovery_location_json.as_deref())?;
     Ok(NoteDraftDetail {
         id: row.id,
         title: row.title,
@@ -445,6 +773,7 @@ pub(crate) async fn get_note_draft_impl(
         meeting_id: row.meeting_id,
         recovery_duration_seconds: row.recovery_duration_seconds,
         recovery_transcript,
+        recovery_location,
     })
 }
 
@@ -476,17 +805,20 @@ pub(crate) async fn update_note_draft_recovery_impl(
     raw_markdown: &str,
     duration_seconds: i64,
     transcript: &[NewSegment],
+    location: Option<&LibraryLocation>,
 ) -> Result<(), String> {
     let transcript_json =
         serde_json::to_string(transcript).map_err(|e| format!("encode recovery transcript: {e}"))?;
+    let location_json = encode_library_location(location)?;
     let rows = sqlx::query(
         "UPDATE note_drafts SET raw_markdown = ?, recovery_duration_seconds = ?,
-             recovery_transcript_json = ?, updated_at = ?
+             recovery_transcript_json = ?, recovery_location_json = ?, updated_at = ?
          WHERE id = ? AND meeting_id IS NULL",
     )
     .bind(raw_markdown)
     .bind(duration_seconds.max(0))
     .bind(transcript_json)
+    .bind(location_json)
     .bind(now_iso())
     .bind(id)
     .execute(pool)
@@ -540,17 +872,346 @@ async fn list_spaces_impl(pool: &SqlitePool) -> Result<Vec<SpaceOut>, String> {
     Ok(out)
 }
 
+fn build_meeting_node(
+    id: i64,
+    meetings: &HashMap<i64, MeetingLocationRow>,
+    meetings_by_parent: &HashMap<i64, Vec<i64>>,
+    visiting: &mut HashSet<i64>,
+) -> Result<LibraryNode, String> {
+    if !visiting.insert(id) {
+        return Err("meeting hierarchy contains a cycle".to_string());
+    }
+    let row = meetings
+        .get(&id)
+        .ok_or_else(|| "meeting hierarchy references a missing meeting".to_string())?;
+    let child_ids = meetings_by_parent.get(&id).cloned().unwrap_or_default();
+    let mut children = Vec::with_capacity(child_ids.len());
+    for child_id in child_ids {
+        children.push(build_meeting_node(
+            child_id,
+            meetings,
+            meetings_by_parent,
+            visiting,
+        )?);
+    }
+    visiting.remove(&id);
+    Ok(LibraryNode::Meeting {
+        id: row.id,
+        title: row.title.clone(),
+        created_at: row.created_at.clone(),
+        duration_seconds: row.duration_seconds,
+        children,
+    })
+}
+
+fn build_space_node(
+    id: i64,
+    spaces: &HashMap<i64, SpaceLocationRow>,
+    child_spaces: &HashMap<Option<i64>, Vec<i64>>,
+    meetings_by_space: &HashMap<i64, Vec<i64>>,
+    meetings: &HashMap<i64, MeetingLocationRow>,
+    meetings_by_parent: &HashMap<i64, Vec<i64>>,
+    visiting_spaces: &mut HashSet<i64>,
+    visiting_meetings: &mut HashSet<i64>,
+) -> Result<LibraryNode, String> {
+    if !visiting_spaces.insert(id) {
+        return Err("Space hierarchy contains a cycle".to_string());
+    }
+    let row = spaces
+        .get(&id)
+        .ok_or_else(|| "Space hierarchy references a missing Space".to_string())?;
+
+    let mut children = Vec::new();
+    for child_id in child_spaces.get(&Some(id)).cloned().unwrap_or_default() {
+        children.push(build_space_node(
+            child_id,
+            spaces,
+            child_spaces,
+            meetings_by_space,
+            meetings,
+            meetings_by_parent,
+            visiting_spaces,
+            visiting_meetings,
+        )?);
+    }
+    for meeting_id in meetings_by_space.get(&id).cloned().unwrap_or_default() {
+        children.push(build_meeting_node(
+            meeting_id,
+            meetings,
+            meetings_by_parent,
+            visiting_meetings,
+        )?);
+    }
+
+    visiting_spaces.remove(&id);
+    Ok(LibraryNode::Space {
+        id: row.id,
+        name: row.name.clone(),
+        children,
+    })
+}
+
+async fn list_library_tree_impl(pool: &SqlitePool) -> Result<Vec<LibraryNode>, String> {
+    let space_rows = load_space_location_rows(pool).await?;
+    let meeting_rows = load_meeting_location_rows(pool).await?;
+    let spaces: HashMap<_, _> = space_rows
+        .iter()
+        .cloned()
+        .map(|row| (row.id, row))
+        .collect();
+    let meetings: HashMap<_, _> = meeting_rows
+        .iter()
+        .cloned()
+        .map(|row| (row.id, row))
+        .collect();
+
+    let mut child_spaces: HashMap<Option<i64>, Vec<i64>> = HashMap::new();
+    for row in &space_rows {
+        let parent_id = row.parent_id.filter(|id| spaces.contains_key(id));
+        child_spaces.entry(parent_id).or_default().push(row.id);
+    }
+
+    let root_space_id = child_spaces
+        .get(&None)
+        .and_then(|ids| ids.first().copied());
+    let mut meetings_by_space: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut meetings_by_parent: HashMap<i64, Vec<i64>> = HashMap::new();
+    for row in &meeting_rows {
+        if row.parent_meeting_id.is_some() && row.space_id.is_some() {
+            return Err(format!(
+                "Meeting {} has both a Space and a parent Meeting",
+                row.id
+            ));
+        }
+        if let Some(parent_id) = row.parent_meeting_id {
+            if !meetings.contains_key(&parent_id) {
+                return Err(format!(
+                    "Meeting {} references missing parent Meeting {}",
+                    row.id, parent_id
+                ));
+            }
+            meetings_by_parent.entry(parent_id).or_default().push(row.id);
+        } else if let Some(space_id) = row.space_id.or(root_space_id) {
+            if !spaces.contains_key(&space_id) {
+                return Err(format!("Meeting {} references missing Space {}", row.id, space_id));
+            }
+            meetings_by_space.entry(space_id).or_default().push(row.id);
+        } else {
+            return Err("cannot place a meeting because no Space exists".to_string());
+        }
+    }
+
+    // Validate every chain before rendering roots. Without this pass a cycle
+    // that has another healthy root could otherwise disappear from the tree.
+    for row in &meeting_rows {
+        let location = resolve_location_path(row.id, &spaces, &meetings)?;
+        if row.parent_meeting_id.is_some() && location.space_name.is_none() {
+            return Err(format!("Meeting {} has no root Space", row.id));
+        }
+    }
+
+    let mut tree = Vec::new();
+    let mut visiting_spaces = HashSet::new();
+    let mut visiting_meetings = HashSet::new();
+    for id in child_spaces.get(&None).cloned().unwrap_or_default() {
+        tree.push(build_space_node(
+            id,
+            &spaces,
+            &child_spaces,
+            &meetings_by_space,
+            &meetings,
+            &meetings_by_parent,
+            &mut visiting_spaces,
+            &mut visiting_meetings,
+        )?);
+    }
+    if tree.is_empty() && !spaces.is_empty() {
+        return Err("Space hierarchy contains a cycle".to_string());
+    }
+    Ok(tree)
+}
+
+async fn move_library_node_impl(
+    pool: &SqlitePool,
+    node: LibraryLocation,
+    destination: Option<LibraryLocation>,
+) -> Result<(), String> {
+    if destination == Some(node) {
+        return Err("an item cannot contain itself".to_string());
+    }
+
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    match (node, destination) {
+        (LibraryLocation::Space { id }, None) => {
+            let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            if exists.is_none() {
+                return Err("Space not found".to_string());
+            }
+            sqlx::query("UPDATE spaces SET parent_id = NULL WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        (
+            LibraryLocation::Space { id },
+            Some(LibraryLocation::Space { id: destination_id }),
+        ) => {
+            let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            if exists.is_none() {
+                return Err("Space not found".to_string());
+            }
+            let destination_exists =
+                sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
+                    .bind(destination_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            if destination_exists.is_none() {
+                return Err("destination Space not found".to_string());
+            }
+            let is_descendant: i64 = sqlx::query_scalar(
+                "WITH RECURSIVE descendants(id) AS (
+                     SELECT id FROM spaces WHERE parent_id = ?
+                     UNION ALL
+                     SELECT spaces.id FROM spaces
+                     JOIN descendants ON spaces.parent_id = descendants.id
+                 )
+                 SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?)",
+            )
+            .bind(id)
+            .bind(destination_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            if is_descendant != 0 {
+                return Err("a Space cannot move inside one of its descendants".to_string());
+            }
+            sqlx::query("UPDATE spaces SET parent_id = ? WHERE id = ?")
+                .bind(destination_id)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        (LibraryLocation::Space { .. }, Some(LibraryLocation::Meeting { .. })) => {
+            return Err("Spaces can only move into Spaces".to_string());
+        }
+        (LibraryLocation::Meeting { .. }, None) => {
+            return Err("Meetings can only move into Spaces or Meetings".to_string());
+        }
+        (
+            LibraryLocation::Meeting { id },
+            Some(LibraryLocation::Space { id: destination_id }),
+        ) => {
+            let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM meetings WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            if exists.is_none() {
+                return Err("Meeting not found".to_string());
+            }
+            let destination_exists =
+                sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
+                    .bind(destination_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            if destination_exists.is_none() {
+                return Err("destination Space not found".to_string());
+            }
+            sqlx::query(
+                "UPDATE meetings
+                 SET space_id = ?, parent_meeting_id = NULL
+                 WHERE id = ?",
+            )
+            .bind(destination_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        (
+            LibraryLocation::Meeting { id },
+            Some(LibraryLocation::Meeting { id: destination_id }),
+        ) => {
+            let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM meetings WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            if exists.is_none() {
+                return Err("Meeting not found".to_string());
+            }
+            let destination_exists =
+                sqlx::query_scalar::<_, i64>("SELECT id FROM meetings WHERE id = ?")
+                    .bind(destination_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            if destination_exists.is_none() {
+                return Err("destination Meeting not found".to_string());
+            }
+            let is_descendant: i64 = sqlx::query_scalar(
+                "WITH RECURSIVE descendants(id) AS (
+                     SELECT id FROM meetings WHERE parent_meeting_id = ?
+                     UNION ALL
+                     SELECT meetings.id FROM meetings
+                     JOIN descendants ON meetings.parent_meeting_id = descendants.id
+                 )
+                 SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?)",
+            )
+            .bind(id)
+            .bind(destination_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            if is_descendant != 0 {
+                return Err("a Meeting cannot move inside one of its descendants".to_string());
+            }
+            sqlx::query(
+                "UPDATE meetings
+                 SET space_id = NULL, parent_meeting_id = ?
+                 WHERE id = ?",
+            )
+            .bind(destination_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().await.map_err(|e| e.to_string())
+}
+
 async fn update_meeting_title_impl(
     pool: &SqlitePool,
     meeting_id: i64,
     title: &str,
 ) -> Result<(), String> {
-    sqlx::query("UPDATE meetings SET title = ? WHERE id = ?")
-        .bind(title)
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err("Meeting title cannot be empty".to_string());
+    }
+    let rows = sqlx::query("UPDATE meetings SET title = ? WHERE id = ?")
+        .bind(trimmed)
         .bind(meeting_id)
         .execute(pool)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .rows_affected();
+    if rows == 0 {
+        return Err("Meeting not found".to_string());
+    }
     Ok(())
 }
 
@@ -671,11 +1332,10 @@ pub(crate) async fn search_meetings_impl(
     if safe.is_empty() {
         return Ok(vec![]);
     }
-    sqlx::query_as::<_, MeetingSummary>(
-        "SELECT m.id, m.title, m.created_at, m.duration_seconds, s.name AS space_name
+    let rows = sqlx::query_as::<_, MeetingLocationRow>(
+        "SELECT m.id, m.title, m.created_at, m.duration_seconds, m.space_id, m.parent_meeting_id
          FROM search_index
          JOIN meetings m ON m.id = search_index.rowid
-         LEFT JOIN spaces s ON s.id = m.space_id
          WHERE search_index MATCH ?
          ORDER BY rank DESC
          LIMIT 50",
@@ -683,7 +1343,17 @@ pub(crate) async fn search_meetings_impl(
     .bind(safe)
     .fetch_all(pool)
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let space_rows = load_space_location_rows(pool).await?;
+    let all_meeting_rows = load_meeting_location_rows(pool).await?;
+    let spaces = space_rows.into_iter().map(|row| (row.id, row)).collect();
+    let meetings: HashMap<_, _> = all_meeting_rows
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect();
+    rows.into_iter()
+        .map(|row| meeting_summary(row, &spaces, &meetings))
+        .collect()
 }
 
 pub(crate) async fn update_enhanced_notes_impl(
@@ -748,15 +1418,17 @@ pub async fn save_meeting(
     notepad: String,
     segments: Vec<NewSegment>,
     note_draft_id: Option<i64>,
+    location: Option<LibraryLocation>,
 ) -> Result<i64, String> {
     let pool = ensure_pool(&state.pool).await?;
-    save_meeting_with_draft_impl(
+    save_meeting_with_location_impl(
         &pool,
         &title,
         duration_seconds,
         &notepad,
         &segments,
         note_draft_id,
+        location,
     )
     .await
 }
@@ -774,15 +1446,22 @@ pub async fn get_meeting(state: State<'_, DbState>, id: i64) -> Result<MeetingDe
 }
 
 #[tauri::command]
-pub async fn create_space(state: State<'_, DbState>, name: String) -> Result<i64, String> {
+pub async fn create_space(
+    state: State<'_, DbState>,
+    name: String,
+    parent_space_id: Option<i64>,
+) -> Result<i64, String> {
     let pool = ensure_pool(&state.pool).await?;
-    create_space_impl(&pool, &name).await
+    create_space_impl(&pool, &name, parent_space_id).await
 }
 
 #[tauri::command]
-pub async fn create_note_draft(state: State<'_, DbState>) -> Result<i64, String> {
+pub async fn create_note_draft(
+    state: State<'_, DbState>,
+    location: Option<LibraryLocation>,
+) -> Result<i64, String> {
     let pool = ensure_pool(&state.pool).await?;
-    create_note_draft_impl(&pool).await
+    create_note_draft_with_location_impl(&pool, location.as_ref()).await
 }
 
 #[tauri::command]
@@ -814,6 +1493,7 @@ pub async fn update_note_draft_recovery(
     raw_markdown: String,
     duration_seconds: i64,
     transcript: Vec<NewSegment>,
+    location: Option<LibraryLocation>,
 ) -> Result<(), String> {
     let pool = ensure_pool(&state.pool).await?;
     update_note_draft_recovery_impl(
@@ -822,6 +1502,7 @@ pub async fn update_note_draft_recovery(
         &raw_markdown,
         duration_seconds,
         &transcript,
+        location.as_ref(),
     )
     .await
 }
@@ -836,6 +1517,32 @@ pub async fn delete_note_draft(state: State<'_, DbState>, id: i64) -> Result<(),
 pub async fn list_spaces(state: State<'_, DbState>) -> Result<Vec<SpaceOut>, String> {
     let pool = ensure_pool(&state.pool).await?;
     list_spaces_impl(&pool).await
+}
+
+#[tauri::command]
+pub async fn list_library_tree(state: State<'_, DbState>) -> Result<Vec<LibraryNode>, String> {
+    let pool = ensure_pool(&state.pool).await?;
+    list_library_tree_impl(&pool).await
+}
+
+#[tauri::command]
+pub async fn rename_space(
+    state: State<'_, DbState>,
+    space_id: i64,
+    name: String,
+) -> Result<(), String> {
+    let pool = ensure_pool(&state.pool).await?;
+    rename_space_impl(&pool, space_id, &name).await
+}
+
+#[tauri::command]
+pub async fn move_library_node(
+    state: State<'_, DbState>,
+    node: LibraryLocation,
+    destination: Option<LibraryLocation>,
+) -> Result<(), String> {
+    let pool = ensure_pool(&state.pool).await?;
+    move_library_node_impl(&pool, node, destination).await
 }
 
 #[tauri::command]
@@ -1003,6 +1710,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn library_hierarchy_assigns_locations_and_validates_moves() {
+        let (pool, path) = test_pool("library-hierarchy").await;
+        let personal_id = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM spaces WHERE name = 'Personal' ORDER BY id LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Personal Space");
+        let work_id = create_space_impl(&pool, "Work", None)
+            .await
+            .expect("create Work");
+        let engineering_id = create_space_impl(&pool, "Engineering", Some(work_id))
+            .await
+            .expect("create Engineering child");
+
+        let parent_id = save_meeting_with_location_impl(
+            &pool,
+            "Planning",
+            60,
+            "parent notes",
+            &[],
+            None,
+            Some(LibraryLocation::Space { id: work_id }),
+        )
+        .await
+        .expect("save parent Meeting");
+        let child_id = save_meeting_with_location_impl(
+            &pool,
+            "Follow-up",
+            30,
+            "child notes",
+            &[],
+            None,
+            Some(LibraryLocation::Meeting { id: parent_id }),
+        )
+        .await
+        .expect("save child Meeting");
+        let grandchild_id = save_meeting_with_location_impl(
+            &pool,
+            "Decision",
+            15,
+            "grandchild notes",
+            &[],
+            None,
+            Some(LibraryLocation::Meeting { id: child_id }),
+        )
+        .await
+        .expect("save grandchild Meeting");
+
+        let invalid_raw_insert = sqlx::query(
+            "INSERT INTO meetings (title, space_id, parent_meeting_id, created_at, duration_seconds)
+             VALUES ('invalid', NULL, NULL, ?, 0)",
+        )
+        .bind(now_iso())
+        .execute(&pool)
+        .await;
+        assert!(invalid_raw_insert.is_err(), "database must enforce one location");
+
+        let parent = get_meeting_impl(&pool, parent_id).await.expect("get parent");
+        assert_eq!(parent.space_name.as_deref(), Some("Work"));
+        assert_eq!(parent.location_path.as_deref(), Some("Work"));
+        assert_eq!(parent.notepad, "parent notes");
+        let child = get_meeting_impl(&pool, child_id).await.expect("get child");
+        assert_eq!(child.parent_meeting_id, Some(parent_id));
+        assert_eq!(child.location_path.as_deref(), Some("Work / Planning"));
+        assert_eq!(child.notepad, "child notes");
+        let grandchild = get_meeting_impl(&pool, grandchild_id)
+            .await
+            .expect("get grandchild");
+        assert_eq!(grandchild.location_path.as_deref(), Some("Work / Planning / Follow-up"));
+
+        let tree = list_library_tree_impl(&pool).await.expect("list tree");
+        let tree_json = serde_json::to_string(&tree).expect("serialize tree");
+        assert!(tree_json.contains("Engineering"));
+        assert!(tree_json.contains("Planning"));
+        assert!(tree_json.contains("Follow-up"));
+        assert!(tree_json.contains("Decision"));
+
+        // Meeting moves clear the old Space and preserve the entire child
+        // subtree under the moved Meeting.
+        move_library_node_impl(
+            &pool,
+            LibraryLocation::Meeting { id: child_id },
+            Some(LibraryLocation::Space { id: engineering_id }),
+        )
+        .await
+        .expect("move child to Space");
+        let child = get_meeting_impl(&pool, child_id).await.expect("get moved child");
+        assert_eq!(child.space_name.as_deref(), Some("Engineering"));
+        assert_eq!(child.location_path.as_deref(), Some("Work / Engineering"));
+        let grandchild = get_meeting_impl(&pool, grandchild_id)
+            .await
+            .expect("get moved grandchild");
+        assert_eq!(grandchild.location_path.as_deref(), Some("Work / Engineering / Follow-up"));
+
+        // Space reparenting changes the computed path without changing the
+        // direct Meeting container.
+        move_library_node_impl(
+            &pool,
+            LibraryLocation::Space { id: engineering_id },
+            Some(LibraryLocation::Space { id: personal_id }),
+        )
+        .await
+        .expect("reparent Engineering Space");
+        let child = get_meeting_impl(&pool, child_id)
+            .await
+            .expect("get reparented child");
+        assert_eq!(child.location_path.as_deref(), Some("Personal / Engineering"));
+
+        move_library_node_impl(&pool, LibraryLocation::Space { id: engineering_id }, None)
+            .await
+            .expect("move Engineering Space to library root");
+        let child = get_meeting_impl(&pool, child_id)
+            .await
+            .expect("get root-level child");
+        assert_eq!(child.location_path.as_deref(), Some("Engineering"));
+
+        move_library_node_impl(
+            &pool,
+            LibraryLocation::Space { id: engineering_id },
+            Some(LibraryLocation::Space { id: personal_id }),
+        )
+        .await
+        .expect("move Engineering Space back under Personal");
+
+        move_library_node_impl(
+            &pool,
+            LibraryLocation::Meeting { id: child_id },
+            Some(LibraryLocation::Meeting { id: parent_id }),
+        )
+        .await
+        .expect("move child under parent Meeting");
+        let child = get_meeting_impl(&pool, child_id).await.expect("get nested child");
+        assert_eq!(child.parent_meeting_id, Some(parent_id));
+        assert_eq!(child.location_path.as_deref(), Some("Work / Planning"));
+
+        let cycle_error = move_library_node_impl(
+            &pool,
+            LibraryLocation::Meeting { id: parent_id },
+            Some(LibraryLocation::Meeting { id: grandchild_id }),
+        )
+        .await
+        .expect_err("reject Meeting descendant cycle");
+        assert!(cycle_error.contains("descendants"));
+
+        let invalid_space_target = move_library_node_impl(
+            &pool,
+            LibraryLocation::Space { id: work_id },
+            Some(LibraryLocation::Meeting { id: parent_id }),
+        )
+        .await
+        .expect_err("reject Space into Meeting");
+        assert!(invalid_space_target.contains("only move into Spaces"));
+
+        drop(pool);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn missing_meeting_errors() {
         let (pool, path) = test_pool("missing").await;
         let err = get_meeting_impl(&pool, 999).await.unwrap_err();
@@ -1031,6 +1897,7 @@ mod tests {
             "follow up with the team",
             37,
             &recovery_transcript,
+            None,
         )
         .await
         .expect("update recovery snapshot");
@@ -1067,6 +1934,48 @@ mod tests {
                 .meeting_id,
             Some(meeting_id)
         );
+
+        drop(pool);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn recording_recovery_preserves_library_location() {
+        let (pool, path) = test_pool("note-draft-location").await;
+        let space_id = create_space_impl(&pool, "Recovery", None)
+            .await
+            .expect("create recovery Space");
+        let location = LibraryLocation::Space { id: space_id };
+        let draft_id = create_note_draft_with_location_impl(&pool, Some(&location))
+            .await
+            .expect("create recovery draft");
+
+        update_note_draft_recovery_impl(&pool, draft_id, "notes", 12, &[], Some(&location))
+            .await
+            .expect("save recovery location");
+        let draft = get_note_draft_impl(&pool, draft_id)
+            .await
+            .expect("get recovery draft");
+        assert_eq!(draft.recovery_location, Some(location));
+
+        drop(pool);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn renamed_default_space_remains_the_recording_fallback() {
+        let (pool, path) = test_pool("renamed-default-space").await;
+        let default_id = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM spaces WHERE name = 'Personal' ORDER BY id LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("seeded default Space");
+
+        rename_space_impl(&pool, default_id, "Home")
+            .await
+            .expect("rename default Space");
+        assert_eq!(default_space_id_impl(&pool).await.expect("default Space"), default_id);
 
         drop(pool);
         let _ = std::fs::remove_file(path);

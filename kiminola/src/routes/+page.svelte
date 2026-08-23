@@ -107,7 +107,7 @@
           <div class="doc-icon">📝</div>
           <div class="details">
             <div class="title">{meeting.title}</div>
-            <div class="meta">{meeting.space_name ?? ""}</div>
+            <div class="meta">{meeting.location_path ?? meeting.space_name ?? ""}</div>
           </div>
           <div class="time">{dayLabel(meeting.created_at)}</div>
         </a>

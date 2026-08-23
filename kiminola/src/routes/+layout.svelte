@@ -9,6 +9,7 @@
   import Sidebar from "$lib/components/Sidebar.svelte";
   import Topbar from "$lib/components/Topbar.svelte";
   import MeetingPresencePrompt from "$lib/components/MeetingPresencePrompt.svelte";
+  import { libraryDestinationState, recordingHref } from "$lib/library-tree.svelte";
 
   let { children } = $props();
   let compactWindow = $state(false);
@@ -60,7 +61,7 @@
     let unlisten: (() => void) | undefined;
     onShortcutTriggered(() => {
       if (page.url.pathname !== "/record") {
-        goto("/record");
+        goto(recordingHref(libraryDestinationState.last));
       }
     }).then((fn) => {
       unlisten = fn;
