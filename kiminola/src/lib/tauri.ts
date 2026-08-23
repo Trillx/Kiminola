@@ -49,6 +49,10 @@ export function onTranscriptEvent(
   });
 }
 
+export function onRecordingQuitBlocked(handler: () => void): Promise<UnlistenFn> {
+  return listen<unknown>("recording:quit-blocked", () => handler());
+}
+
 /* ---------- persistence (SQLite via src-tauri db.rs) ---------- */
 
 export interface MeetingSummary {

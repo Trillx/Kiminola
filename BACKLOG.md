@@ -1,0 +1,15 @@
+# Kimi Nola improvement backlog
+
+Ordered by user impact: data loss and crashes first, then broken flows, test gaps, UX, accessibility, polish, and refactors. Keep each item small enough for one verified commit.
+
+## Queued
+
+- [ ] **P0 · Add recoverable checkpoints for active meetings.** A process crash or forced shutdown can still erase the transcript and notes accumulated before the meeting is saved.
+- [ ] **P1 · Surface recording startup failures.** The recording page currently continues its timer and looks active when microphone startup fails.
+- [ ] **P1 · Make stop-and-save failures retryable.** A failed stop or database save leaves the recording page disabled without a visible recovery action.
+- [ ] **P2 · Detect microphone queue pressure.** The capture callback silently drops microphone buffers when the bounded queue is full (`recording_session.rs` TODO).
+- [ ] **P2 · Base elapsed duration on a monotonic clock.** The one-second UI interval can drift while the app is suspended or the window is hidden.
+
+## Completed
+
+- [x] **P0 · Block tray quit while a meeting is recording.** Active sessions now keep the process alive, restore the recording window, and explain how to save or intentionally cancel. Verified 2026-08-22.

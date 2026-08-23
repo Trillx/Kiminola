@@ -15,6 +15,7 @@
     saveMeeting,
     getNoteDraft,
     onTranscriptEvent,
+    onRecordingQuitBlocked,
     type TranscriptEvent,
     type TranscriptLine,
   } from "$lib/tauri";
@@ -30,6 +31,7 @@
   let paused = $state(false);
   let stopping = $state(false);
   let noteDraftId = $state<number | null>(null);
+  let quitBlocked = $state(false);
 
   let timerText = $derived(
     `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`,
@@ -40,16 +42,21 @@
     const timer = setInterval(() => {
       if (!paused) elapsed += 1;
     }, 1000);
-    let unlisten: (() => void) | undefined;
+    let unlisten: (() => void)[] = [];
 
     const draftParam = page.url.searchParams.get("draft");
     const requestedDraftId = draftParam ? Number(draftParam) : NaN;
 
-    const startPromise = onTranscriptEvent((event: TranscriptEvent) => {
-      lines = applyTranscriptEvent(lines, event);
-      })
-      .then((fn) => {
-        unlisten = fn;
+    const startPromise = Promise.all([
+      onTranscriptEvent((event: TranscriptEvent) => {
+        lines = applyTranscriptEvent(lines, event);
+      }),
+      onRecordingQuitBlocked(() => {
+        quitBlocked = true;
+      }),
+    ])
+      .then((listeners) => {
+        unlisten = listeners;
         if (!Number.isFinite(requestedDraftId)) {
           return startRecording();
         }
@@ -69,7 +76,7 @@
       // Wait for the listener + start sequence to finish before stopping,
       // so we don't try to stop a session that hasn't started yet.
       startPromise.finally(() => {
-        unlisten?.();
+        for (const listener of unlisten) listener();
         stopRecording().catch(() => {
           // Best-effort cleanup; the backend may already have stopped.
         });
@@ -167,6 +174,16 @@
         Stop meeting
       </Button>
     </div>
+
+    {#if quitBlocked}
+      <div class="recording-quit-warning" role="alert">
+        <div>
+          <strong>Finish this meeting before quitting.</strong>
+          <span>Stop the meeting to save it, or cancel to discard it intentionally.</span>
+        </div>
+        <Button variant="ghost" size="sm" onclick={() => (quitBlocked = false)}>Dismiss</Button>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -236,5 +253,28 @@
   }
   :global(.pause-stop-link:hover) {
     color: var(--ink);
+  }
+
+  .recording-quit-warning {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 14px;
+    padding: 12px 14px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .recording-quit-warning div {
+    display: grid;
+    gap: 2px;
+  }
+
+  .recording-quit-warning span {
+    color: var(--text-muted);
   }
 </style>

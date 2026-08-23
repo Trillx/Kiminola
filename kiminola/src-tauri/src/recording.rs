@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,7 @@ pub struct RecordingState {
     session: Mutex<Option<ActiveRecording>>,
     asr_engine: Arc<tokio::sync::OnceCell<Option<Arc<AsrEngine>>>>,
     pending_loopback_target: SyncMutex<Option<PendingLoopbackTarget>>,
+    active: AtomicBool,
 }
 
 struct ActiveRecording {
@@ -59,7 +61,16 @@ impl RecordingState {
             session: Mutex::new(None),
             asr_engine: Arc::new(tokio::sync::OnceCell::new()),
             pending_loopback_target: SyncMutex::new(None),
+            active: AtomicBool::new(false),
         }
+    }
+
+    fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Release);
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
     }
 
     fn take_loopback_target(&self) -> Option<u32> {
@@ -70,6 +81,14 @@ impl RecordingState {
             .filter(|target| target.queued_at.elapsed() <= PENDING_LOOPBACK_TARGET_TTL)
             .map(|target| target.process_id)
     }
+}
+
+/// Synchronous recording activity check for native lifecycle handlers such as
+/// the tray menu. `true` includes startup and transcript finalization so the
+/// process cannot exit while a session is becoming durable.
+pub fn is_recording_active(app: &AppHandle) -> bool {
+    app.try_state::<RecordingState>()
+        .is_some_and(|state| state.is_active())
 }
 
 /// Carries the detected meeting PID across the prompt-to-recording navigation.
@@ -131,6 +150,7 @@ pub async fn start_recording(
     if session.is_some() {
         return Err("recording already in progress".into());
     }
+    state.set_active(true);
 
     // Grab the preloaded ASR engine (warmed in the background at app launch);
     // lanes are cheap per-recording streams over the shared weights.
@@ -149,7 +169,10 @@ pub async fn start_recording(
     });
     let new_session = RecordingSession::new(audio_source, engine, sink);
 
-    new_session.start().await?;
+    if let Err(error) = new_session.start().await {
+        state.set_active(false);
+        return Err(error);
+    }
     *session = Some(ActiveRecording {
         session: new_session,
         transcript_store,
@@ -168,7 +191,9 @@ pub async fn stop_recording(
     let Some(active) = session.take() else {
         return Err("no recording in progress".into());
     };
-    active.session.stop().await?;
+    let stop_result = active.session.stop().await;
+    state.set_active(false);
+    stop_result?;
     Ok(active.transcript_store.snapshot())
 }
 
@@ -250,5 +275,17 @@ mod tests {
             queued_at: Instant::now() - PENDING_LOOPBACK_TARGET_TTL - Duration::from_secs(1),
         });
         assert_eq!(state.take_loopback_target(), None);
+    }
+
+    #[test]
+    fn recording_activity_covers_the_full_native_lifecycle() {
+        let state = RecordingState::new();
+        assert!(!state.is_active());
+
+        state.set_active(true);
+        assert!(state.is_active());
+
+        state.set_active(false);
+        assert!(!state.is_active());
     }
 }

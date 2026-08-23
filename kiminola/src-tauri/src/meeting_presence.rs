@@ -13,12 +13,15 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
 use crate::db::{self, DbState};
+use crate::recording;
 
 const ENABLED_KEY: &str = "meeting_presence_enabled";
 const START_WITH_WINDOWS_KEY: &str = "meeting_presence_start_with_windows";
 const EVENT_STATE: &str = "meeting-presence:state";
 const EVENT_PROMPT: &str = "meeting-presence:prompt";
 const EVENT_ACTION: &str = "meeting-presence:action";
+#[cfg(desktop)]
+const EVENT_RECORDING_QUIT_BLOCKED: &str = "recording:quit-blocked";
 #[cfg(desktop)]
 const PROMPT_WINDOW_LABEL: &str = "meeting-prompt";
 #[cfg(target_os = "windows")]
@@ -738,6 +741,15 @@ fn setup_tray(
                 }
             }
             "presence-quit" => {
+                if recording::is_recording_active(app) {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                    let _ = app.emit(EVENT_RECORDING_QUIT_BLOCKED, ());
+                    return;
+                }
                 event_state.set_quitting();
                 app.exit(0);
             }
