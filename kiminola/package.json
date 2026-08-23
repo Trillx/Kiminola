@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --experimental-strip-types --test tests/library-loading.test.ts tests/transcript-state.test.ts",
+    "test": "node --experimental-strip-types --test tests/draft-autosave.test.ts tests/library-loading.test.ts tests/transcript-state.test.ts",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri"
   },

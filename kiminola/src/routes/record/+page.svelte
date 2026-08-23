@@ -4,6 +4,7 @@
   import { goto } from "$app/navigation";
   import LiveTranscript from "$lib/components/LiveTranscript.svelte";
   import { applyTranscriptEvent, finalizedTranscript } from "$lib/transcript-state";
+  import { createDraftAutosave, type DraftAutosave } from "$lib/draft-autosave";
   import { Button } from "$lib/components/ui/button";
   import { Textarea } from "$lib/components/ui/textarea";
   import * as Dialog from "$lib/components/ui/dialog";
@@ -13,7 +14,10 @@
     pauseRecording,
     resumeRecording,
     saveMeeting,
+    createNoteDraft,
     getNoteDraft,
+    updateNoteDraft,
+    deleteNoteDraft,
     onTranscriptEvent,
     onRecordingQuitBlocked,
     type TranscriptEvent,
@@ -32,11 +36,76 @@
   let stopping = $state(false);
   let noteDraftId = $state<number | null>(null);
   let quitBlocked = $state(false);
+  let recoveryDraftCreated = $state(false);
+  let noteSaveStatus = $state("");
+  let noteAutosave: DraftAutosave | undefined;
 
   let timerText = $derived(
     `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`,
   );
   let statusLabel = $derived(paused ? "Paused" : "Recording");
+
+  function configureNoteAutosave(draftId: number) {
+    noteAutosave?.cancel();
+    noteAutosave = createDraftAutosave(
+      async (value) => {
+        try {
+          await updateNoteDraft(draftId, value);
+        } catch (error) {
+          console.error("Failed to checkpoint recording notes:", error);
+          throw error;
+        }
+      },
+      (status) => {
+        noteSaveStatus =
+          status === "saving"
+            ? "Saving for recoveryâ€¦"
+            : status === "saved"
+              ? "Saved for recovery"
+              : "Could not save recovery copy";
+      },
+    );
+  }
+
+  async function prepareNoteDraft(requestedDraftId: number) {
+    if (Number.isFinite(requestedDraftId)) {
+      const draft = await getNoteDraft(requestedDraftId);
+      noteDraftId = draft.id;
+      notepad = draft.raw_markdown;
+      configureNoteAutosave(draft.id);
+      return;
+    }
+
+    try {
+      const draftId = await createNoteDraft();
+      noteDraftId = draftId;
+      recoveryDraftCreated = true;
+      configureNoteAutosave(draftId);
+      noteSaveStatus = "Recovery copy ready";
+    } catch (error) {
+      console.error("Failed to create a recovery draft:", error);
+      noteSaveStatus = "Recovery copy unavailable";
+    }
+  }
+
+  function checkpointNotes() {
+    noteAutosave?.schedule(notepad);
+  }
+
+  async function flushNoteCheckpoint() {
+    const autosave = noteAutosave;
+    if (!autosave) return;
+    try {
+      await autosave.flush(notepad);
+    } catch {
+      // The normal meeting save below still receives the current notepad.
+    }
+  }
+
+  function closeNoteAutosave() {
+    noteAutosave?.cancel();
+    noteAutosave = undefined;
+  }
 
   onMount(() => {
     const timer = setInterval(() => {
@@ -55,17 +124,10 @@
         quitBlocked = true;
       }),
     ])
-      .then((listeners) => {
+      .then(async (listeners) => {
         unlisten = listeners;
-        if (!Number.isFinite(requestedDraftId)) {
-          return startRecording();
-        }
-        return getNoteDraft(requestedDraftId)
-          .then((draft) => {
-            noteDraftId = draft.id;
-            notepad = draft.raw_markdown;
-          })
-          .then(() => startRecording());
+        await prepareNoteDraft(requestedDraftId);
+        await startRecording();
       })
       .catch((err) => {
         console.error("Failed to start recording:", err);
@@ -73,6 +135,12 @@
 
     return () => {
       clearInterval(timer);
+      const autosave = noteAutosave;
+      if (autosave) {
+        void autosave.flush(notepad).catch(() => undefined);
+        autosave.cancel();
+        noteAutosave = undefined;
+      }
       // Wait for the listener + start sequence to finish before stopping,
       // so we don't try to stop a session that hasn't started yet.
       startPromise.finally(() => {
@@ -96,6 +164,8 @@
 
   async function finishAndNavigate(mode: "generate" | "enhance") {
     stopping = true;
+    await flushNoteCheckpoint();
+    closeNoteAutosave();
     const finalEvents = await stopRecording();
     for (const event of finalEvents) lines = applyTranscriptEvent(lines, event);
     const id = await saveMeeting({
@@ -110,6 +180,8 @@
 
   async function stopMeeting() {
     stopping = true;
+    await flushNoteCheckpoint();
+    closeNoteAutosave();
     const finalEvents = await stopRecording();
     for (const event of finalEvents) lines = applyTranscriptEvent(lines, event);
     const id = await saveMeeting({
@@ -124,7 +196,14 @@
 
   async function cancel() {
     stopping = true;
+    if (!recoveryDraftCreated) await flushNoteCheckpoint();
+    closeNoteAutosave();
     await stopRecording();
+    if (recoveryDraftCreated && noteDraftId !== null) {
+      await deleteNoteDraft(noteDraftId).catch((error) => {
+        console.error("Failed to remove cancelled recovery draft:", error);
+      });
+    }
     goto("/");
   }
 
@@ -158,10 +237,13 @@
     <div class="notepad-hero">
       <div class="notepad-header">
         <span class="notepad-label">My notes</span>
-        <span style="font-size:12px;color:var(--soft);">Sketch while you listen</span>
+        <span class="note-save-status" aria-live="polite">
+          {noteSaveStatus || "Sketch while you listen"}
+        </span>
       </div>
       <Textarea
         bind:value={notepad}
+        oninput={checkpointNotes}
         placeholder="Jot rough thoughts, action items, or quotes here…"
         class="notepad-textarea"
       />
@@ -229,6 +311,11 @@
     outline: none;
   }
   :global(.notepad-textarea::placeholder) {
+    color: var(--soft);
+  }
+
+  .note-save-status {
+    font-size: 12px;
     color: var(--soft);
   }
 
