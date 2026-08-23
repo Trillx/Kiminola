@@ -17,6 +17,12 @@
   let status = $state("");
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
+  function durationLabel(seconds: number): string {
+    const minutes = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
+    return `${minutes}:${String(remainder).padStart(2, "0")}`;
+  }
+
   $effect(() => {
     const id = Number(page.params.id);
     if (!Number.isFinite(id)) return;
@@ -85,11 +91,15 @@
       <div class="note-header">
         <div>
           <div class="display note-title">{draft.title}</div>
-          <div class="post-meta-pill">Note draft</div>
+          <div class="post-meta-pill">
+            {draft.recovery_transcript.length > 0 ? "Recovered recording" : "Note draft"}
+          </div>
         </div>
         <div class="note-actions">
           {#if draft.meeting_id === null}
-            <Button onclick={startRecording}>Start recording</Button>
+            <Button onclick={startRecording}>
+              {draft.recovery_transcript.length > 0 ? "Continue recording" : "Start recording"}
+            </Button>
           {/if}
           <Button variant="outline" onclick={removeDraft}>Delete</Button>
         </div>
@@ -113,6 +123,28 @@
           class="draft-textarea"
         />
       </div>
+
+      {#if draft.recovery_transcript.length > 0}
+        <section class="recovery-transcript" aria-labelledby="recovery-transcript-title">
+          <div class="recovery-transcript-header">
+            <div>
+              <div id="recovery-transcript-title" class="notepad-label">Recovered transcript</div>
+              <div class="recovery-hint">
+                Continue recording to turn this recovery copy into a saved meeting.
+              </div>
+            </div>
+            <span class="recovery-duration">{durationLabel(draft.recovery_duration_seconds)}</span>
+          </div>
+          <div class="recovery-lines">
+            {#each draft.recovery_transcript as line}
+              <div class="recovery-line">
+                <span class="recovery-speaker">{line.channel === "you" ? "You" : "Others"}</span>
+                <span>{line.text}</span>
+              </div>
+            {/each}
+          </div>
+        </section>
+      {/if}
     {/if}
   </div>
 </div>
@@ -179,6 +211,54 @@
   .save-status {
     color: var(--soft);
     font-size: 12px;
+  }
+
+  .recovery-transcript {
+    margin-top: 20px;
+    padding: 20px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-card);
+    background: var(--surface);
+  }
+
+  .recovery-transcript-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .recovery-hint,
+  .recovery-duration {
+    margin-top: 3px;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .recovery-duration {
+    margin-top: 0;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .recovery-lines {
+    display: grid;
+    gap: 12px;
+  }
+
+  .recovery-line {
+    display: grid;
+    grid-template-columns: 56px 1fr;
+    gap: 12px;
+    color: var(--ink);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .recovery-speaker {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
   }
 
   @media (max-width: 680px) {

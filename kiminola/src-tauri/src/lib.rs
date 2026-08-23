@@ -109,6 +109,7 @@ pub fn run() {
             db::list_note_drafts,
             db::get_note_draft,
             db::update_note_draft,
+            db::update_note_draft_recovery,
             db::delete_note_draft,
             meeting_presence::get_meeting_presence_state,
             meeting_presence::set_meeting_presence_enabled,

@@ -70,7 +70,7 @@ fn now_iso() -> String {
 
 /* ---------- domain types ---------- */
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct NewSegment {
     pub channel: String,
     pub text: String,
@@ -137,7 +137,7 @@ pub struct NoteDraftSummary {
     pub updated_at: String,
 }
 
-#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct NoteDraftDetail {
     pub id: i64,
     pub title: String,
@@ -145,6 +145,20 @@ pub struct NoteDraftDetail {
     pub updated_at: String,
     pub raw_markdown: String,
     pub meeting_id: Option<i64>,
+    pub recovery_duration_seconds: i64,
+    pub recovery_transcript: Vec<NewSegment>,
+}
+
+#[derive(sqlx::FromRow)]
+struct NoteDraftRow {
+    id: i64,
+    title: String,
+    created_at: String,
+    updated_at: String,
+    raw_markdown: String,
+    meeting_id: Option<i64>,
+    recovery_duration_seconds: i64,
+    recovery_transcript_json: String,
 }
 
 async fn is_onboarding_complete_impl(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
@@ -392,8 +406,9 @@ pub(crate) async fn get_note_draft_impl(
     pool: &SqlitePool,
     id: i64,
 ) -> Result<NoteDraftDetail, String> {
-    sqlx::query_as::<_, NoteDraftDetail>(
-        "SELECT id, title, created_at, updated_at, raw_markdown, meeting_id
+    let row = sqlx::query_as::<_, NoteDraftRow>(
+        "SELECT id, title, created_at, updated_at, raw_markdown, meeting_id,
+                recovery_duration_seconds, recovery_transcript_json
          FROM note_drafts
          WHERE id = ?",
     )
@@ -401,7 +416,19 @@ pub(crate) async fn get_note_draft_impl(
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?
-    .ok_or_else(|| "note draft not found".to_string())
+    .ok_or_else(|| "note draft not found".to_string())?;
+    let recovery_transcript = serde_json::from_str(&row.recovery_transcript_json)
+        .map_err(|e| format!("invalid recovery transcript: {e}"))?;
+    Ok(NoteDraftDetail {
+        id: row.id,
+        title: row.title,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        raw_markdown: row.raw_markdown,
+        meeting_id: row.meeting_id,
+        recovery_duration_seconds: row.recovery_duration_seconds,
+        recovery_transcript,
+    })
 }
 
 pub(crate) async fn update_note_draft_impl(
@@ -414,6 +441,35 @@ pub(crate) async fn update_note_draft_impl(
          WHERE id = ? AND meeting_id IS NULL",
     )
     .bind(raw_markdown)
+    .bind(now_iso())
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .rows_affected();
+    if rows == 0 {
+        return Err("note draft not found or already attached".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) async fn update_note_draft_recovery_impl(
+    pool: &SqlitePool,
+    id: i64,
+    raw_markdown: &str,
+    duration_seconds: i64,
+    transcript: &[NewSegment],
+) -> Result<(), String> {
+    let transcript_json =
+        serde_json::to_string(transcript).map_err(|e| format!("encode recovery transcript: {e}"))?;
+    let rows = sqlx::query(
+        "UPDATE note_drafts SET raw_markdown = ?, recovery_duration_seconds = ?,
+             recovery_transcript_json = ?, updated_at = ?
+         WHERE id = ? AND meeting_id IS NULL",
+    )
+    .bind(raw_markdown)
+    .bind(duration_seconds.max(0))
+    .bind(transcript_json)
     .bind(now_iso())
     .bind(id)
     .execute(pool)
@@ -735,6 +791,25 @@ pub async fn update_note_draft(
 }
 
 #[tauri::command]
+pub async fn update_note_draft_recovery(
+    state: State<'_, DbState>,
+    id: i64,
+    raw_markdown: String,
+    duration_seconds: i64,
+    transcript: Vec<NewSegment>,
+) -> Result<(), String> {
+    let pool = ensure_pool(&state.pool).await?;
+    update_note_draft_recovery_impl(
+        &pool,
+        id,
+        &raw_markdown,
+        duration_seconds,
+        &transcript,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn delete_note_draft(state: State<'_, DbState>, id: i64) -> Result<(), String> {
     let pool = ensure_pool(&state.pool).await?;
     delete_note_draft_impl(&pool, id).await
@@ -927,10 +1002,27 @@ mod tests {
         update_note_draft_impl(&pool, draft_id, "follow up with the team")
             .await
             .expect("update draft");
+        let recovery_transcript = vec![NewSegment {
+            channel: "others".into(),
+            text: "recovered words".into(),
+            start_ms: Some(500),
+            end_ms: Some(1_500),
+        }];
+        update_note_draft_recovery_impl(
+            &pool,
+            draft_id,
+            "follow up with the team",
+            37,
+            &recovery_transcript,
+        )
+        .await
+        .expect("update recovery snapshot");
         let draft = get_note_draft_impl(&pool, draft_id)
             .await
             .expect("get draft");
         assert_eq!(draft.raw_markdown, "follow up with the team");
+        assert_eq!(draft.recovery_duration_seconds, 37);
+        assert_eq!(draft.recovery_transcript, recovery_transcript);
         assert!(draft.meeting_id.is_none());
 
         let meeting_id =

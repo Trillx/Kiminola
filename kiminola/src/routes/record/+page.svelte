@@ -3,7 +3,12 @@
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import LiveTranscript from "$lib/components/LiveTranscript.svelte";
-  import { applyTranscriptEvent, finalizedTranscript } from "$lib/transcript-state";
+  import {
+    applyTranscriptEvent,
+    finalizedTranscript,
+    offsetTranscriptEvent,
+    recoverableTranscript,
+  } from "$lib/transcript-state";
   import { createDraftAutosave, type DraftAutosave } from "$lib/draft-autosave";
   import { Button } from "$lib/components/ui/button";
   import { Textarea } from "$lib/components/ui/textarea";
@@ -16,7 +21,7 @@
     saveMeeting,
     createNoteDraft,
     getNoteDraft,
-    updateNoteDraft,
+    updateNoteDraftRecovery,
     deleteNoteDraft,
     onTranscriptEvent,
     onRecordingQuitBlocked,
@@ -38,19 +43,40 @@
   let quitBlocked = $state(false);
   let recoveryDraftCreated = $state(false);
   let noteSaveStatus = $state("");
-  let noteAutosave: DraftAutosave | undefined;
+  let transcriptOffsetMs = 0;
+
+  interface RecoverySnapshot {
+    rawMarkdown: string;
+    durationSeconds: number;
+    transcript: TranscriptLine[];
+  }
+
+  let noteAutosave: DraftAutosave<RecoverySnapshot> | undefined;
 
   let timerText = $derived(
     `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`,
   );
   let statusLabel = $derived(paused ? "Paused" : "Recording");
 
+  function recoverySnapshot(): RecoverySnapshot {
+    return {
+      rawMarkdown: notepad,
+      durationSeconds: elapsed,
+      transcript: recoverableTranscript(lines),
+    };
+  }
+
   function configureNoteAutosave(draftId: number) {
     noteAutosave?.cancel();
     noteAutosave = createDraftAutosave(
-      async (value) => {
+      async (snapshot) => {
         try {
-          await updateNoteDraft(draftId, value);
+          await updateNoteDraftRecovery(
+            draftId,
+            snapshot.rawMarkdown,
+            snapshot.durationSeconds,
+            snapshot.transcript,
+          );
         } catch (error) {
           console.error("Failed to checkpoint recording notes:", error);
           throw error;
@@ -59,7 +85,7 @@
       (status) => {
         noteSaveStatus =
           status === "saving"
-            ? "Saving for recoveryâ€¦"
+            ? "Saving for recovery..."
             : status === "saved"
               ? "Saved for recovery"
               : "Could not save recovery copy";
@@ -72,6 +98,9 @@
       const draft = await getNoteDraft(requestedDraftId);
       noteDraftId = draft.id;
       notepad = draft.raw_markdown;
+      elapsed = Math.max(0, draft.recovery_duration_seconds);
+      transcriptOffsetMs = elapsed * 1_000;
+      lines = draft.recovery_transcript;
       configureNoteAutosave(draft.id);
       return;
     }
@@ -88,15 +117,15 @@
     }
   }
 
-  function checkpointNotes() {
-    noteAutosave?.schedule(notepad);
+  function checkpointRecovery() {
+    noteAutosave?.schedule(recoverySnapshot());
   }
 
   async function flushNoteCheckpoint() {
     const autosave = noteAutosave;
     if (!autosave) return;
     try {
-      await autosave.flush(notepad);
+      await autosave.flush(recoverySnapshot());
     } catch {
       // The normal meeting save below still receives the current notepad.
     }
@@ -109,7 +138,10 @@
 
   onMount(() => {
     const timer = setInterval(() => {
-      if (!paused) elapsed += 1;
+      if (!paused) {
+        elapsed += 1;
+        if (elapsed % 5 === 0) checkpointRecovery();
+      }
     }, 1000);
     let unlisten: (() => void)[] = [];
 
@@ -118,7 +150,8 @@
 
     const startPromise = Promise.all([
       onTranscriptEvent((event: TranscriptEvent) => {
-        lines = applyTranscriptEvent(lines, event);
+        lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
+        checkpointRecovery();
       }),
       onRecordingQuitBlocked(() => {
         quitBlocked = true;
@@ -137,7 +170,7 @@
       clearInterval(timer);
       const autosave = noteAutosave;
       if (autosave) {
-        void autosave.flush(notepad).catch(() => undefined);
+        void autosave.flush(recoverySnapshot()).catch(() => undefined);
         autosave.cancel();
         noteAutosave = undefined;
       }
@@ -164,10 +197,12 @@
 
   async function finishAndNavigate(mode: "generate" | "enhance") {
     stopping = true;
+    const finalEvents = await stopRecording();
+    for (const event of finalEvents) {
+      lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
+    }
     await flushNoteCheckpoint();
     closeNoteAutosave();
-    const finalEvents = await stopRecording();
-    for (const event of finalEvents) lines = applyTranscriptEvent(lines, event);
     const id = await saveMeeting({
       title,
       durationSeconds: elapsed,
@@ -180,10 +215,12 @@
 
   async function stopMeeting() {
     stopping = true;
+    const finalEvents = await stopRecording();
+    for (const event of finalEvents) {
+      lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
+    }
     await flushNoteCheckpoint();
     closeNoteAutosave();
-    const finalEvents = await stopRecording();
-    for (const event of finalEvents) lines = applyTranscriptEvent(lines, event);
     const id = await saveMeeting({
       title,
       durationSeconds: elapsed,
@@ -243,7 +280,7 @@
       </div>
       <Textarea
         bind:value={notepad}
-        oninput={checkpointNotes}
+        oninput={checkpointRecovery}
         placeholder="Jot rough thoughts, action items, or quotes here…"
         class="notepad-textarea"
       />

@@ -85,6 +85,8 @@ export interface NoteDraftSummary {
 export interface NoteDraftDetail extends NoteDraftSummary {
   raw_markdown: string;
   meeting_id: number | null;
+  recovery_duration_seconds: number;
+  recovery_transcript: TranscriptLine[];
 }
 
 export interface SpaceMeetingRef {
@@ -152,6 +154,20 @@ export async function getNoteDraft(id: number): Promise<NoteDraftDetail> {
 
 export async function updateNoteDraft(id: number, rawMarkdown: string): Promise<void> {
   await invoke("update_note_draft", { id, rawMarkdown });
+}
+
+export async function updateNoteDraftRecovery(
+  id: number,
+  rawMarkdown: string,
+  durationSeconds: number,
+  transcript: TranscriptLine[],
+): Promise<void> {
+  await invoke("update_note_draft_recovery", {
+    id,
+    rawMarkdown,
+    durationSeconds,
+    transcript,
+  });
 }
 
 export async function deleteNoteDraft(id: number): Promise<void> {

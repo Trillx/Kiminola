@@ -96,6 +96,18 @@ function lineFromEvent(event: TranscriptEvent): TranscriptLine {
   };
 }
 
+export function offsetTranscriptEvent(
+  event: TranscriptEvent,
+  offsetMs: number,
+): TranscriptEvent {
+  const safeOffset = Math.max(0, Math.trunc(offsetMs));
+  return {
+    ...event,
+    start_ms: event.start_ms + safeOffset,
+    end_ms: event.end_ms + safeOffset,
+  };
+}
+
 function compareTranscriptLines(left: TranscriptLine, right: TranscriptLine): number {
   const startDifference = (left.start_ms ?? Number.MAX_SAFE_INTEGER) - (right.start_ms ?? Number.MAX_SAFE_INTEGER);
   if (startDifference !== 0) return startDifference;
@@ -143,6 +155,22 @@ export function applyTranscriptEvent(
 export function finalizedTranscript(lines: TranscriptLine[]): TranscriptLine[] {
   return lines
     .filter((line) => !line.is_partial && line.text.trim().length > 0)
+    .map(({ channel, text, start_ms, end_ms }) => ({
+      channel,
+      text,
+      start_ms,
+      end_ms,
+    }));
+}
+
+/**
+ * Recovery snapshots keep the latest non-empty text even when the ASR lane has
+ * not emitted its final revision yet. Runtime-only utterance/revision fields
+ * are intentionally removed so a resumed recording can assign fresh IDs.
+ */
+export function recoverableTranscript(lines: TranscriptLine[]): TranscriptLine[] {
+  return lines
+    .filter((line) => line.text.trim().length > 0)
     .map(({ channel, text, start_ms, end_ms }) => ({
       channel,
       text,

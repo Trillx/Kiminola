@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 // @ts-expect-error Node's strip-types test runner imports the TypeScript source directly.
-import { applyTranscriptEvent, finalizedTranscript } from "../src/lib/transcript-state.ts";
+import { applyTranscriptEvent, finalizedTranscript, offsetTranscriptEvent, recoverableTranscript } from "../src/lib/transcript-state.ts";
 import type { TranscriptEvent, TranscriptLine } from "../src/lib/tauri.ts";
 
 function event(overrides: Partial<TranscriptEvent> & Pick<TranscriptEvent, "utterance_id" | "channel" | "text">): TranscriptEvent {
@@ -152,4 +152,41 @@ test("saves only finalized text and retains audio-relative timing", () => {
     start_ms: 250,
     end_ms: 1_500,
   }]);
+});
+
+test("recovery keeps current partial text without runtime utterance IDs", () => {
+  const recovered = recoverableTranscript([
+    {
+      utterance_id: 9,
+      revision: 3,
+      channel: "others",
+      text: "still speaking",
+      start_ms: 2_000,
+      end_ms: 3_500,
+      is_partial: true,
+    },
+  ]);
+
+  assert.deepEqual(recovered, [{
+    channel: "others",
+    text: "still speaking",
+    start_ms: 2_000,
+    end_ms: 3_500,
+  }]);
+});
+
+test("resumed transcript events append after the recovered duration", () => {
+  const resumed = offsetTranscriptEvent(
+    event({
+      utterance_id: 12,
+      channel: "you",
+      text: "back after recovery",
+      start_ms: 250,
+      end_ms: 1_250,
+    }),
+    37_000,
+  );
+
+  assert.equal(resumed.start_ms, 37_250);
+  assert.equal(resumed.end_ms, 38_250);
 });

@@ -60,6 +60,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Onboarding: minimal first-run wizard — mic permission → model download with progress → optional BYOK key (skippable).
 - Companion layout: when the user chooses **Start recording** from a Meeting prompt, Kimi Nola arranges the detected meeting window on the left at roughly two-thirds of the active display and its own Notepad window on the right at roughly one-third. The arrangement is a starting point: normal windows may be resized, true full-screen/presentation windows are not forced to change, and user movement/resizing is never overridden.
 - Meeting-prompt recording also uses the detected meeting process tree as the preferred loopback target. Manual recording and unsupported/failed process activation use classic default-output loopback.
+- Active recordings checkpoint notes, elapsed duration, and the latest transcript revisions into a SQLite note draft. An interrupted session remains visible in the library and can be continued into a normal saved meeting; intentional cancellation removes only drafts created automatically for that recording.
 
 ## 6. Data model & storage
 
@@ -69,7 +70,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   - `meetings` — id, title, space_id, created_at, duration_seconds
   - `transcript_segments` — id, meeting_id, channel ('you'|'others'), start_ms, end_ms, text
   - `notes` — id, meeting_id, raw_markdown, updated_at
-  - `note_drafts` — id, title, created_at, updated_at, raw_markdown, optional meeting_id
+  - `note_drafts` — id, title, created_at, updated_at, raw_markdown, optional meeting_id, recovery_duration_seconds, recovery_transcript_json
   - `spaces` — id, name, parent_id, created_at (adjacency list)
   - `templates` — id, name, prompt, is_builtin
   - `settings` — key, value

@@ -1,8 +1,8 @@
 export type DraftAutosaveStatus = "saving" | "saved" | "error";
 
-export interface DraftAutosave {
-  schedule(value: string): void;
-  flush(value: string): Promise<void>;
+export interface DraftAutosave<T = string> {
+  schedule(value: T): void;
+  flush(value: T): Promise<void>;
   cancel(): void;
 }
 
@@ -11,17 +11,17 @@ export interface DraftAutosave {
  * never overwrite newer notes. `flush` joins the same queue and is used before
  * meeting finalization or navigation.
  */
-export function createDraftAutosave(
-  save: (value: string) => Promise<void>,
+export function createDraftAutosave<T = string>(
+  save: (value: T) => Promise<void>,
   onStatus: (status: DraftAutosaveStatus) => void,
   delayMs = 500,
-): DraftAutosave {
+): DraftAutosave<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let queue = Promise.resolve();
   let latestRequest = 0;
   let cancelled = false;
 
-  function enqueue(value: string): Promise<void> {
+  function enqueue(value: T): Promise<void> {
     const request = ++latestRequest;
     if (!cancelled) onStatus("saving");
 
@@ -40,7 +40,7 @@ export function createDraftAutosave(
   }
 
   return {
-    schedule(value: string) {
+    schedule(value: T) {
       if (cancelled) return;
       clearTimeout(timer);
       timer = setTimeout(() => {
@@ -49,7 +49,7 @@ export function createDraftAutosave(
       }, delayMs);
     },
 
-    flush(value: string) {
+    flush(value: T) {
       clearTimeout(timer);
       timer = undefined;
       return enqueue(value);
