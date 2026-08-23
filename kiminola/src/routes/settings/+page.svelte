@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { page } from "$app/state";
   import { getVersion } from "@tauri-apps/api/app";
   import ProviderConfigForm from "$lib/components/ProviderConfigForm.svelte";
   import { themeState, toggleTheme } from "$lib/theme.svelte";
@@ -15,6 +16,10 @@
     setMeetingPresenceEnabled,
     setMeetingPresencePaused,
     setMeetingPresenceStartWithWindows,
+    checkModelPack,
+    downloadModelPack,
+    openModelFolder,
+    type DownloadEvent,
     type MeetingPresenceState,
     type Template,
   } from "$lib/tauri";
@@ -22,19 +27,23 @@
   import { Input } from "$lib/components/ui/input";
   import { Textarea } from "$lib/components/ui/textarea";
   import { Label } from "$lib/components/ui/label";
+  import { Progress } from "$lib/components/ui/progress";
   import * as Select from "$lib/components/ui/select";
 
-  type Section = "general" | "ai" | "shortcut" | "about" | "templates";
+  type Section = "general" | "models" | "ai" | "shortcut" | "about" | "templates";
 
   const SECTIONS: { id: Section; label: string }[] = [
     { id: "general", label: "General" },
+    { id: "models", label: "Speech model" },
     { id: "ai", label: "AI provider" },
     { id: "shortcut", label: "Shortcut" },
     { id: "templates", label: "Templates" },
     { id: "about", label: "About" },
   ];
 
-  let active = $state<Section>("general");
+  let active = $state<Section>(
+    page.url.searchParams.get("section") === "models" ? "models" : "general",
+  );
   let shortcut = $state("");
   let savingShortcut = $state(false);
   let shortcutSaved = $state(false);
@@ -48,6 +57,13 @@
     prompt: null,
   });
   let presenceError = $state("");
+  let modelState = $state<"idle" | "checking" | "ready" | "missing" | "downloading" | "error">(
+    "idle",
+  );
+  let modelProgress = $state(0);
+  let modelDownloadedMB = $state(0);
+  let modelTotalMB = $state(663);
+  let modelError = $state("");
 
   // Templates state
   let templates = $state<Template[]>([]);
@@ -147,7 +163,61 @@
     loadTemplates();
   }
 
+  async function refreshModelHealth() {
+    modelState = "checking";
+    modelError = "";
+    try {
+      modelState = (await checkModelPack()) ? "ready" : "missing";
+    } catch (err) {
+      modelError = String(err);
+      modelState = "error";
+    }
+  }
+
+  async function repairModel() {
+    modelState = "downloading";
+    modelProgress = 0;
+    modelDownloadedMB = 0;
+    modelTotalMB = 663;
+    modelError = "";
+    try {
+      await downloadModelPack((event: DownloadEvent) => {
+        const total = Math.max(1, event.overall_total);
+        modelProgress = Math.min(100, (event.overall_downloaded / total) * 100);
+        modelDownloadedMB = Math.floor(event.overall_downloaded / 1_048_576);
+        modelTotalMB = Math.max(1, Math.ceil(event.overall_total / 1_048_576));
+      });
+      if (!(await checkModelPack())) {
+        throw new Error("The downloaded model pack did not pass verification.");
+      }
+      modelProgress = 100;
+      modelState = "ready";
+    } catch (err) {
+      modelError = String(err);
+      modelState = "error";
+    }
+  }
+
+  async function showModelFolder() {
+    try {
+      await openModelFolder();
+    } catch (err) {
+      modelError = String(err);
+      modelState = "error";
+    }
+  }
+
+  function activateSection(section: Section) {
+    if (section === "templates") {
+      activateTemplates();
+      return;
+    }
+    active = section;
+    if (section === "models" && modelState !== "downloading") void refreshModelHealth();
+  }
+
   onMount(() => {
+    if (active === "models") void refreshModelHealth();
     getGlobalShortcut()
       .then((s) => {
         shortcut = s ?? "";
@@ -219,7 +289,7 @@
             class:active={active === section.id}
             role="tab"
             aria-selected={active === section.id}
-            onclick={() => section.id === "templates" ? activateTemplates() : (active = section.id)}
+            onclick={() => activateSection(section.id)}
           >
             {section.label}
           </button>
@@ -273,6 +343,54 @@
             </div>
           {/if}
           {#if presenceError}<div class="test-output error">{presenceError}</div>{/if}
+        </div>
+      {:else if active === "models"}
+        <div class="my-notes-card provider-config">
+          <div class="enhance-title">On-device speech model</div>
+          <div class="enhance-copy">
+            Kimi Nola uses this local model for live transcription. Model files stay on this
+            machine, and meeting audio is never uploaded.
+          </div>
+
+          {#if modelState === "idle" || modelState === "checking"}
+            <div class="model-status" aria-live="polite">Checking the model packâ€¦</div>
+          {:else if modelState === "ready"}
+            <div class="model-status ready" role="status">
+              <strong>Model ready.</strong>
+              <span>Live transcription is available for the next meeting.</span>
+            </div>
+          {:else if modelState === "missing"}
+            <div class="model-status" role="alert">
+              <strong>Model repair needed.</strong>
+              <span>One or more required model files are missing or incomplete.</span>
+            </div>
+          {:else if modelState === "downloading"}
+            <div class="model-progress" aria-live="polite">
+              <div class="model-progress-row">
+                <span>Downloading and verifyingâ€¦</span>
+                <span class="mono">{modelDownloadedMB} / {modelTotalMB} MB</span>
+              </div>
+              <Progress value={modelProgress} max={100} class="h-2" />
+            </div>
+          {:else if modelState === "error"}
+            <div class="model-status" role="alert">
+              <strong>Model repair failed.</strong>
+              <span>{modelError}</span>
+            </div>
+          {/if}
+
+          <div class="config-actions">
+            {#if modelState === "missing" || modelState === "error"}
+              <Button onclick={repairModel}>Download or repair model</Button>
+            {:else if modelState === "ready"}
+              <Button variant="outline" onclick={refreshModelHealth}>Verify again</Button>
+            {/if}
+            <Button
+              variant="outline"
+              onclick={() => void showModelFolder()}
+              disabled={modelState === "downloading"}>Open model folder</Button
+            >
+          </div>
         </div>
       {:else if active === "ai"}
         <div class="my-notes-card">
@@ -391,6 +509,42 @@
 </div>
 
 <style>
+  .model-status {
+    display: grid;
+    gap: 3px;
+    padding: 12px 14px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .model-status span {
+    color: var(--text-muted);
+  }
+
+  .model-status.ready {
+    border-color: color-mix(in srgb, var(--ink) 24%, var(--hairline));
+  }
+
+  .model-progress {
+    display: grid;
+    gap: 10px;
+    padding: 12px 14px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .model-progress-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
   .template-picker-row {
     display: flex;
     align-items: flex-end;

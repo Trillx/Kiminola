@@ -65,7 +65,11 @@ fn model_dir(_app: &AppHandle) -> PathBuf {
 
 pub fn is_model_pack_present(app: &AppHandle) -> bool {
     let dir = model_dir(app);
-    for file in &manifest().files {
+    is_model_pack_present_at(&dir, manifest())
+}
+
+fn is_model_pack_present_at(dir: &Path, manifest: &ModelManifest) -> bool {
+    for file in &manifest.files {
         let path = dir.join(&file.path);
         let meta = match fs::metadata(&path) {
             Ok(m) => m,
@@ -125,12 +129,10 @@ async fn download_file(
         };
 
         let client = reqwest::Client::new();
-        let mut req = client
-            .get(&url)
-            .header(
-                reqwest::header::USER_AGENT,
-                HeaderValue::from_static("KimiNola/0.1.0"),
-            );
+        let mut req = client.get(&url).header(
+            reqwest::header::USER_AGENT,
+            HeaderValue::from_static("KimiNola/0.1.0"),
+        );
         if existing_len > 0 && existing_len < file.bytes {
             req = req.header(
                 RANGE,
@@ -181,7 +183,8 @@ async fn download_file(
         loop {
             match stream.next().await {
                 Some(Ok(chunk)) => {
-                    part_file.write_all(&chunk)
+                    part_file
+                        .write_all(&chunk)
                         .map_err(|e| format!("write part file: {e}"))?;
                     downloaded += chunk.len() as u64;
 
@@ -210,9 +213,14 @@ async fn download_file(
         }
 
         // Flush and verify size.
-        part_file.flush().map_err(|e| format!("flush part file: {e}"))?;
+        part_file
+            .flush()
+            .map_err(|e| format!("flush part file: {e}"))?;
         if downloaded != file.bytes {
-            last_err = Some(format!("size mismatch: got {downloaded}, expected {}", file.bytes));
+            last_err = Some(format!(
+                "size mismatch: got {downloaded}, expected {}",
+                file.bytes
+            ));
             tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
             continue;
         }
@@ -221,9 +229,10 @@ async fn download_file(
         let hash = {
             let mut hasher = Sha256::new();
             let mut reader = std::io::BufReader::new(
-                File::open(&part_path).map_err(|e| format!("reopen part for hash: {e}"))?
+                File::open(&part_path).map_err(|e| format!("reopen part for hash: {e}"))?,
             );
-            let _ = std::io::copy(&mut reader, &mut hasher).map_err(|e| format!("hash part file: {e}"))?;
+            let _ = std::io::copy(&mut reader, &mut hasher)
+                .map_err(|e| format!("hash part file: {e}"))?;
             hex::encode(hasher.finalize())
         };
         if !hash.eq_ignore_ascii_case(&file.sha256) {
@@ -240,8 +249,7 @@ async fn download_file(
         if final_path.exists() {
             fs::remove_file(&final_path).map_err(|e| format!("remove stale final file: {e}"))?;
         }
-        fs::rename(&part_path, &final_path)
-            .map_err(|e| format!("rename part to final: {e}"))?;
+        fs::rename(&part_path, &final_path).map_err(|e| format!("rename part to final: {e}"))?;
 
         let _ = channel.send(DownloadEvent {
             file: file.name.clone(),
@@ -258,7 +266,10 @@ async fn download_file(
 }
 
 #[tauri::command]
-pub async fn download_model_pack(app: AppHandle, on_progress: Channel<DownloadEvent>) -> Result<(), String> {
+pub async fn download_model_pack(
+    app: AppHandle,
+    on_progress: Channel<DownloadEvent>,
+) -> Result<(), String> {
     let dir = model_dir(&app);
     let manifest = manifest();
     let overall_total = manifest.total_bytes;
@@ -331,10 +342,7 @@ fn probe_microphone_permission() -> MicrophonePermission {
         Ok(s) => s,
         Err(e) => {
             let msg = e.to_string().to_lowercase();
-            if msg.contains("access")
-                || msg.contains("denied")
-                || msg.contains("0x80070005")
-            {
+            if msg.contains("access") || msg.contains("denied") || msg.contains("0x80070005") {
                 return MicrophonePermission::Denied;
             }
             return MicrophonePermission::Unavailable;
@@ -369,9 +377,57 @@ pub async fn open_model_folder(app: AppHandle) -> Result<(), String> {
     fs::create_dir_all(&dir).map_err(|e| format!("create model dir: {e}"))?;
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("explorer")
-            .arg(&dir)
-            .spawn();
+        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn model_pack_validation_requires_every_expected_file_size() {
+        let temp_id = NEXT_TEMP_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "kiminola-model-pack-test-{}-{temp_id}",
+            std::process::id()
+        ));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let manifest = ModelManifest {
+            name: "test".into(),
+            repo: "test/repo".into(),
+            revision: "main".into(),
+            total_bytes: 7,
+            files: vec![
+                ModelFile {
+                    name: "encoder".into(),
+                    path: "encoder.onnx".into(),
+                    bytes: 4,
+                    sha256: "unused".into(),
+                },
+                ModelFile {
+                    name: "tokens".into(),
+                    path: "nested/tokens.txt".into(),
+                    bytes: 3,
+                    sha256: "unused".into(),
+                },
+            ],
+        };
+
+        fs::write(root.join("encoder.onnx"), b"1234").unwrap();
+        assert!(!is_model_pack_present_at(&root, &manifest));
+
+        fs::write(nested.join("tokens.txt"), b"too long").unwrap();
+        assert!(!is_model_pack_present_at(&root, &manifest));
+
+        fs::write(nested.join("tokens.txt"), b"123").unwrap();
+        assert!(is_model_pack_present_at(&root, &manifest));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

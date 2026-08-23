@@ -41,7 +41,6 @@
     updateNoteDraftRecovery,
     deleteNoteDraft,
     openMicrophonePrivacySettings,
-    openModelFolder,
     onTranscriptEvent,
     onAudioPressure,
     onRecordingQuitBlocked,
@@ -575,13 +574,13 @@
           <strong>Live transcription isn't available.</strong>
           <span>
             The local speech model could not load. Your typed notes still save for recovery, but
-            spoken audio will not appear in the transcript. Finish this meeting, then reinstall
-            the model pack from setup.
+            spoken audio will not appear in the transcript. Finish this meeting, then repair the
+            model pack in Settings.
           </span>
         </div>
         <div class="recording-start-error-actions">
-          <Button size="sm" variant="outline" onclick={() => void openModelFolder()}>
-            Open model folder
+          <Button size="sm" variant="outline" onclick={() => void goto("/settings?section=models")}>
+            Repair model
           </Button>
           <Button
             size="sm"

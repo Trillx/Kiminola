@@ -4,9 +4,9 @@ Ordered by user impact: data loss and crashes first, then broken flows, test gap
 
 ## Queued
 
-- [ ] **P2 · Add model repair to Settings.** Model installation and repair only exist inside first-run onboarding, so an unavailable-transcription warning cannot route to a focused in-app recovery flow.
 - [ ] **P2 · Guard navigation during recording startup.** Navigation before native startup returns still relies on teardown cleanup; it should offer an explicit recovery-only exit without allowing an empty meeting save.
 - [ ] **P2 · Checkpoint recovery on pause.** The timer freezes after a successful pause, but the newest duration and transcript can remain only in memory until recording resumes or another edit triggers autosave.
+- [ ] **P2 · Verify model contents during health checks.** Settings currently validates the expected files and sizes; same-size corruption in files with real manifest hashes can still be reported as ready until ASR loading fails.
 
 ## Completed
 
@@ -24,3 +24,4 @@ Ordered by user impact: data loss and crashes first, then broken flows, test gap
 - [x] **P0 · Make the global stop shortcut save-safe.** The global listener now only starts recordings; while recording, the page routes shortcut presses through the same guarded, retry-safe finalization and durable save path as the Stop button. Verified 2026-08-23.
 - [x] **P1 · Guard navigation away from active recording.** Internal navigation during capture or after a failed save now pauses for an explicit choice to continue, finish through the durable save path, or checkpoint the final transcript into a recovery copy before leaving. Verified 2026-08-23.
 - [x] **P2 · Base elapsed duration on a monotonic clock.** Active capture segments now use `performance.now()`, catch up after delayed callbacks, exclude pauses, seed from recovered duration, and checkpoint correctly even when timer callbacks skip exact five-second boundaries. Verified 2026-08-23.
+- [x] **P2 · Add model repair to Settings.** Settings now has a focused speech-model health view with local file verification, resumable download/repair progress, post-download verification, model-folder access, and a direct route from the unavailable-transcription warning. Verified 2026-08-23.
