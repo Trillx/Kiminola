@@ -27,6 +27,14 @@ export function canStopRecording(phase: RecordingPhase): boolean {
   return phase === "recording" || phase === "paused";
 }
 
+export function canPauseRecording(phase: RecordingPhase, controlBusy: boolean): boolean {
+  return phase === "recording" && !controlBusy;
+}
+
+export function canResumeRecording(phase: RecordingPhase, controlBusy: boolean): boolean {
+  return phase === "paused" && !controlBusy;
+}
+
 export function canRetryFinish(phase: RecordingPhase): boolean {
   return phase === "finish_failed";
 }

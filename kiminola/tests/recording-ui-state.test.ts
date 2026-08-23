@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // @ts-expect-error Node's strip-types test runner imports the TypeScript source directly.
-import { canRetryFinish, canStopRecording, recordingPhaseLabel, shouldAdvanceElapsed, shouldDiscardAutoDraft } from "../src/lib/recording-ui-state.ts";
+import { canPauseRecording, canResumeRecording, canRetryFinish, canStopRecording, recordingPhaseLabel, shouldAdvanceElapsed, shouldDiscardAutoDraft } from "../src/lib/recording-ui-state.ts";
 
 test("only an active recording advances elapsed time", () => {
   assert.equal(shouldAdvanceElapsed("starting"), false);
@@ -18,6 +18,15 @@ test("recording controls stay unavailable until startup succeeds", () => {
   assert.equal(canStopRecording("failed"), false);
   assert.equal(canStopRecording("recording"), true);
   assert.equal(canStopRecording("paused"), true);
+});
+
+test("pause and resume controls cannot race an in-flight command", () => {
+  assert.equal(canPauseRecording("recording", false), true);
+  assert.equal(canPauseRecording("recording", true), false);
+  assert.equal(canPauseRecording("paused", false), false);
+  assert.equal(canResumeRecording("paused", false), true);
+  assert.equal(canResumeRecording("paused", true), false);
+  assert.equal(canResumeRecording("recording", false), false);
 });
 
 test("failure and transition labels never claim the app is recording", () => {

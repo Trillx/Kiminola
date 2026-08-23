@@ -11,6 +11,8 @@
   } from "$lib/transcript-state";
   import { createDraftAutosave, type DraftAutosave } from "$lib/draft-autosave";
   import {
+    canPauseRecording,
+    canResumeRecording,
     canStopRecording,
     canRetryFinish,
     recordingPhaseLabel,
@@ -49,6 +51,8 @@
   let phase = $state<RecordingPhase>("starting");
   let startError = $state<string | null>(null);
   let finishError = $state<string | null>(null);
+  let controlBusy = $state(false);
+  let controlError = $state<{ action: "pause" | "resume"; message: string } | null>(null);
   let nativeSessionActive = false;
   let requestedDraftId = NaN;
   let noteDraftId = $state<number | null>(null);
@@ -228,13 +232,39 @@
   });
 
   async function pause() {
-    await pauseRecording();
-    phase = "paused";
+    if (!canPauseRecording(phase, controlBusy)) return;
+    controlBusy = true;
+    controlError = null;
+    try {
+      await pauseRecording();
+      phase = "paused";
+    } catch (error) {
+      controlError = {
+        action: "pause",
+        message: errorMessage(error, "Windows could not pause audio capture."),
+      };
+      console.error("Failed to pause recording:", error);
+    } finally {
+      controlBusy = false;
+    }
   }
 
   async function resume() {
-    await resumeRecording();
-    phase = "recording";
+    if (!canResumeRecording(phase, controlBusy)) return;
+    controlBusy = true;
+    controlError = null;
+    try {
+      await resumeRecording();
+      phase = "recording";
+    } catch (error) {
+      controlError = {
+        action: "resume",
+        message: errorMessage(error, "Windows could not restart audio capture."),
+      };
+      console.error("Failed to resume recording:", error);
+    } finally {
+      controlBusy = false;
+    }
   }
 
   async function finishMeeting(mode: FinishMode) {
@@ -307,7 +337,7 @@
 
   function onDialogOpenChange(open: boolean) {
     // Closing the pause dialog resumes recording.
-    if (!open && phase === "paused") {
+    if (!open && canResumeRecording(phase, controlBusy)) {
       void resume();
     }
   }
@@ -368,6 +398,16 @@
       </div>
     {/if}
 
+    {#if controlError?.action === "pause" && phase === "recording"}
+      <div class="recording-control-error" role="alert">
+        <div>
+          <strong>Recording is still active.</strong>
+          <span>The pause request failed: {controlError.message}</span>
+        </div>
+        <Button size="sm" variant="ghost" onclick={() => (controlError = null)}>Dismiss</Button>
+      </div>
+    {/if}
+
     <div class="notepad-hero">
       <div class="notepad-header">
         <span class="notepad-label">My notes</span>
@@ -384,18 +424,26 @@
     </div>
 
     <div class="recording-actions">
-      <Button variant="outline" onclick={cancel} disabled={phase === "starting" || stopping}>
+      <Button
+        variant="outline"
+        onclick={cancel}
+        disabled={phase === "starting" || stopping || controlBusy}
+      >
         {phase === "failed"
           ? "Back to meetings"
           : phase === "finish_failed"
             ? "Keep recovery copy"
             : "Cancel"}
       </Button>
-      <Button variant="secondary" onclick={pause} disabled={phase !== "recording"}>Pause</Button>
+      <Button
+        variant="secondary"
+        onclick={pause}
+        disabled={!canPauseRecording(phase, controlBusy)}
+      >{controlBusy && phase === "recording" ? "Pausing..." : "Pause"}</Button>
       <Button
         variant="destructive"
         onclick={() => void finishMeeting("save")}
-        disabled={!canStopRecording(phase) || stopping}
+        disabled={!canStopRecording(phase) || stopping || controlBusy}
       >
         Stop meeting
       </Button>
@@ -418,17 +466,30 @@
     <Dialog.Header>
       <Dialog.Title>Meeting paused</Dialog.Title>
     </Dialog.Header>
+    {#if controlError?.action === "resume"}
+      <div class="pause-resume-error" role="alert">
+        <strong>Recording is still paused.</strong>
+        <span>{controlError.message}</span>
+        <Button
+          size="sm"
+          variant="outline"
+          onclick={() => void openMicrophonePrivacySettings()}
+        >Microphone settings</Button>
+      </div>
+    {/if}
     <div class="pause-timer">{timerText}</div>
     <div class="pause-actions">
-      <Button class="w-full" onclick={resume} disabled={stopping}>Resume recording</Button>
-      <Button class="w-full" variant="secondary" onclick={() => void finishMeeting('generate')} disabled={stopping}>
+      <Button class="w-full" onclick={resume} disabled={!canResumeRecording(phase, controlBusy)}>
+        {controlBusy ? "Resuming..." : "Resume recording"}
+      </Button>
+      <Button class="w-full" variant="secondary" onclick={() => void finishMeeting('generate')} disabled={stopping || controlBusy}>
         Generate meeting notes
       </Button>
-      <Button class="w-full" variant="secondary" onclick={() => void finishMeeting('enhance')} disabled={stopping}>
+      <Button class="w-full" variant="secondary" onclick={() => void finishMeeting('enhance')} disabled={stopping || controlBusy}>
         Enhance meeting notes
       </Button>
     </div>
-    <Button variant="ghost" class="pause-stop-link w-full" onclick={() => void finishMeeting('save')} disabled={stopping}>
+    <Button variant="ghost" class="pause-stop-link w-full" onclick={() => void finishMeeting('save')} disabled={stopping || controlBusy}>
       Stop meeting without generating notes
     </Button>
   </Dialog.Content>
@@ -480,7 +541,8 @@
   }
 
   .recording-start-error,
-  .recording-finish-error {
+  .recording-finish-error,
+  .recording-control-error {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -495,13 +557,15 @@
   }
 
   .recording-start-error > div:first-child,
-  .recording-finish-error > div:first-child {
+  .recording-finish-error > div:first-child,
+  .recording-control-error > div:first-child {
     display: grid;
     gap: 3px;
   }
 
   .recording-start-error span,
-  .recording-finish-error span {
+  .recording-finish-error span,
+  .recording-control-error span {
     color: var(--text-muted);
   }
 
@@ -516,6 +580,26 @@
     font-size: 14px;
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
+  }
+
+  .pause-resume-error {
+    display: grid;
+    gap: 6px;
+    padding: 12px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .pause-resume-error span {
+    color: var(--text-muted);
+  }
+
+  .pause-resume-error :global(.btn) {
+    justify-self: start;
+    margin-top: 2px;
   }
 
   .pause-actions {
@@ -559,7 +643,8 @@
 
   @media (max-width: 680px) {
     .recording-start-error,
-    .recording-finish-error {
+    .recording-finish-error,
+    .recording-control-error {
       align-items: stretch;
       flex-direction: column;
     }
