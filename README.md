@@ -20,7 +20,7 @@
 </p>
 
 > [!IMPORTANT]
-> Kimi Nola is in active development. The application works from source, but signed installers, automatic updates, and the first public release are not published yet.
+> Kimi Nola is in active development. Windows x64 and ARM64 installers are available on GitHub Releases. The installers are currently unsigned, and automatic updates are not yet published.
 
 ## What is Kimi Nola?
 
@@ -89,9 +89,9 @@ The desktop shell is Tauri 2. The Svelte frontend handles the library, recording
 
 ## Install
 
-There is no public installer yet. The first Windows x64 and ARM64 installers will be published on [GitHub Releases](https://github.com/Trillx/Kiminola/releases). Until then, use the source setup below.
+Download the latest Windows x64 or ARM64 installer from [GitHub Releases](https://github.com/Trillx/Kiminola/releases), or use the source setup below.
 
-When a release is available, choose:
+Choose:
 
 - **x64** for Intel and AMD Windows PCs
 - **ARM64** for Snapdragon and other Windows-on-ARM PCs
@@ -172,22 +172,20 @@ Kiminola/
 
 [`SPEC.md`](./SPEC.md) is the source of truth for product behavior and scope. [`kiminola/branding/HANDOFF.md`](./kiminola/branding/HANDOFF.md) defines the Oatwave visual system used by the app and this repository.
 
-## Road to the first release
+## Release status
 
-- Finalize and verify every Model pack manifest hash
-- Produce signed NSIS installers and portable archives
-- Enable signed Tauri updater manifests through GitHub Releases
+- Windows x64 and ARM64 NSIS installers are published through GitHub Releases.
+- Code signing, portable archives, and signed updater manifests remain separate release-readiness steps.
 
 ### GitHub release automation
 
 Pull requests and pushes to `main` build both Windows installers. To create a
-release candidate, update the app version in
-`kiminola/src-tauri/tauri.conf.json`, commit it to `main`, and push the exact
-matching tag:
+release candidate, update the synchronized app versions, commit them to `main`,
+and push the exact matching tag:
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 GitHub Actions then builds x64 and ARM64 NSIS installers and creates a draft
