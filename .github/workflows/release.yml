@@ -13,8 +13,60 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  create-release:
+    name: Create draft release
+    runs-on: windows-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - name: Create or reuse the draft release
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $releaseUri = "https://api.github.com/repos/$env:RELEASE_REPOSITORY/releases/tags/$env:RELEASE_TAG"
+          $release = $null
+          try {
+            $release = Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $headers
+          } catch {
+            $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+            if ($status -ne 404) { throw }
+          }
+
+          if ($null -eq $release) {
+            $body = @{
+              tag_name = $env:RELEASE_TAG
+              target_commitish = $env:RELEASE_COMMIT
+              name = "Kimi Nola $env:RELEASE_TAG"
+              body = "Windows x64 and ARM64 installers for Kimi Nola $env:RELEASE_TAG. This release remains a draft until the signed installers and in-app update path have been tested."
+              draft = $true
+              prerelease = $false
+            } | ConvertTo-Json
+            $createUri = "https://api.github.com/repos/$env:RELEASE_REPOSITORY/releases"
+            $release = Invoke-RestMethod -Method Post -Uri $createUri -Headers $headers -ContentType 'application/json' -Body $body
+          }
+
+          if ($release.tag_name -ne $env:RELEASE_TAG) {
+            throw "GitHub returned release tag '$($release.tag_name)' for '$env:RELEASE_TAG'."
+          }
+          if (-not $release.draft -or $release.prerelease) {
+            throw "Release '$env:RELEASE_TAG' must remain a draft and must not be a prerelease while assets are being validated."
+          }
+          "release_id=$($release.id)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
   windows-release:
-    name: Release Windows ${{ matrix.arch }}
+    name: Build Windows ${{ matrix.arch }}
+    needs: create-release
     runs-on: windows-latest
     timeout-minutes: 45
     strategy:
@@ -28,16 +80,37 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Verify tag matches app version
+      - name: Verify tag matches all app versions
         shell: pwsh
         working-directory: kiminola
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           $config = Get-Content -Raw 'src-tauri/tauri.conf.json' | ConvertFrom-Json
+          $package = Get-Content -Raw 'package.json' | ConvertFrom-Json
+          $cargoVersion = [regex]::Match((Get-Content -Raw 'src-tauri/Cargo.toml'), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          $versions = @($config.version, $package.version, $cargoVersion)
+          if (($versions | Select-Object -Unique).Count -ne 1) {
+            throw "App versions are not synchronized: $($versions -join ', ')."
+          }
           $expectedTag = "v$($config.version)"
-          if ($expectedTag -ne '${{ github.ref_name }}') {
-            throw "Release tag '${{ github.ref_name }}' does not match app version '$($config.version)'."
+          if ($expectedTag -ne $env:RELEASE_TAG) {
+            throw "Release tag '$env:RELEASE_TAG' does not match app version '$($config.version)'."
+          }
+
+      - name: Verify updater signing secret
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY is not configured for this repository.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not configured for this repository.'
           }
 
       - name: Set up Node.js
@@ -70,6 +143,10 @@ jobs:
         working-directory: kiminola
         run: npm.cmd run check
 
+      - name: Run frontend tests
+        working-directory: kiminola
+        run: npm.cmd test
+
       - name: Prepare native dependencies
         working-directory: kiminola
         shell: pwsh
@@ -77,19 +154,65 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: .\scripts\prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
 
-      - name: Build and upload draft release
-        uses: tauri-apps/tauri-action@v1
+      - name: Build and upload draft release assets
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: kiminola
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ github.ref_name }}
-          releaseName: Kimi Nola ${{ github.ref_name }}
-          releaseBody: |
-            Windows x64 and ARM64 installers for Kimi Nola ${{ github.ref_name }}.
-
-            This release is a draft until the installers have been tested.
           releaseDraft: true
-          generateReleaseNotes: true
+          prerelease: false
           uploadUpdaterJson: false
+          uploadUpdaterSignatures: true
           args: --target ${{ matrix.target }}
+
+  manifest:
+    name: Generate signed updater manifest
+    needs:
+      - create-release
+      - windows-release
+    if: ${{ needs.windows-release.result == 'success' }}
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Generate and upload latest.json
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $config = Get-Content -Raw 'kiminola/src-tauri/tauri.conf.json' | ConvertFrom-Json
+          $outputPath = Join-Path $env:RUNNER_TEMP 'latest.json'
+          & .\kiminola\scripts\generate-updater-manifest.ps1 `
+            -Repository $env:RELEASE_REPOSITORY `
+            -Tag $env:RELEASE_TAG `
+            -ReleaseId ([long]$env:RELEASE_ID) `
+            -Version $config.version `
+            -OutputPath $outputPath
+
+          gh release upload $env:RELEASE_TAG "$outputPath#latest.json" --clobber --repo $env:RELEASE_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Uploading latest.json failed.' }
+
+          $release = gh release view $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY --json isDraft,isPrerelease,assets | ConvertFrom-Json
+          if (-not $release.isDraft -or $release.isPrerelease) {
+            throw 'The updater manifest must be generated against a draft, non-prerelease release.'
+          }
+          if (-not ($release.assets | Where-Object { $_.name -eq 'latest.json' })) {
+            throw 'latest.json was not found in the draft release after upload.'
+          }
+          $manifest = Get-Content -Raw $outputPath | ConvertFrom-Json
+          foreach ($platform in @('windows-x86_64', 'windows-aarch64', 'windows-x86_64-nsis', 'windows-aarch64-nsis')) {
+            $entry = $manifest.platforms.PSObject.Properties[$platform].Value
+            if ($null -eq $entry -or [string]::IsNullOrWhiteSpace($entry.url) -or [string]::IsNullOrWhiteSpace($entry.signature)) {
+              throw "Updater manifest is missing a complete '$platform' entry."
+            }
+          }

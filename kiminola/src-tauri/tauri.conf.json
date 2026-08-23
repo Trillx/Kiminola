@@ -42,6 +42,12 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
     "resources": {
       "target/release/onnxruntime.dll": "",
       "target/release/onnxruntime_providers_shared.dll": "",
@@ -55,5 +61,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk5REU4RUFERTdGOTM3NkEKUldScU4vbm5yWTdlbWUxOVRsclhDWUxNWWdsTDJsdm9RdjRNeTY0ZjJpQm9sR0k2SFRaNkwxbHQK",
+      "endpoints": [
+        "https://github.com/Trillx/Kiminola/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

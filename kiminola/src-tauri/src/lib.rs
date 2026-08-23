@@ -22,9 +22,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(shortcuts::ShortcutState::new())
         .plugin(tauri_plugin_opener::init())
-        // Updater wiring (pubkey, endpoints, signing — SPEC §Updates) lands with
-        // the packaging ticket; the plugin refuses to init without a config block.
-        // .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {

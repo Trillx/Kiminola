@@ -69,6 +69,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: .\scripts\prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
 
-      - name: Build installer
+      - name: Build unsigned CI installer
         working-directory: kiminola
-        run: npm.cmd run tauri build -- --target ${{ matrix.target }}
+        run: |
+          # Pull-request CI validates the installer without exposing the updater
+          # private key. The tag-based release workflow performs signed builds.
+          npm.cmd run tauri build -- `
+            --target '${{ matrix.target }}' `
+            --config src-tauri/tauri.ci.conf.json

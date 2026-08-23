@@ -21,6 +21,9 @@ Canonical language for the project. Implementation details do not belong here.
 - **Note enhancement** — the post-meeting LLM pass that produces structured notes: a baseline summary from the transcript alone, merged with the Notepad contents when present.
 - **Model pack** — a downloadable on-device ASR model the user installs to power transcription. Audio never leaves the machine.
 - **Model manifest** — the embedded description of a Model pack: source repo, revision, file list, sizes, and verification hashes.
+- **App release** — a versioned set of Kimi Nola application artifacts offered to users. Not a Model pack.
+- **App update** — an approved replacement of the installed Kimi Nola application. It does not replace Meeting data or a Model pack.
+- **Update check** — the app's request to learn whether a newer App release is available. It never installs anything and is not usage analytics.
 - **First-run wizard** — the mandatory onboarding flow a new user completes before accessing the library. Steps: microphone permission, Model pack download, optional AI Provider configuration.
 - **Onboarding state** — the persisted record of which first-run wizard steps have been completed, used to gate access to the library and recording.
 - **Provider** — a pluggable cloud LLM backend used for Note enhancement (e.g. OpenRouter, direct API keys). Receives transcript *text*, never audio.

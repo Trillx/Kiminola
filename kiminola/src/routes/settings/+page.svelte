@@ -29,6 +29,8 @@
   import { Label } from "$lib/components/ui/label";
   import { Progress } from "$lib/components/ui/progress";
   import * as Select from "$lib/components/ui/select";
+  import { compactReleaseNotes, isRecordingPath } from "$lib/update-policy";
+  import { checkForUpdates, installUpdate, updateState } from "$lib/update.svelte";
 
   type Section = "general" | "models" | "ai" | "shortcut" | "about" | "templates";
 
@@ -41,8 +43,9 @@
     { id: "about", label: "About" },
   ];
 
+  const requestedSection = page.url.searchParams.get("section");
   let active = $state<Section>(
-    page.url.searchParams.get("section") === "models" ? "models" : "general",
+    requestedSection === "models" || requestedSection === "about" ? requestedSection : "general",
   );
   let shortcut = $state("");
   let savingShortcut = $state(false);
@@ -272,6 +275,10 @@
       savingShortcut = false;
     }
   }
+
+  async function installAppUpdate() {
+    await installUpdate(() => !isRecordingPath(page.url.pathname));
+  }
 </script>
 
 <svelte:head>
@@ -432,6 +439,68 @@
             <span class="enhance-copy">MIT</span>
           </div>
         </div>
+        <div class="my-notes-card provider-config update-settings-card">
+          <div class="enhance-title">Updates</div>
+          <div class="enhance-copy">
+            Kimi Nola checks the published stable GitHub release after launch. It never installs an
+            update while a meeting is active, and installation always requires your confirmation.
+          </div>
+
+          {#if updateState.status === "checking"}
+            <div class="model-status" aria-live="polite">Checking for a stable update…</div>
+          {:else if updateState.status === "available"}
+            <div class="model-status ready" role="status">
+              <strong>Version {updateState.version} is available.</strong>
+              {#if compactReleaseNotes(updateState.notes)}
+                <span>{compactReleaseNotes(updateState.notes)}</span>
+              {/if}
+            </div>
+          {:else if updateState.status === "downloading"}
+            <div class="model-progress" aria-live="polite">
+              <div class="model-progress-row">
+                <span>Downloading signed update…</span>
+                <span class="mono">{updateState.progress}%</span>
+              </div>
+              <Progress value={updateState.progress} max={100} class="h-2" />
+            </div>
+          {:else if updateState.status === "ready"}
+            <div class="model-status ready" role="status">
+              <strong>Update ready to install.</strong>
+              <span>Kimi Nola will close and restart after installation.</span>
+            </div>
+          {:else if updateState.status === "installing"}
+            <div class="model-status" aria-live="polite">
+              Installing the update. Kimi Nola will restart automatically.
+            </div>
+          {:else if updateState.status === "up_to_date"}
+            <div class="model-status ready" role="status">
+              <strong>You’re up to date.</strong>
+              <span>Only published stable releases are offered here.</span>
+            </div>
+          {:else if updateState.status === "error"}
+            <div class="model-status" role="alert">
+              <strong>Update check failed.</strong>
+              <span>{updateState.error}</span>
+            </div>
+          {:else}
+            <div class="model-status">
+              <span>Stable update checks run once after each app launch.</span>
+            </div>
+          {/if}
+
+          <div class="config-actions">
+            {#if updateState.status === "available"}
+              <Button onclick={() => void installAppUpdate()}>Install update</Button>
+              <Button variant="outline" onclick={() => void checkForUpdates()}>Check again</Button>
+            {:else if updateState.status === "ready"}
+              <Button onclick={() => void installAppUpdate()}>Restart and update</Button>
+            {:else if updateState.status !== "downloading" && updateState.status !== "installing"}
+              <Button variant="outline" onclick={() => void checkForUpdates()}>
+                {updateState.status === "error" ? "Try again" : "Check for updates"}
+              </Button>
+            {/if}
+          </div>
+        </div>
       {:else if active === "templates"}
         <div class="my-notes-card provider-config">
           <div class="enhance-title">Summary templates</div>
@@ -554,5 +623,9 @@
   .template-select-wrap {
     flex: 1;
     min-width: 0;
+  }
+
+  .update-settings-card {
+    margin-top: 16px;
   }
 </style>
