@@ -39,6 +39,13 @@ export function canRetryFinish(phase: RecordingPhase): boolean {
   return phase === "finish_failed";
 }
 
+export function canHandleStopShortcut(
+  phase: RecordingPhase,
+  controlBusy: boolean,
+): boolean {
+  return !controlBusy && (canStopRecording(phase) || canRetryFinish(phase));
+}
+
 export function shouldDiscardAutoDraft(
   recoveryDraftCreated: boolean,
   nativeSessionActive: boolean,

@@ -12,6 +12,7 @@
   import { createDraftAutosave, type DraftAutosave } from "$lib/draft-autosave";
   import {
     canPauseRecording,
+    canHandleStopShortcut,
     canResumeRecording,
     canStopRecording,
     canRetryFinish,
@@ -38,6 +39,7 @@
     onTranscriptEvent,
     onAudioPressure,
     onRecordingQuitBlocked,
+    onShortcutTriggered,
     type AudioPressureEvent,
     type TranscriptEvent,
     type TranscriptLine,
@@ -226,6 +228,14 @@
       }),
       onRecordingQuitBlocked(() => {
         quitBlocked = true;
+      }),
+      onShortcutTriggered(() => {
+        if (!canHandleStopShortcut(phase, controlBusy)) return;
+        if (canRetryFinish(phase)) {
+          retryFinish();
+        } else {
+          void finishMeeting("save");
+        }
       }),
     ])
       .then(async (listeners) => {

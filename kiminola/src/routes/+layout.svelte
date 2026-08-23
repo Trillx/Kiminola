@@ -5,7 +5,7 @@
   import { goto } from "$app/navigation";
   import { themeState } from "$lib/theme.svelte";
   import { sidebarState } from "$lib/sidebar.svelte";
-  import { isOnboardingComplete, onShortcutTriggered, stopRecording } from "$lib/tauri";
+  import { isOnboardingComplete, onShortcutTriggered } from "$lib/tauri";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import Topbar from "$lib/components/Topbar.svelte";
   import MeetingPresencePrompt from "$lib/components/MeetingPresencePrompt.svelte";
@@ -53,15 +53,13 @@
     }
   });
 
-  // Global start/stop shortcut: if we're already recording, stop and go home;
-  // otherwise open the recording view so it can start.
+  // The global shortcut opens the recording view. Once there, the page owns
+  // the stop action so native finalization and durable meeting save stay one
+  // retry-safe transaction.
   $effect(() => {
     let unlisten: (() => void) | undefined;
-    onShortcutTriggered(async () => {
-      if (page.url.pathname === "/record") {
-        await stopRecording();
-        goto("/");
-      } else {
+    onShortcutTriggered(() => {
+      if (page.url.pathname !== "/record") {
         goto("/record");
       }
     }).then((fn) => {
