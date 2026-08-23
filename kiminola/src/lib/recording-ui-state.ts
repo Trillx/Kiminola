@@ -6,6 +6,43 @@ export type RecordingPhase =
   | "finish_failed"
   | "stopping";
 
+export interface ElapsedClockState {
+  accumulatedMs: number;
+  activeSinceMs: number | null;
+}
+
+export function createElapsedClock(initialSeconds = 0): ElapsedClockState {
+  return {
+    accumulatedMs: Math.max(0, initialSeconds) * 1_000,
+    activeSinceMs: null,
+  };
+}
+
+export function activateElapsedClock(
+  clock: ElapsedClockState,
+  nowMs: number,
+): ElapsedClockState {
+  if (clock.activeSinceMs !== null) return clock;
+  return { ...clock, activeSinceMs: nowMs };
+}
+
+export function freezeElapsedClock(
+  clock: ElapsedClockState,
+  nowMs: number,
+): ElapsedClockState {
+  if (clock.activeSinceMs === null) return clock;
+  return {
+    accumulatedMs: clock.accumulatedMs + Math.max(0, nowMs - clock.activeSinceMs),
+    activeSinceMs: null,
+  };
+}
+
+export function elapsedClockSeconds(clock: ElapsedClockState, nowMs: number): number {
+  const activeMs =
+    clock.activeSinceMs === null ? 0 : Math.max(0, nowMs - clock.activeSinceMs);
+  return Math.floor((clock.accumulatedMs + activeMs) / 1_000);
+}
+
 const PHASE_LABELS: Record<RecordingPhase, string> = {
   starting: "Starting",
   recording: "Recording",

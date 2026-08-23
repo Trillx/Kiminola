@@ -2,7 +2,21 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // @ts-expect-error Node's strip-types test runner imports the TypeScript source directly.
-import { canHandleStopShortcut, canPauseRecording, canResumeRecording, canRetryFinish, canStopRecording, recordingPhaseLabel, shouldAdvanceElapsed, shouldDiscardAutoDraft, shouldGuardRecordingNavigation } from "../src/lib/recording-ui-state.ts";
+import { activateElapsedClock, canHandleStopShortcut, canPauseRecording, canResumeRecording, canRetryFinish, canStopRecording, createElapsedClock, elapsedClockSeconds, freezeElapsedClock, recordingPhaseLabel, shouldAdvanceElapsed, shouldDiscardAutoDraft, shouldGuardRecordingNavigation } from "../src/lib/recording-ui-state.ts";
+
+test("the elapsed clock catches up after delayed callbacks and excludes pauses", () => {
+  let clock = createElapsedClock(120);
+  clock = activateElapsedClock(clock, 1_000);
+  assert.equal(elapsedClockSeconds(clock, 4_900), 123);
+
+  clock = freezeElapsedClock(clock, 5_500);
+  assert.equal(elapsedClockSeconds(clock, 50_000), 124);
+
+  clock = activateElapsedClock(clock, 60_000);
+  assert.equal(elapsedClockSeconds(clock, 62_900), 127);
+  clock = freezeElapsedClock(clock, 63_500);
+  assert.equal(elapsedClockSeconds(clock, 90_000), 128);
+});
 
 test("only an active recording advances elapsed time", () => {
   assert.equal(shouldAdvanceElapsed("starting"), false);

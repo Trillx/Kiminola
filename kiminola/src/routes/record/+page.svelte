@@ -11,15 +11,20 @@
   } from "$lib/transcript-state";
   import { createDraftAutosave, type DraftAutosave } from "$lib/draft-autosave";
   import {
+    activateElapsedClock,
     canPauseRecording,
     canHandleStopShortcut,
     canResumeRecording,
     canStopRecording,
     canRetryFinish,
+    createElapsedClock,
+    elapsedClockSeconds,
+    freezeElapsedClock,
     recordingPhaseLabel,
     shouldAdvanceElapsed,
     shouldDiscardAutoDraft,
     shouldGuardRecordingNavigation,
+    type ElapsedClockState,
     type RecordingPhase,
   } from "$lib/recording-ui-state";
   import { Button } from "$lib/components/ui/button";
@@ -53,6 +58,8 @@
 
   let notepad = $state("");
   let elapsed = $state(0);
+  let elapsedClock: ElapsedClockState = createElapsedClock();
+  let lastRecoveryCheckpointSecond = 0;
   let lines = $state<TranscriptLine[]>([]);
   let transcriptOpen = $state(false);
   let phase = $state<RecordingPhase>("starting");
@@ -115,6 +122,26 @@
     return fallback;
   }
 
+  function restoreElapsedDuration(seconds: number) {
+    elapsed = Math.max(0, Math.floor(seconds));
+    elapsedClock = createElapsedClock(elapsed);
+    lastRecoveryCheckpointSecond = elapsed;
+  }
+
+  function syncElapsedTiming(nowMs = performance.now()) {
+    elapsed = elapsedClockSeconds(elapsedClock, nowMs);
+  }
+
+  function beginElapsedTiming(nowMs = performance.now()) {
+    elapsedClock = activateElapsedClock(elapsedClock, nowMs);
+    syncElapsedTiming(nowMs);
+  }
+
+  function freezeElapsedTiming(nowMs = performance.now()) {
+    elapsedClock = freezeElapsedClock(elapsedClock, nowMs);
+    syncElapsedTiming(nowMs);
+  }
+
   function recoverySnapshot(): RecoverySnapshot {
     return {
       rawMarkdown: notepad,
@@ -163,7 +190,7 @@
       const draft = await getNoteDraft(requestedDraftId);
       noteDraftId = draft.id;
       notepad = draft.raw_markdown;
-      elapsed = Math.max(0, draft.recovery_duration_seconds);
+      restoreElapsedDuration(draft.recovery_duration_seconds);
       transcriptOffsetMs = elapsed * 1_000;
       lines = draft.recovery_transcript;
       configureNoteAutosave(draft.id);
@@ -216,6 +243,7 @@
       meetingAudioAvailable = status.meeting_audio_available;
       transcriptionAvailable = status.transcription_available;
       nativeSessionActive = true;
+      beginElapsedTiming();
       phase = "recording";
     } catch (error) {
       nativeSessionActive = false;
@@ -228,8 +256,11 @@
   onMount(() => {
     const timer = setInterval(() => {
       if (shouldAdvanceElapsed(phase)) {
-        elapsed += 1;
-        if (elapsed % 5 === 0) checkpointRecovery();
+        syncElapsedTiming();
+        if (elapsed - lastRecoveryCheckpointSecond >= 5) {
+          lastRecoveryCheckpointSecond = elapsed;
+          checkpointRecovery();
+        }
       }
     }, 1000);
     let unlisten: (() => void)[] = [];
@@ -269,6 +300,7 @@
 
     return () => {
       clearInterval(timer);
+      freezeElapsedTiming();
       const autosave = noteAutosave;
       if (autosave) {
         void autosave.flush(recoverySnapshot()).catch(() => undefined);
@@ -295,6 +327,7 @@
     controlError = null;
     try {
       await pauseRecording();
+      freezeElapsedTiming();
       phase = "paused";
     } catch (error) {
       controlError = {
@@ -317,6 +350,7 @@
       meetingAudioWarningDismissed = false;
       transcriptionAvailable = status.transcription_available;
       transcriptionWarningDismissed = false;
+      beginElapsedTiming();
       phase = "recording";
     } catch (error) {
       controlError = {
@@ -330,6 +364,7 @@
   }
 
   async function finishMeeting(mode: FinishMode) {
+    freezeElapsedTiming();
     phase = "stopping";
     finishError = null;
     pendingFinishMode = mode;
@@ -372,6 +407,7 @@
   }
 
   async function openRecoveryDraft() {
+    freezeElapsedTiming();
     phase = "stopping";
     await flushNoteCheckpoint();
     if (nativeSessionActive) {
@@ -404,6 +440,7 @@
   async function keepRecoveryAndLeave() {
     const destination = pendingNavigationTarget ?? "/";
     navigationDialogOpen = false;
+    freezeElapsedTiming();
     phase = "stopping";
     await flushNoteCheckpoint();
     if (nativeSessionActive) {
@@ -426,6 +463,7 @@
 
   async function cancel() {
     const discardAutoDraft = shouldDiscardAutoDraft(recoveryDraftCreated, nativeSessionActive);
+    freezeElapsedTiming();
     phase = "stopping";
     if (!discardAutoDraft) await flushNoteCheckpoint();
     closeNoteAutosave();
