@@ -20,7 +20,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, Sleep, WaitForSingleObject};
 
-use crate::recording_session::AudioBuffer;
+use crate::recording_session::{AudioBuffer, AudioPressureCounters};
 
 const REFTIMES_PER_MILLISEC: i64 = 10000;
 const BUFFER_DURATION_100NS: i64 = 100 * REFTIMES_PER_MILLISEC; // 100 ms
@@ -115,9 +115,17 @@ pub fn capture_loopback(
     cancel: Arc<AtomicBool>,
     started_tx: sync_mpsc::Sender<Result<LoopbackStart, String>>,
     target_process_id: Option<u32>,
+    pressure: Arc<AudioPressureCounters>,
 ) {
-    let result =
-        unsafe { capture_loopback_inner(&audio_tx, &cancel, &started_tx, target_process_id) };
+    let result = unsafe {
+        capture_loopback_inner(
+            &audio_tx,
+            &cancel,
+            &started_tx,
+            target_process_id,
+            &pressure,
+        )
+    };
     let _ = started_tx.send(result);
 }
 
@@ -126,6 +134,7 @@ unsafe fn capture_loopback_inner(
     cancel: &Arc<AtomicBool>,
     started_tx: &sync_mpsc::Sender<Result<LoopbackStart, String>>,
     target_process_id: Option<u32>,
+    pressure: &AudioPressureCounters,
 ) -> Result<LoopbackStart, String> {
     CoInitializeEx(None, COINIT_MULTITHREADED)
         .ok()
@@ -194,9 +203,11 @@ unsafe fn capture_loopback_inner(
                 active.encoding,
             );
             if !samples.is_empty() {
+                let sample_count = samples.len();
                 match audio_tx.try_send(AudioBuffer::Loopback(samples)) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
+                        pressure.add_loopback(sample_count);
                         dropped_buffers = dropped_buffers.saturating_add(1);
                         if dropped_buffers.is_power_of_two() {
                             eprintln!(
@@ -445,7 +456,13 @@ mod tests {
         let (started_tx, started_rx) = sync_mpsc::channel();
         let thread_cancel = Arc::clone(&cancel);
         let capture_thread = std::thread::spawn(move || {
-            capture_loopback(audio_tx, thread_cancel, started_tx, target_process_id);
+            capture_loopback(
+                audio_tx,
+                thread_cancel,
+                started_tx,
+                target_process_id,
+                Arc::new(AudioPressureCounters::default()),
+            );
         });
 
         let started = started_rx

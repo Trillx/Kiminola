@@ -1,7 +1,7 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as sync_mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -42,6 +42,37 @@ pub struct TranscriptEvent {
     pub end_ms: u64,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, PartialEq, Eq)]
+pub struct AudioPressureEvent {
+    pub mic_dropped_samples: u64,
+    pub loopback_dropped_samples: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AudioPressureCounters {
+    mic_dropped_samples: AtomicU64,
+    loopback_dropped_samples: AtomicU64,
+}
+
+impl AudioPressureCounters {
+    fn add_mic(&self, samples: usize) {
+        self.mic_dropped_samples
+            .fetch_add(samples as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn add_loopback(&self, samples: usize) {
+        self.loopback_dropped_samples
+            .fetch_add(samples as u64, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> AudioPressureEvent {
+        AudioPressureEvent {
+            mic_dropped_samples: self.mic_dropped_samples.load(Ordering::Relaxed),
+            loopback_dropped_samples: self.loopback_dropped_samples.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Sample rates returned when an audio source starts both capture paths.
 #[derive(Debug)]
 pub struct AudioStream {
@@ -50,6 +81,7 @@ pub struct AudioStream {
     /// Receives audio buffers produced by the source. The source owns the
     /// corresponding sender; stopping the source closes this receiver.
     pub audio_rx: mpsc::Receiver<AudioBuffer>,
+    pub(crate) pressure: Arc<AudioPressureCounters>,
 }
 
 /// Abstraction over a mic + loopback audio capture source.
@@ -62,16 +94,20 @@ pub trait AudioSource: Send + Sync {
 /// Sink for transcript events produced by a recording session.
 pub trait TranscriptSink: Send + Sync {
     fn emit(&self, event: TranscriptEvent);
+
+    fn emit_audio_pressure(&self, _event: AudioPressureEvent) {}
 }
 
 /// Fixed mic boost applied before ASR; see the comment in the consumer loop.
 const MIC_GAIN: f32 = 4.0;
+const AUDIO_PRESSURE_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Commands sent to the dedicated audio OS thread.
 enum AudioCommand {
     Start {
         result_tx: tokio::sync::oneshot::Sender<Result<StreamRates, String>>,
         audio_tx: mpsc::Sender<AudioBuffer>,
+        pressure: Arc<AudioPressureCounters>,
         target_process_id: Option<u32>,
     },
     Stop,
@@ -107,6 +143,7 @@ impl AudioThread {
                     Ok(AudioCommand::Start {
                         result_tx,
                         audio_tx,
+                        pressure,
                         target_process_id,
                     }) => {
                         // Tear down any previous session first.
@@ -118,7 +155,8 @@ impl AudioThread {
                             let _ = handle.join();
                         }
 
-                        let mic_result = build_mic_stream(&host, audio_tx.clone());
+                        let mic_result =
+                            build_mic_stream(&host, audio_tx.clone(), Arc::clone(&pressure));
                         match mic_result {
                             Ok((stream, mic_config)) => {
                                 if let Err(e) = stream.play() {
@@ -139,6 +177,7 @@ impl AudioThread {
                                         cancel_clone,
                                         started_tx,
                                         target_process_id,
+                                        pressure,
                                     );
                                 }));
                                 loopback_cancel = Some(cancel);
@@ -196,6 +235,7 @@ impl AudioThread {
     async fn start(
         &self,
         audio_tx: mpsc::Sender<AudioBuffer>,
+        pressure: Arc<AudioPressureCounters>,
         target_process_id: Option<u32>,
     ) -> Result<StreamRates, String> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -203,6 +243,7 @@ impl AudioThread {
             .send(AudioCommand::Start {
                 result_tx,
                 audio_tx,
+                pressure,
                 target_process_id,
             })
             .map_err(|_| "audio thread disconnected".to_string())?;
@@ -222,6 +263,7 @@ impl AudioThread {
 fn build_mic_stream(
     host: &cpal::Host,
     audio_tx: mpsc::Sender<AudioBuffer>,
+    pressure: Arc<AudioPressureCounters>,
 ) -> Result<(cpal::Stream, cpal::StreamConfig), String> {
     let device = host
         .default_input_device()
@@ -244,13 +286,13 @@ fn build_mic_stream(
 
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => {
-            build_input_stream::<f32>(&device, &stream_config, channels, audio_tx, err_fn)?
+            build_input_stream::<f32>(&device, &stream_config, channels, audio_tx, pressure, err_fn)?
         }
         cpal::SampleFormat::I16 => {
-            build_input_stream::<i16>(&device, &stream_config, channels, audio_tx, err_fn)?
+            build_input_stream::<i16>(&device, &stream_config, channels, audio_tx, pressure, err_fn)?
         }
         cpal::SampleFormat::U16 => {
-            build_input_stream::<u16>(&device, &stream_config, channels, audio_tx, err_fn)?
+            build_input_stream::<u16>(&device, &stream_config, channels, audio_tx, pressure, err_fn)?
         }
         fmt => return Err(format!("unsupported sample format: {fmt}")),
     };
@@ -263,6 +305,7 @@ fn build_input_stream<T>(
     config: &cpal::StreamConfig,
     channels: usize,
     audio_tx: mpsc::Sender<AudioBuffer>,
+    pressure: Arc<AudioPressureCounters>,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> Result<cpal::Stream, String>
 where
@@ -282,8 +325,13 @@ where
                     .collect();
 
                 if !mono.is_empty() {
-                    // TODO(T5+): count dropped samples instead of silently losing them.
-                    let _ = audio_tx.try_send(AudioBuffer::Mic(mono));
+                    let sample_count = mono.len();
+                    if matches!(
+                        audio_tx.try_send(AudioBuffer::Mic(mono)),
+                        Err(mpsc::error::TrySendError::Full(_))
+                    ) {
+                        pressure.add_mic(sample_count);
+                    }
                 }
             },
             err_fn,
@@ -296,6 +344,7 @@ where
 pub struct DefaultAudioSource {
     audio_thread: AudioThread,
     target_process_id: Option<u32>,
+    pressure: Arc<AudioPressureCounters>,
 }
 
 impl DefaultAudioSource {
@@ -307,6 +356,7 @@ impl DefaultAudioSource {
         Self {
             audio_thread: AudioThread::spawn(),
             target_process_id,
+            pressure: Arc::new(AudioPressureCounters::default()),
         }
     }
 }
@@ -321,11 +371,15 @@ impl Default for DefaultAudioSource {
 impl AudioSource for DefaultAudioSource {
     async fn start(&self) -> Result<AudioStream, String> {
         let (tx, rx) = mpsc::channel::<AudioBuffer>(256);
-        let rates = self.audio_thread.start(tx, self.target_process_id).await?;
+        let rates = self
+            .audio_thread
+            .start(tx, Arc::clone(&self.pressure), self.target_process_id)
+            .await?;
         Ok(AudioStream {
             mic_sample_rate: rates.mic_sample_rate,
             loopback_sample_rate: rates.loopback_sample_rate,
             audio_rx: rx,
+            pressure: Arc::clone(&self.pressure),
         })
     }
 
@@ -398,6 +452,7 @@ impl RecordingSession {
         // Forward buffers from the source's ephemeral channel into the persistent
         // internal channel so pause/resume can swap sources without restarting the
         // consumer task or ASR lanes.
+        let pressure = Arc::clone(&stream.pressure);
         let forwarder_rx = stream.audio_rx;
         tokio::spawn(run_forwarder(forwarder_rx, internal_tx));
 
@@ -409,6 +464,7 @@ impl RecordingSession {
             sink,
             stream.mic_sample_rate,
             stream.loopback_sample_rate,
+            pressure,
         ));
         *self.consumer_handle.lock().await = Some(handle);
 
@@ -519,6 +575,7 @@ async fn run_consumer(
     sink: Arc<dyn TranscriptSink>,
     mic_rate: u32,
     loopback_rate: u32,
+    pressure: Arc<AudioPressureCounters>,
 ) {
     let mut mic_asr = engine.as_ref().map(|e| e.lane());
     let mut loopback_asr = engine.as_ref().map(|e| e.lane());
@@ -535,6 +592,7 @@ async fn run_consumer(
     let mut next_utterance_id = 1u64;
     let mut mic_timeline = TranscriptLaneTimeline::default();
     let mut loopback_timeline = TranscriptLaneTimeline::default();
+    let mut pressure_reporter = AudioPressureReporter::default();
 
     while let Some(buf) = audio_rx.recv().await {
         match buf {
@@ -613,6 +671,13 @@ async fn run_consumer(
                 }
             }
         }
+        if let Some(event) = pressure_reporter.event(&pressure, Instant::now(), false) {
+            sink.emit_audio_pressure(event);
+        }
+    }
+
+    if let Some(event) = pressure_reporter.event(&pressure, Instant::now(), true) {
+        sink.emit_audio_pressure(event);
     }
 
     // Flush any trailing ASR text when the session ends.
@@ -639,6 +704,39 @@ async fn run_consumer(
                 sink.emit(event);
             }
         }
+    }
+}
+
+#[derive(Default)]
+struct AudioPressureReporter {
+    last_reported: AudioPressureEvent,
+    last_emit: Option<Instant>,
+}
+
+impl AudioPressureReporter {
+    fn event(
+        &mut self,
+        counters: &AudioPressureCounters,
+        now: Instant,
+        force: bool,
+    ) -> Option<AudioPressureEvent> {
+        let current = counters.snapshot();
+        if current == self.last_reported
+            || (current.mic_dropped_samples == 0 && current.loopback_dropped_samples == 0)
+        {
+            return None;
+        }
+        if !force
+            && self
+                .last_emit
+                .is_some_and(|last| now.duration_since(last) < AUDIO_PRESSURE_REPORT_INTERVAL)
+        {
+            return None;
+        }
+
+        self.last_reported = current.clone();
+        self.last_emit = Some(now);
+        Some(current)
     }
 }
 
@@ -728,6 +826,7 @@ mod tests {
         samples: Vec<f32>,
         sample_rate: u32,
         cancel: Arc<AtomicBool>,
+        pressure: Arc<AudioPressureCounters>,
     }
 
     #[async_trait]
@@ -751,6 +850,7 @@ mod tests {
                 mic_sample_rate: self.sample_rate,
                 loopback_sample_rate: 0,
                 audio_rx: rx,
+                pressure: Arc::clone(&self.pressure),
             })
         }
 
@@ -774,6 +874,7 @@ mod tests {
             samples,
             sample_rate,
             cancel: Arc::new(AtomicBool::new(false)),
+            pressure: Arc::new(AudioPressureCounters::default()),
         })
     }
 
@@ -807,6 +908,44 @@ mod tests {
 
         drop(source_tx);
         forwarder.await.unwrap();
+    }
+
+    #[test]
+    fn audio_pressure_reports_immediately_then_throttles_updates() {
+        let counters = AudioPressureCounters::default();
+        let mut reporter = AudioPressureReporter::default();
+        let started = Instant::now();
+
+        counters.add_mic(160);
+        assert_eq!(
+            reporter.event(&counters, started, false),
+            Some(AudioPressureEvent {
+                mic_dropped_samples: 160,
+                loopback_dropped_samples: 0,
+            })
+        );
+
+        counters.add_mic(160);
+        assert_eq!(
+            reporter.event(&counters, started + Duration::from_secs(1), false),
+            None
+        );
+        assert_eq!(
+            reporter.event(&counters, started + Duration::from_secs(5), false),
+            Some(AudioPressureEvent {
+                mic_dropped_samples: 320,
+                loopback_dropped_samples: 0,
+            })
+        );
+
+        counters.add_loopback(80);
+        assert_eq!(
+            reporter.event(&counters, started + Duration::from_secs(6), true),
+            Some(AudioPressureEvent {
+                mic_dropped_samples: 320,
+                loopback_dropped_samples: 80,
+            })
+        );
     }
 
     #[test]

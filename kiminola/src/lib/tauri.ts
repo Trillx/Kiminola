@@ -14,6 +14,11 @@ export interface TranscriptEvent {
   end_ms: number;
 }
 
+export interface AudioPressureEvent {
+  mic_dropped_samples: number;
+  loopback_dropped_samples: number;
+}
+
 export interface TranscriptLine {
   id?: number;
   utterance_id?: number;
@@ -45,6 +50,14 @@ export function onTranscriptEvent(
   handler: (event: TranscriptEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<TranscriptEvent>("transcript:event", (payload) => {
+    handler(payload.payload);
+  });
+}
+
+export function onAudioPressure(
+  handler: (event: AudioPressureEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<AudioPressureEvent>("recording:audio-pressure", (payload) => {
     handler(payload.payload);
   });
 }

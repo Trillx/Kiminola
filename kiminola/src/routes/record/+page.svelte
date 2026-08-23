@@ -35,7 +35,9 @@
     deleteNoteDraft,
     openMicrophonePrivacySettings,
     onTranscriptEvent,
+    onAudioPressure,
     onRecordingQuitBlocked,
+    type AudioPressureEvent,
     type TranscriptEvent,
     type TranscriptLine,
   } from "$lib/tauri";
@@ -53,6 +55,7 @@
   let finishError = $state<string | null>(null);
   let controlBusy = $state(false);
   let controlError = $state<{ action: "pause" | "resume"; message: string } | null>(null);
+  let audioPressure = $state<AudioPressureEvent | null>(null);
   let nativeSessionActive = false;
   let requestedDraftId = NaN;
   let noteDraftId = $state<number | null>(null);
@@ -77,6 +80,15 @@
   );
   let statusLabel = $derived(recordingPhaseLabel(phase));
   let stopping = $derived(phase === "stopping");
+  let audioPressureSource = $derived(
+    !audioPressure
+      ? "audio"
+      : audioPressure.mic_dropped_samples > 0 && audioPressure.loopback_dropped_samples > 0
+        ? "microphone and meeting audio"
+        : audioPressure.mic_dropped_samples > 0
+          ? "microphone audio"
+          : "meeting audio",
+  );
 
   function errorMessage(error: unknown, fallback: string): string {
     if (error instanceof Error) return error.message;
@@ -165,6 +177,7 @@
   async function prepareAndStart() {
     phase = "starting";
     startError = null;
+    audioPressure = null;
     try {
       if (noteDraftId === null) await prepareNoteDraft(requestedDraftId);
       await startRecording();
@@ -194,6 +207,9 @@
       onTranscriptEvent((event: TranscriptEvent) => {
         lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
         checkpointRecovery();
+      }),
+      onAudioPressure((event: AudioPressureEvent) => {
+        audioPressure = event;
       }),
       onRecordingQuitBlocked(() => {
         quitBlocked = true;
@@ -408,6 +424,19 @@
       </div>
     {/if}
 
+    {#if audioPressure}
+      <div class="recording-audio-warning" role="alert">
+        <div>
+          <strong>Audio processing briefly fell behind.</strong>
+          <span>
+            Some {audioPressureSource} may be missing from the transcript. Close other heavy apps
+            if this continues.
+          </span>
+        </div>
+        <Button size="sm" variant="ghost" onclick={() => (audioPressure = null)}>Dismiss</Button>
+      </div>
+    {/if}
+
     <div class="notepad-hero">
       <div class="notepad-header">
         <span class="notepad-label">My notes</span>
@@ -542,7 +571,8 @@
 
   .recording-start-error,
   .recording-finish-error,
-  .recording-control-error {
+  .recording-control-error,
+  .recording-audio-warning {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -558,14 +588,16 @@
 
   .recording-start-error > div:first-child,
   .recording-finish-error > div:first-child,
-  .recording-control-error > div:first-child {
+  .recording-control-error > div:first-child,
+  .recording-audio-warning > div:first-child {
     display: grid;
     gap: 3px;
   }
 
   .recording-start-error span,
   .recording-finish-error span,
-  .recording-control-error span {
+  .recording-control-error span,
+  .recording-audio-warning span {
     color: var(--text-muted);
   }
 
@@ -644,7 +676,8 @@
   @media (max-width: 680px) {
     .recording-start-error,
     .recording-finish-error,
-    .recording-control-error {
+    .recording-control-error,
+    .recording-audio-warning {
       align-items: stretch;
       flex-direction: column;
     }

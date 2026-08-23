@@ -8,7 +8,8 @@ use tokio::sync::Mutex;
 
 use crate::asr::{resolve_asr_model_dir, AsrEngine};
 use crate::recording_session::{
-    AudioSource, DefaultAudioSource, RecordingSession, TranscriptEvent, TranscriptSink,
+    AudioPressureEvent, AudioSource, DefaultAudioSource, RecordingSession, TranscriptEvent,
+    TranscriptSink,
 };
 
 /// Shared Tauri state for recording.
@@ -145,6 +146,16 @@ impl TranscriptSink for TauriTranscriptSink {
         self.store.record(&event);
         if let Err(e) = self.app.emit("transcript:event", event) {
             eprintln!("failed to emit transcript:event: {e}");
+        }
+    }
+
+    fn emit_audio_pressure(&self, event: AudioPressureEvent) {
+        eprintln!(
+            "[recording] capture queue pressure: {} mic sample(s), {} loopback sample(s) dropped",
+            event.mic_dropped_samples, event.loopback_dropped_samples
+        );
+        if let Err(e) = self.app.emit("recording:audio-pressure", event) {
+            eprintln!("failed to emit recording:audio-pressure: {e}");
         }
     }
 }
