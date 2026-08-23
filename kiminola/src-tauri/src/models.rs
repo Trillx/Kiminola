@@ -106,6 +106,19 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+async fn is_model_file_present_async(path: PathBuf, file: ModelFile) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || is_model_file_present_at(&path, &file))
+        .await
+        .map_err(|e| format!("model file health check panicked: {e}"))
+}
+
+async fn sha256_file_async(path: PathBuf) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || sha256_file(&path))
+        .await
+        .map_err(|e| format!("model hash task panicked: {e}"))?
+        .map_err(|e| format!("hash model file: {e}"))
+}
+
 /* ---------- progress event ---------- */
 
 #[derive(Clone, serde::Serialize)]
@@ -250,7 +263,8 @@ async fn download_file(
         }
 
         // Verify SHA-256 against the manifest (hash the complete part file so resume is safe).
-        let hash = sha256_file(&part_path).map_err(|e| format!("hash part file: {e}"))?;
+        drop(part_file);
+        let hash = sha256_file_async(part_path.clone()).await?;
         if !hash.eq_ignore_ascii_case(&file.sha256) {
             // Placeholder hashes are clearly marked; if the manifest still holds
             // placeholders, skip verification rather than fail every download.
@@ -293,7 +307,7 @@ pub async fn download_model_pack(
 
     for file in &manifest.files {
         let final_path = dir.join(&file.path);
-        if is_model_file_present_at(&final_path, file) {
+        if is_model_file_present_async(final_path, file.clone()).await? {
             overall_downloaded += file.bytes;
             let _ = on_progress.send(DownloadEvent {
                 file: file.name.clone(),
@@ -475,6 +489,33 @@ mod tests {
 
         fs::write(root.join("tokens.txt"), b"5678").unwrap();
         assert!(is_model_pack_present_at(&root, &manifest));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn async_model_file_validation_matches_manifest_hash() {
+        let temp_id = NEXT_TEMP_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "kiminola-model-pack-async-test-{}-{temp_id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let file = ModelFile {
+            name: "encoder".into(),
+            path: "encoder.onnx".into(),
+            bytes: 4,
+            sha256: "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4".into(),
+        };
+        let path = root.join(&file.path);
+
+        fs::write(&path, b"1234").unwrap();
+        assert!(is_model_file_present_async(path.clone(), file.clone())
+            .await
+            .unwrap());
+
+        fs::write(&path, b"5678").unwrap();
+        assert!(!is_model_file_present_async(path, file).await.unwrap());
 
         fs::remove_dir_all(&root).unwrap();
     }
