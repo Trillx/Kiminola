@@ -155,7 +155,7 @@ jobs:
         run: .\scripts\prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
 
       - name: Build and upload draft release assets
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
