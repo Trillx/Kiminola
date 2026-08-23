@@ -31,11 +31,15 @@ pub enum AudioBuffer {
 }
 
 /// Payload emitted on the `transcript:event` channel while a recording is active.
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct TranscriptEvent {
+    pub utterance_id: u64,
+    pub revision: u32,
     pub channel: TranscriptChannel,
     pub text: String,
     pub is_partial: bool,
+    pub start_ms: u64,
+    pub end_ms: u64,
 }
 
 /// Sample rates returned when an audio source starts both capture paths.
@@ -57,7 +61,7 @@ pub trait AudioSource: Send + Sync {
 
 /// Sink for transcript events produced by a recording session.
 pub trait TranscriptSink: Send + Sync {
-    fn emit(&self, channel: TranscriptChannel, text: &str, is_partial: bool);
+    fn emit(&self, event: TranscriptEvent);
 }
 
 /// Fixed mic boost applied before ASR; see the comment in the consumer loop.
@@ -68,6 +72,7 @@ enum AudioCommand {
     Start {
         result_tx: tokio::sync::oneshot::Sender<Result<StreamRates, String>>,
         audio_tx: mpsc::Sender<AudioBuffer>,
+        target_process_id: Option<u32>,
     },
     Stop,
 }
@@ -99,7 +104,11 @@ impl AudioThread {
 
             loop {
                 match cmd_rx.recv() {
-                    Ok(AudioCommand::Start { result_tx, audio_tx }) => {
+                    Ok(AudioCommand::Start {
+                        result_tx,
+                        audio_tx,
+                        target_process_id,
+                    }) => {
                         // Tear down any previous session first.
                         _mic_stream = None;
                         if let Some(cancel) = loopback_cancel.take() {
@@ -113,9 +122,8 @@ impl AudioThread {
                         match mic_result {
                             Ok((stream, mic_config)) => {
                                 if let Err(e) = stream.play() {
-                                    let _ = result_tx.send(Err(format!(
-                                        "failed to play mic stream: {e}"
-                                    )));
+                                    let _ = result_tx
+                                        .send(Err(format!("failed to play mic stream: {e}")));
                                     continue;
                                 }
                                 _mic_stream = Some(stream);
@@ -130,23 +138,33 @@ impl AudioThread {
                                         audio_tx_loopback,
                                         cancel_clone,
                                         started_tx,
+                                        target_process_id,
                                     );
                                 }));
                                 loopback_cancel = Some(cancel);
 
-                                let loopback_rate = match started_rx
-                                    .recv_timeout(Duration::from_millis(500))
-                                {
-                                    Ok(Ok(rate)) => rate,
-                                    Ok(Err(e)) => {
-                                        eprintln!("loopback failed to start: {e}");
-                                        0
-                                    }
-                                    Err(_) => {
-                                        eprintln!("loopback startup timed out");
-                                        0
-                                    }
-                                };
+                                let loopback_rate =
+                                    match started_rx.recv_timeout(Duration::from_millis(500)) {
+                                        Ok(Ok(started)) => {
+                                            eprintln!(
+                                                "[recording] loopback source: {}",
+                                                if started.process_tree {
+                                                    "meeting process tree"
+                                                } else {
+                                                    "default output"
+                                                }
+                                            );
+                                            started.sample_rate
+                                        }
+                                        Ok(Err(e)) => {
+                                            eprintln!("loopback failed to start: {e}");
+                                            0
+                                        }
+                                        Err(_) => {
+                                            eprintln!("loopback startup timed out");
+                                            0
+                                        }
+                                    };
 
                                 let _ = result_tx.send(Ok(StreamRates {
                                     mic_sample_rate: mic_config.sample_rate.0,
@@ -178,10 +196,15 @@ impl AudioThread {
     async fn start(
         &self,
         audio_tx: mpsc::Sender<AudioBuffer>,
+        target_process_id: Option<u32>,
     ) -> Result<StreamRates, String> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
-            .send(AudioCommand::Start { result_tx, audio_tx })
+            .send(AudioCommand::Start {
+                result_tx,
+                audio_tx,
+                target_process_id,
+            })
             .map_err(|_| "audio thread disconnected".to_string())?;
         result_rx
             .await
@@ -272,12 +295,18 @@ where
 /// Default system audio source: cpal microphone + WASAPI loopback capture.
 pub struct DefaultAudioSource {
     audio_thread: AudioThread,
+    target_process_id: Option<u32>,
 }
 
 impl DefaultAudioSource {
     pub fn new() -> Self {
+        Self::for_process(None)
+    }
+
+    pub fn for_process(target_process_id: Option<u32>) -> Self {
         Self {
             audio_thread: AudioThread::spawn(),
+            target_process_id,
         }
     }
 }
@@ -292,7 +321,7 @@ impl Default for DefaultAudioSource {
 impl AudioSource for DefaultAudioSource {
     async fn start(&self) -> Result<AudioStream, String> {
         let (tx, rx) = mpsc::channel::<AudioBuffer>(256);
-        let rates = self.audio_thread.start(tx).await?;
+        let rates = self.audio_thread.start(tx, self.target_process_id).await?;
         Ok(AudioStream {
             mic_sample_rate: rates.mic_sample_rate,
             loopback_sample_rate: rates.loopback_sample_rate,
@@ -321,7 +350,6 @@ pub struct RecordingSession {
     asr_engine: Option<Arc<AsrEngine>>,
     sink: Arc<dyn TranscriptSink>,
     state: Mutex<SessionState>,
-    cancel: Arc<AtomicBool>,
     internal_tx: Mutex<Option<mpsc::Sender<AudioBuffer>>>,
     consumer_handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -337,7 +365,6 @@ impl RecordingSession {
             asr_engine,
             sink,
             state: Mutex::new(SessionState::Idle),
-            cancel: Arc::new(AtomicBool::new(false)),
             internal_tx: Mutex::new(None),
             consumer_handle: Mutex::new(None),
         }
@@ -376,13 +403,10 @@ impl RecordingSession {
 
         let engine = self.asr_engine.clone();
         let sink = Arc::clone(&self.sink);
-        let cancel = Arc::clone(&self.cancel);
-
         let handle = tokio::spawn(run_consumer(
             internal_rx,
             engine,
             sink,
-            cancel,
             stream.mic_sample_rate,
             stream.loopback_sample_rate,
         ));
@@ -401,19 +425,25 @@ impl RecordingSession {
             *state = SessionState::Stopping;
         }
 
-        self.cancel.store(true, Ordering::Relaxed);
-        // Drop the keepalive sender so the consumer channel closes and the task
-        // can finish cleanly after flushing trailing ASR text.
-        let _ = self.internal_tx.lock().await.take();
+        // Stop the producers, then drop the keepalive sender. Forwarders drain
+        // their already-captured buffers before the internal channel closes, so
+        // the consumer can decode everything and flush both ASR lanes.
         self.audio_source.stop();
+        let _ = self.internal_tx.lock().await.take();
 
         let mut handle = self.consumer_handle.lock().await;
         if let Some(mut h) = handle.take() {
-            tokio::time::timeout(Duration::from_millis(500), &mut h)
-                .await
-                .ok();
-            if !h.is_finished() {
-                h.abort();
+            match tokio::time::timeout(Duration::from_secs(5), &mut h).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    *self.state.lock().await = SessionState::Idle;
+                    return Err(format!("transcript finalization task failed: {error}"));
+                }
+                Err(_) => {
+                    h.abort();
+                    *self.state.lock().await = SessionState::Idle;
+                    return Err("timed out finalizing the transcript".into());
+                }
             }
         }
 
@@ -487,7 +517,6 @@ async fn run_consumer(
     mut audio_rx: mpsc::Receiver<AudioBuffer>,
     engine: Option<Arc<AsrEngine>>,
     sink: Arc<dyn TranscriptSink>,
-    cancel: Arc<AtomicBool>,
     mic_rate: u32,
     loopback_rate: u32,
 ) {
@@ -503,73 +532,84 @@ async fn run_consumer(
     let started = std::time::Instant::now();
     let mut first_mic_audio_logged = false;
     let mut first_mic_text_logged = false;
+    let mut next_utterance_id = 1u64;
+    let mut mic_timeline = TranscriptLaneTimeline::default();
+    let mut loopback_timeline = TranscriptLaneTimeline::default();
 
-    loop {
-        tokio::select! {
-            buf = audio_rx.recv() => {
-                if cancel.load(Ordering::Relaxed) {
-                    break;
-                }
-                match buf {
-                    Some(AudioBuffer::Mic(samples)) => {
-                        if let Some(r) = mic_resampler.as_mut() {
-                            r.push(&samples);
-                            let mut resampled = r.drain_output();
-                            // The mic array's signal sits around -25 dBFS on the test
-                            // hardware, too quiet for the small ASR model to lock on.
-                            // Fixed boost (measured: x4 restores full recognition);
-                            // a proper AGC is follow-up work.
-                            for s in resampled.iter_mut() {
-                                *s = (*s * MIC_GAIN).clamp(-1.0, 1.0);
-                            }
-                            if !resampled.is_empty() {
-                                if !first_mic_audio_logged {
-                                    first_mic_audio_logged = true;
-                                    eprintln!("[recording] first mic audio at +{:?}", started.elapsed());
-                                }
-                                if let Some(lane) = mic_asr.as_mut() {
-                                    lane.feed(&resampled);
-                                }
-                            }
+    while let Some(buf) = audio_rx.recv().await {
+        match buf {
+            AudioBuffer::Mic(samples) => {
+                if let Some(r) = mic_resampler.as_mut() {
+                    r.push(&samples);
+                    let mut resampled = r.drain_output();
+                    // The mic array's signal sits around -25 dBFS on the test
+                    // hardware, too quiet for the small ASR model to lock on.
+                    // Fixed boost (measured: x4 restores full recognition);
+                    // a proper AGC is follow-up work.
+                    for s in resampled.iter_mut() {
+                        *s = (*s * MIC_GAIN).clamp(-1.0, 1.0);
+                    }
+                    if !resampled.is_empty() {
+                        mic_timeline.add_samples(resampled.len());
+                        if !first_mic_audio_logged {
+                            first_mic_audio_logged = true;
+                            eprintln!("[recording] first mic audio at +{:?}", started.elapsed());
+                        }
+                        if let Some(lane) = mic_asr.as_mut() {
+                            lane.feed(&resampled);
                         }
                     }
-                    Some(AudioBuffer::Loopback(samples)) => {
-                        if let Some(r) = loopback_resampler.as_mut() {
-                            r.push(&samples);
-                            let resampled = r.drain_output();
-                            if !resampled.is_empty() {
-                                if let Some(lane) = loopback_asr.as_mut() {
-                                    lane.feed(&resampled);
-                                }
-                            }
+                }
+            }
+            AudioBuffer::Loopback(samples) => {
+                if let Some(r) = loopback_resampler.as_mut() {
+                    r.push(&samples);
+                    let resampled = r.drain_output();
+                    if !resampled.is_empty() {
+                        loopback_timeline.add_samples(resampled.len());
+                        if let Some(lane) = loopback_asr.as_mut() {
+                            lane.feed(&resampled);
                         }
                     }
-                    None => break,
                 }
+            }
+        }
 
-                // Batch-decode any lane that buffered a full chunk (one
-                // encoder pass for both lanes), then emit what changed.
-                if let Some(engine) = engine.as_ref() {
-                    let mut lanes: Vec<_> = mic_asr
-                        .as_mut()
-                        .into_iter()
-                        .chain(loopback_asr.as_mut())
-                        .collect();
-                    engine.decode_ready(&mut lanes);
+        // Batch-decode any lane that buffered a full chunk (one
+        // encoder pass for both lanes), then emit what changed.
+        if let Some(engine) = engine.as_ref() {
+            let mut lanes: Vec<_> = mic_asr
+                .as_mut()
+                .into_iter()
+                .chain(loopback_asr.as_mut())
+                .collect();
+            engine.decode_ready(&mut lanes);
+        }
+        if let Some(lane) = mic_asr.as_mut() {
+            if let Some((text, is_final)) = lane.take_result() {
+                if !first_mic_text_logged {
+                    first_mic_text_logged = true;
+                    eprintln!("[recording] first mic text at +{:?}", started.elapsed());
                 }
-                if let Some(lane) = mic_asr.as_mut() {
-                    if let Some((text, is_final)) = lane.take_result() {
-                        if !first_mic_text_logged {
-                            first_mic_text_logged = true;
-                            eprintln!("[recording] first mic text at +{:?}", started.elapsed());
-                        }
-                        sink.emit(TranscriptChannel::You, &text, !is_final);
-                    }
+                if let Some(event) = mic_timeline.event(
+                    TranscriptChannel::You,
+                    &text,
+                    is_final,
+                    &mut next_utterance_id,
+                ) {
+                    sink.emit(event);
                 }
-                if let Some(lane) = loopback_asr.as_mut() {
-                    if let Some((text, is_final)) = lane.take_result() {
-                        sink.emit(TranscriptChannel::Others, &text, !is_final);
-                    }
+            }
+        }
+        if let Some(lane) = loopback_asr.as_mut() {
+            if let Some((text, is_final)) = lane.take_result() {
+                if let Some(event) = loopback_timeline.event(
+                    TranscriptChannel::Others,
+                    &text,
+                    is_final,
+                    &mut next_utterance_id,
+                ) {
+                    sink.emit(event);
                 }
             }
         }
@@ -577,14 +617,105 @@ async fn run_consumer(
 
     // Flush any trailing ASR text when the session ends.
     if let Some(asr) = mic_asr.as_mut() {
-        if let Some((text, _)) = asr.finish() {
-            sink.emit(TranscriptChannel::You, &text, false);
+        if let Some((text, is_final)) = asr.finish() {
+            if let Some(event) = mic_timeline.event(
+                TranscriptChannel::You,
+                &text,
+                is_final,
+                &mut next_utterance_id,
+            ) {
+                sink.emit(event);
+            }
         }
     }
     if let Some(asr) = loopback_asr.as_mut() {
-        if let Some((text, _)) = asr.finish() {
-            sink.emit(TranscriptChannel::Others, &text, false);
+        if let Some((text, is_final)) = asr.finish() {
+            if let Some(event) = loopback_timeline.event(
+                TranscriptChannel::Others,
+                &text,
+                is_final,
+                &mut next_utterance_id,
+            ) {
+                sink.emit(event);
+            }
         }
+    }
+}
+
+#[derive(Default)]
+struct TranscriptLaneTimeline {
+    samples_seen: u64,
+    current_utterance_id: Option<u64>,
+    current_start_ms: u64,
+    last_final_end_ms: u64,
+    revision: u32,
+    last_text: String,
+}
+
+impl TranscriptLaneTimeline {
+    fn add_samples(&mut self, count: usize) {
+        self.samples_seen = self.samples_seen.saturating_add(count as u64);
+    }
+
+    fn event(
+        &mut self,
+        channel: TranscriptChannel,
+        text: &str,
+        is_final: bool,
+        next_utterance_id: &mut u64,
+    ) -> Option<TranscriptEvent> {
+        let end_ms = self.samples_seen.saturating_mul(1_000) / 16_000;
+        let trimmed = text.trim();
+        let event_text = if trimmed.is_empty() && is_final && !self.last_text.is_empty() {
+            self.last_text.clone()
+        } else if trimmed.is_empty() {
+            if is_final {
+                self.reset_after_final(end_ms);
+            }
+            return None;
+        } else {
+            trimmed.to_string()
+        };
+
+        let utterance_id = match self.current_utterance_id {
+            Some(id) => id,
+            None => {
+                let id = *next_utterance_id;
+                *next_utterance_id = (*next_utterance_id).saturating_add(1);
+                self.current_utterance_id = Some(id);
+                // ASR emits its first words after some audio has accumulated.
+                // Bound that unknown onset to the previous endpoint and a
+                // conservative two-second lookback for cross-lane matching.
+                self.current_start_ms = end_ms.saturating_sub(2_000).max(self.last_final_end_ms);
+                self.revision = 0;
+                id
+            }
+        };
+
+        self.revision = self.revision.saturating_add(1);
+        self.last_text = event_text.clone();
+        let event = TranscriptEvent {
+            utterance_id,
+            revision: self.revision,
+            channel,
+            text: event_text,
+            is_partial: !is_final,
+            start_ms: self.current_start_ms,
+            end_ms,
+        };
+
+        if is_final {
+            self.reset_after_final(end_ms);
+        }
+        Some(event)
+    }
+
+    fn reset_after_final(&mut self, end_ms: u64) {
+        self.current_utterance_id = None;
+        self.current_start_ms = end_ms;
+        self.last_final_end_ms = end_ms;
+        self.revision = 0;
+        self.last_text.clear();
     }
 }
 
@@ -629,15 +760,12 @@ mod tests {
     }
 
     struct FakeSink {
-        events: std::sync::Mutex<Vec<(TranscriptChannel, String, bool)>>,
+        events: std::sync::Mutex<Vec<TranscriptEvent>>,
     }
 
     impl TranscriptSink for FakeSink {
-        fn emit(&self, channel: TranscriptChannel, text: &str, is_partial: bool) {
-            self.events
-                .lock()
-                .unwrap()
-                .push((channel, text.to_string(), is_partial));
+        fn emit(&self, event: TranscriptEvent) {
+            self.events.lock().unwrap().push(event);
         }
     }
 
@@ -660,18 +788,15 @@ mod tests {
         let (source_tx, source_rx) = mpsc::channel(2);
         let (internal_tx, mut internal_rx) = mpsc::channel(1);
 
-        source_tx
-            .send(AudioBuffer::Mic(vec![1.0]))
-            .await
-            .unwrap();
-        source_tx
-            .send(AudioBuffer::Mic(vec![2.0]))
-            .await
-            .unwrap();
+        source_tx.send(AudioBuffer::Mic(vec![1.0])).await.unwrap();
+        source_tx.send(AudioBuffer::Mic(vec![2.0])).await.unwrap();
 
         let forwarder = tokio::spawn(run_forwarder(source_rx, internal_tx));
 
-        let first = internal_rx.recv().await.expect("first buffer should arrive");
+        let first = internal_rx
+            .recv()
+            .await
+            .expect("first buffer should arrive");
         assert!(matches!(first, AudioBuffer::Mic(samples) if samples == vec![1.0]));
 
         let second = tokio::time::timeout(Duration::from_millis(500), internal_rx.recv())
@@ -682,6 +807,50 @@ mod tests {
 
         drop(source_tx);
         forwarder.await.unwrap();
+    }
+
+    #[test]
+    fn transcript_lanes_keep_independent_utterance_ids_and_revisions() {
+        let mut next_id = 1;
+        let mut you = TranscriptLaneTimeline::default();
+        let mut others = TranscriptLaneTimeline::default();
+        you.add_samples(16_000);
+        others.add_samples(16_000);
+
+        let you_partial = you
+            .event(TranscriptChannel::You, "I can", false, &mut next_id)
+            .unwrap();
+        let others_partial = others
+            .event(TranscriptChannel::Others, "Go ahead", false, &mut next_id)
+            .unwrap();
+        you.add_samples(8_000);
+        let you_final = you
+            .event(TranscriptChannel::You, "I can take it", true, &mut next_id)
+            .unwrap();
+
+        assert_ne!(you_partial.utterance_id, others_partial.utterance_id);
+        assert_eq!(you_partial.utterance_id, you_final.utterance_id);
+        assert_eq!(you_final.revision, 2);
+        assert!(!you_final.is_partial);
+        assert_eq!(you_final.start_ms, 0);
+        assert_eq!(you_final.end_ms, 1_500);
+    }
+
+    #[test]
+    fn empty_final_promotes_the_last_partial_text() {
+        let mut next_id = 1;
+        let mut timeline = TranscriptLaneTimeline::default();
+        timeline.add_samples(16_000);
+        let partial = timeline
+            .event(TranscriptChannel::You, "keep this", false, &mut next_id)
+            .unwrap();
+        let final_event = timeline
+            .event(TranscriptChannel::You, "", true, &mut next_id)
+            .unwrap();
+
+        assert_eq!(partial.utterance_id, final_event.utterance_id);
+        assert_eq!(final_event.text, "keep this");
+        assert!(!final_event.is_partial);
     }
 
     #[tokio::test]
@@ -783,7 +952,10 @@ mod tests {
 
     fn read_wav_pcm16_mono(path: &std::path::Path) -> Vec<f32> {
         let bytes = std::fs::read(path).expect("wav should be readable");
-        assert!(&bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE", "not a RIFF/WAVE file");
+        assert!(
+            &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE",
+            "not a RIFF/WAVE file"
+        );
 
         let mut pos = 12;
         while pos + 8 <= bytes.len() {

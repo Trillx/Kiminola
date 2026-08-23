@@ -374,6 +374,7 @@ fn start_recording_from_prompt(
     prompt_id: &str,
 ) -> Result<(), String> {
     let prompt = state.claim_prompt(prompt_id)?;
+    crate::recording::queue_process_loopback_target(app, prompt.process_id);
     #[cfg(desktop)]
     {
         show_main_window(app);

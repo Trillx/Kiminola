@@ -16,6 +16,9 @@ pub struct AsrLane {
     stream: OnlineStream,
     /// Last text seen for this lane; used to suppress duplicate partial emissions.
     last_text: String,
+    /// Finality is part of a revision. The same text must be emitted again when
+    /// it moves from partial to final or the UI will leave a permanent cursor.
+    last_is_final: bool,
 }
 
 impl AsrEngine {
@@ -43,6 +46,7 @@ impl AsrEngine {
             engine: Arc::clone(self),
             stream: self.recognizer.create_stream(),
             last_text: String::new(),
+            last_is_final: false,
         }
     }
 
@@ -86,11 +90,12 @@ impl AsrLane {
         let result = self.engine.recognizer.get_result(&self.stream)?;
         let text = result.text.trim().to_string();
 
-        if text == self.last_text {
+        if text == self.last_text && result.is_final == self.last_is_final {
             return None;
         }
 
         self.last_text = text.clone();
+        self.last_is_final = result.is_final;
         Some((text, result.is_final))
     }
 
@@ -101,7 +106,14 @@ impl AsrLane {
         while recognizer.is_ready(&self.stream) {
             recognizer.decode(&self.stream);
         }
-        recognizer.get_result(&self.stream).map(|r| (r.text, true))
+        let result = recognizer.get_result(&self.stream)?;
+        let text = result.text.trim().to_string();
+        if text == self.last_text && self.last_is_final {
+            return None;
+        }
+        self.last_text = text.clone();
+        self.last_is_final = true;
+        Some((text, true))
     }
 }
 
@@ -142,7 +154,9 @@ pub fn resolve_asr_model_dir() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        let base = PathBuf::from(local_app_data).join("Kiminola").join("models");
+        let base = PathBuf::from(local_app_data)
+            .join("Kiminola")
+            .join("models");
         candidates.push(base.join("nemotron"));
         candidates.push(base);
     }
@@ -170,7 +184,9 @@ mod tests {
             return;
         };
 
-        let engine = Arc::new(AsrEngine::new(&model_dir).expect("recognizer should build from the model dir"));
+        let engine = Arc::new(
+            AsrEngine::new(&model_dir).expect("recognizer should build from the model dir"),
+        );
         let mut session = engine.lane();
 
         let silence = vec![0.0f32; 16000];
@@ -195,7 +211,9 @@ mod tests {
             eprintln!("ASR model dir not found; skipping");
             return;
         };
-        let engine = Arc::new(AsrEngine::new(&model_dir).expect("recognizer should build from the model dir"));
+        let engine = Arc::new(
+            AsrEngine::new(&model_dir).expect("recognizer should build from the model dir"),
+        );
         let mut session = engine.lane();
 
         let samples = read_wav_pcm16_mono(&wav_path);
@@ -243,7 +261,9 @@ mod tests {
             eprintln!("ASR model dir not found; skipping");
             return;
         };
-        let engine = Arc::new(AsrEngine::new(&model_dir).expect("recognizer should build from the model dir"));
+        let engine = Arc::new(
+            AsrEngine::new(&model_dir).expect("recognizer should build from the model dir"),
+        );
         let mut session = engine.lane();
 
         let bytes = std::fs::read(&dump_path).expect("dump should be readable");
@@ -251,7 +271,10 @@ mod tests {
             .chunks_exact(4)
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect();
-        eprintln!("replaying {:.1}s of mic audio", samples.len() as f32 / 16000.0);
+        eprintln!(
+            "replaying {:.1}s of mic audio",
+            samples.len() as f32 / 16000.0
+        );
 
         let mut last_text = String::new();
         let mut first_text_at_secs: Option<f32> = None;
@@ -325,7 +348,10 @@ mod tests {
     /// Minimal RIFF reader: 16-bit PCM mono, any sample rate (tests supply 16 kHz).
     fn read_wav_pcm16_mono(path: &std::path::Path) -> Vec<f32> {
         let bytes = std::fs::read(path).expect("wav should be readable");
-        assert!(&bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE", "not a RIFF/WAVE file");
+        assert!(
+            &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE",
+            "not a RIFF/WAVE file"
+        );
 
         let mut pos = 12;
         while pos + 8 <= bytes.len() {

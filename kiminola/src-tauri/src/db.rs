@@ -74,6 +74,8 @@ fn now_iso() -> String {
 pub struct NewSegment {
     pub channel: String,
     pub text: String,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
 }
 
 #[derive(Debug, sqlx::FromRow, serde::Serialize)]
@@ -90,6 +92,8 @@ pub struct SegmentOut {
     pub id: i64,
     pub channel: String,
     pub text: String,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -144,19 +148,21 @@ pub struct NoteDraftDetail {
 }
 
 async fn is_onboarding_complete_impl(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT value FROM settings WHERE key = 'onboarding_complete'"
-    )
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'onboarding_complete'")
+            .fetch_optional(pool)
+            .await?;
     Ok(row.map(|(v,)| v == "1").unwrap_or(false))
 }
 
-async fn set_onboarding_complete_impl(pool: &SqlitePool, complete: bool) -> Result<(), sqlx::Error> {
+async fn set_onboarding_complete_impl(
+    pool: &SqlitePool,
+    complete: bool,
+) -> Result<(), sqlx::Error> {
     let value = if complete { "1" } else { "0" };
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES ('onboarding_complete', ?)
-         ON CONFLICT (key) DO UPDATE SET value = excluded.value"
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
     )
     .bind(value)
     .execute(pool)
@@ -167,13 +173,20 @@ async fn set_onboarding_complete_impl(pool: &SqlitePool, complete: bool) -> Resu
 #[tauri::command]
 pub async fn is_onboarding_complete(state: State<'_, DbState>) -> Result<bool, String> {
     let pool = ensure_pool(&state.pool).await?;
-    is_onboarding_complete_impl(&pool).await.map_err(|e| e.to_string())
+    is_onboarding_complete_impl(&pool)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn set_onboarding_complete(state: State<'_, DbState>, complete: bool) -> Result<(), String> {
+pub async fn set_onboarding_complete(
+    state: State<'_, DbState>,
+    complete: bool,
+) -> Result<(), String> {
     let pool = ensure_pool(&state.pool).await?;
-    set_onboarding_complete_impl(&pool, complete).await.map_err(|e| e.to_string())
+    set_onboarding_complete_impl(&pool, complete)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /* ---------- core logic (testable without Tauri state) ---------- */
@@ -217,13 +230,18 @@ pub(crate) async fn save_meeting_with_draft_impl(
     .map_err(|e| e.to_string())?;
 
     for segment in segments {
-        sqlx::query("INSERT INTO transcript_segments (meeting_id, channel, text) VALUES (?, ?, ?)")
-            .bind(meeting_id)
-            .bind(&segment.channel)
-            .bind(&segment.text)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            "INSERT INTO transcript_segments (meeting_id, channel, start_ms, end_ms, text)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(meeting_id)
+        .bind(&segment.channel)
+        .bind(segment.start_ms)
+        .bind(segment.end_ms)
+        .bind(&segment.text)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
     }
 
     let draft_markdown = if let Some(draft_id) = note_draft_id {
@@ -291,21 +309,21 @@ pub(crate) async fn get_meeting_impl(pool: &SqlitePool, id: i64) -> Result<Meeti
     .ok_or_else(|| "meeting not found".to_string())?;
 
     let transcript = sqlx::query_as::<_, SegmentOut>(
-        "SELECT id, channel, text FROM transcript_segments WHERE meeting_id = ? ORDER BY id",
+        "SELECT id, channel, text, start_ms, end_ms
+         FROM transcript_segments WHERE meeting_id = ? ORDER BY id",
     )
     .bind(id)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
 
-    let (notepad, enhanced_markdown): (String, Option<String>) = sqlx::query_as(
-        "SELECT raw_markdown, enhanced_markdown FROM notes WHERE meeting_id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?
-    .unwrap_or((String::new(), None));
+    let (notepad, enhanced_markdown): (String, Option<String>) =
+        sqlx::query_as("SELECT raw_markdown, enhanced_markdown FROM notes WHERE meeting_id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or((String::new(), None));
 
     Ok(MeetingDetail {
         id: meeting.id,
@@ -463,7 +481,11 @@ async fn update_meeting_title_impl(
     Ok(())
 }
 
-async fn update_notes_impl(pool: &SqlitePool, meeting_id: i64, raw_markdown: &str) -> Result<(), String> {
+async fn update_notes_impl(
+    pool: &SqlitePool,
+    meeting_id: i64,
+    raw_markdown: &str,
+) -> Result<(), String> {
     sqlx::query(
         "INSERT INTO notes (meeting_id, raw_markdown, updated_at) VALUES (?, ?, ?)
          ON CONFLICT (meeting_id) DO UPDATE SET
@@ -502,14 +524,12 @@ pub(crate) async fn create_template_impl(
     prompt: &str,
 ) -> Result<Template, String> {
     validate_template_prompt(prompt)?;
-    sqlx::query(
-        "INSERT INTO templates (name, prompt, is_builtin) VALUES (?, ?, 0)",
-    )
-    .bind(name)
-    .bind(prompt)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("failed to create template: {e}"))?;
+    sqlx::query("INSERT INTO templates (name, prompt, is_builtin) VALUES (?, ?, 0)")
+        .bind(name)
+        .bind(prompt)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("failed to create template: {e}"))?;
     let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
         .fetch_one(pool)
         .await
@@ -529,16 +549,15 @@ pub(crate) async fn update_template_impl(
     prompt: &str,
 ) -> Result<(), String> {
     validate_template_prompt(prompt)?;
-    let rows = sqlx::query(
-        "UPDATE templates SET name = ?, prompt = ? WHERE id = ? AND is_builtin = 0",
-    )
-    .bind(name)
-    .bind(prompt)
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?
-    .rows_affected();
+    let rows =
+        sqlx::query("UPDATE templates SET name = ?, prompt = ? WHERE id = ? AND is_builtin = 0")
+            .bind(name)
+            .bind(prompt)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .rows_affected();
     if rows == 0 {
         return Err("template not found or is built-in".to_string());
     }
@@ -694,18 +713,13 @@ pub async fn create_note_draft(state: State<'_, DbState>) -> Result<i64, String>
 }
 
 #[tauri::command]
-pub async fn list_note_drafts(
-    state: State<'_, DbState>,
-) -> Result<Vec<NoteDraftSummary>, String> {
+pub async fn list_note_drafts(state: State<'_, DbState>) -> Result<Vec<NoteDraftSummary>, String> {
     let pool = ensure_pool(&state.pool).await?;
     list_note_drafts_impl(&pool).await
 }
 
 #[tauri::command]
-pub async fn get_note_draft(
-    state: State<'_, DbState>,
-    id: i64,
-) -> Result<NoteDraftDetail, String> {
+pub async fn get_note_draft(state: State<'_, DbState>, id: i64) -> Result<NoteDraftDetail, String> {
     let pool = ensure_pool(&state.pool).await?;
     get_note_draft_impl(&pool, id).await
 }
@@ -847,10 +861,14 @@ mod tests {
             NewSegment {
                 channel: "others".into(),
                 text: "hello there".into(),
+                start_ms: Some(100),
+                end_ms: Some(1_200),
             },
             NewSegment {
                 channel: "you".into(),
                 text: "hi".into(),
+                start_ms: Some(1_250),
+                end_ms: Some(1_600),
             },
         ];
         let id = save_meeting_impl(&pool, "Test meeting", 95, "my notes", &segments)
@@ -867,13 +885,19 @@ mod tests {
         assert_eq!(detail.notepad, "my notes");
         assert_eq!(detail.transcript.len(), 2);
         assert_eq!(detail.transcript[0].channel, "others");
+        assert_eq!(detail.transcript[0].start_ms, Some(100));
+        assert_eq!(detail.transcript[0].end_ms, Some(1_200));
 
-        update_notes_impl(&pool, id, "edited notes").await.expect("update notes");
+        update_notes_impl(&pool, id, "edited notes")
+            .await
+            .expect("update notes");
         let detail = get_meeting_impl(&pool, id).await.expect("get again");
         assert_eq!(detail.notepad, "edited notes");
 
         // A second save must not duplicate the notes row (UNIQUE upsert).
-        let id2 = save_meeting_impl(&pool, "Second", 10, "", &[]).await.expect("save 2");
+        let id2 = save_meeting_impl(&pool, "Second", 10, "", &[])
+            .await
+            .expect("save 2");
         assert_ne!(id, id2);
         let list = list_meetings_impl(&pool).await.expect("list 2");
         assert_eq!(list.len(), 2);
@@ -903,21 +927,19 @@ mod tests {
         update_note_draft_impl(&pool, draft_id, "follow up with the team")
             .await
             .expect("update draft");
-        let draft = get_note_draft_impl(&pool, draft_id).await.expect("get draft");
+        let draft = get_note_draft_impl(&pool, draft_id)
+            .await
+            .expect("get draft");
         assert_eq!(draft.raw_markdown, "follow up with the team");
         assert!(draft.meeting_id.is_none());
 
-        let meeting_id = save_meeting_with_draft_impl(
-            &pool,
-            "Follow-up meeting",
-            60,
-            "",
-            &[],
-            Some(draft_id),
-        )
-        .await
-        .expect("save meeting with draft");
-        let meeting = get_meeting_impl(&pool, meeting_id).await.expect("get meeting");
+        let meeting_id =
+            save_meeting_with_draft_impl(&pool, "Follow-up meeting", 60, "", &[], Some(draft_id))
+                .await
+                .expect("save meeting with draft");
+        let meeting = get_meeting_impl(&pool, meeting_id)
+            .await
+            .expect("get meeting");
         assert_eq!(meeting.notepad, "follow up with the team");
         assert!(list_note_drafts_impl(&pool)
             .await
@@ -942,7 +964,10 @@ mod tests {
         // Migrations seed built-in templates; use the first one as the
         // protected row instead of creating a fake one.
         let builtins = list_templates_impl(&pool).await.expect("list builtins");
-        assert!(!builtins.is_empty(), "migrations should seed built-in templates");
+        assert!(
+            !builtins.is_empty(),
+            "migrations should seed built-in templates"
+        );
         let builtin_id = builtins[0].id;
 
         let custom = create_template_impl(&pool, "My template", "t:{transcript} n:{notes}")
@@ -967,7 +992,9 @@ mod tests {
         assert!(err.contains("built-in"));
 
         // Delete custom works, delete built-in is rejected.
-        delete_template_impl(&pool, custom.id).await.expect("delete custom");
+        delete_template_impl(&pool, custom.id)
+            .await
+            .expect("delete custom");
         let err = delete_template_impl(&pool, builtin_id).await.unwrap_err();
         assert!(err.contains("built-in"));
 
@@ -988,12 +1015,12 @@ mod tests {
             "CLI strategy meeting",
             60,
             "discussed CLI and VPS",
-            &[
-                NewSegment {
-                    channel: "you".into(),
-                    text: "we need a CLI".into(),
-                },
-            ],
+            &[NewSegment {
+                channel: "you".into(),
+                text: "we need a CLI".into(),
+                start_ms: None,
+                end_ms: None,
+            }],
         )
         .await
         .expect("save m1");
@@ -1003,23 +1030,27 @@ mod tests {
             "Design sync",
             60,
             "colors and buttons",
-            &[
-                NewSegment {
-                    channel: "others".into(),
-                    text: "the navbar needs work".into(),
-                },
-            ],
+            &[NewSegment {
+                channel: "others".into(),
+                text: "the navbar needs work".into(),
+                start_ms: None,
+                end_ms: None,
+            }],
         )
         .await
         .expect("save m2");
 
         // Titles
-        let r = search_meetings_impl(&pool, "CLI").await.expect("search title");
+        let r = search_meetings_impl(&pool, "CLI")
+            .await
+            .expect("search title");
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].id, id1);
 
         // Notes
-        let r = search_meetings_impl(&pool, "VPS").await.expect("search notes");
+        let r = search_meetings_impl(&pool, "VPS")
+            .await
+            .expect("search notes");
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].id, id1);
 
@@ -1031,7 +1062,9 @@ mod tests {
         assert_eq!(r[0].id, id2);
 
         // Prefix match
-        let r = search_meetings_impl(&pool, "strat").await.expect("search prefix");
+        let r = search_meetings_impl(&pool, "strat")
+            .await
+            .expect("search prefix");
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].id, id1);
 
@@ -1046,10 +1079,14 @@ mod tests {
             NewSegment {
                 channel: "you".into(),
                 text: "hello".into(),
+                start_ms: None,
+                end_ms: None,
             },
             NewSegment {
                 channel: "others".into(),
                 text: "hi there".into(),
+                start_ms: None,
+                end_ms: None,
             },
         ];
         let id = save_meeting_impl(&pool, "Test", 60, "notes", &segments)

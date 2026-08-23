@@ -3,6 +3,7 @@
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import LiveTranscript from "$lib/components/LiveTranscript.svelte";
+  import { applyTranscriptEvent, finalizedTranscript } from "$lib/transcript-state";
   import { Button } from "$lib/components/ui/button";
   import { Textarea } from "$lib/components/ui/textarea";
   import * as Dialog from "$lib/components/ui/dialog";
@@ -25,7 +26,6 @@
   let notepad = $state("");
   let elapsed = $state(0);
   let lines = $state<TranscriptLine[]>([]);
-  let partialIndex = $state(-1);
   let transcriptOpen = $state(false);
   let paused = $state(false);
   let stopping = $state(false);
@@ -46,21 +46,7 @@
     const requestedDraftId = draftParam ? Number(draftParam) : NaN;
 
     const startPromise = onTranscriptEvent((event: TranscriptEvent) => {
-      if (partialIndex >= 0 && partialIndex === lines.length - 1) {
-        // Update the existing partial line.
-        lines[partialIndex] = {
-          channel: event.channel,
-          text: event.text,
-        };
-      } else {
-        // Append a new line.
-        lines = [...lines, { channel: event.channel, text: event.text }];
-        partialIndex = lines.length - 1;
-      }
-
-      if (!event.is_partial) {
-        partialIndex = -1;
-      }
+      lines = applyTranscriptEvent(lines, event);
       })
       .then((fn) => {
         unlisten = fn;
@@ -103,12 +89,13 @@
 
   async function finishAndNavigate(mode: "generate" | "enhance") {
     stopping = true;
-    await stopRecording();
+    const finalEvents = await stopRecording();
+    for (const event of finalEvents) lines = applyTranscriptEvent(lines, event);
     const id = await saveMeeting({
       title,
       durationSeconds: elapsed,
       notepad,
-      segments: lines.map((l) => ({ ...l })),
+      segments: finalizedTranscript(lines),
       noteDraftId,
     });
     goto(`/meeting/${id}?mode=${mode}`);
@@ -116,12 +103,13 @@
 
   async function stopMeeting() {
     stopping = true;
-    await stopRecording();
+    const finalEvents = await stopRecording();
+    for (const event of finalEvents) lines = applyTranscriptEvent(lines, event);
     const id = await saveMeeting({
       title,
       durationSeconds: elapsed,
       notepad,
-      segments: lines.map((l) => ({ ...l })),
+      segments: finalizedTranscript(lines),
       noteDraftId,
     });
     goto(`/meeting/${id}`);
@@ -203,7 +191,7 @@
   </Dialog.Content>
 </Dialog.Root>
 
-<LiveTranscript {lines} {partialIndex} bind:open={transcriptOpen} />
+<LiveTranscript {lines} bind:open={transcriptOpen} />
 
 <style>
   :global(.notepad-textarea) {

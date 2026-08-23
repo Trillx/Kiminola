@@ -3,12 +3,9 @@
 
   let {
     lines,
-    partialIndex = -1,
     open = $bindable(false),
   }: {
     lines: TranscriptLine[];
-    /** Index of the line currently showing the streaming cursor (-1 = none). */
-    partialIndex?: number;
     open?: boolean;
   } = $props();
 
@@ -17,7 +14,7 @@
   let scrollHideTimer: ReturnType<typeof setTimeout> | undefined;
 
   let latest = $derived(lines[lines.length - 1]);
-  let latestPartial = $derived(partialIndex >= 0 && partialIndex === lines.length - 1);
+  let latestPartial = $derived(latest?.is_partial === true);
 
   // Clicking anywhere outside the sheet (e.g. back into the notepad) drops it
   // back to the strip; Escape does the same.
@@ -77,8 +74,8 @@
       <button class="sheet-close" onclick={() => (open = false)} aria-label="Close transcript">×</button>
     </div>
     <div class="sheet-body" bind:this={bodyEl} onscroll={onScroll}>
-      {#each lines as line, i (i)}
-        <div class="transcript-line" class:partial={i === partialIndex}>
+      {#each lines as line, i (line.id ?? line.utterance_id ?? i)}
+        <div class="transcript-line" class:partial={line.is_partial === true}>
           <div class="speaker {line.channel}">{line.channel === "you" ? "You" : "Others"}</div>
           <div class="text">{line.text}</div>
         </div>

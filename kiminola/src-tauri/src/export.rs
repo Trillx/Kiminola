@@ -179,11 +179,15 @@ mod tests {
                     id: 10,
                     channel: "you".into(),
                     text: "hi".into(),
+                    start_ms: Some(0),
+                    end_ms: Some(500),
                 },
                 SegmentOut {
                     id: 11,
                     channel: "others".into(),
                     text: "hello".into(),
+                    start_ms: Some(500),
+                    end_ms: Some(1_000),
                 },
             ],
         }

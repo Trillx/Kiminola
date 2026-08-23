@@ -5,23 +5,32 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 export type TranscriptChannel = "you" | "others";
 
 export interface TranscriptEvent {
+  utterance_id: number;
+  revision: number;
   channel: TranscriptChannel;
   text: string;
   is_partial: boolean;
+  start_ms: number;
+  end_ms: number;
 }
 
 export interface TranscriptLine {
   id?: number;
+  utterance_id?: number;
+  revision?: number;
   channel: TranscriptChannel;
   text: string;
+  start_ms?: number;
+  end_ms?: number;
+  is_partial?: boolean;
 }
 
 export async function startRecording(): Promise<void> {
   await invoke("start_recording");
 }
 
-export async function stopRecording(): Promise<void> {
-  await invoke("stop_recording");
+export async function stopRecording(): Promise<TranscriptEvent[]> {
+  return invoke("stop_recording");
 }
 
 export async function pauseRecording(): Promise<void> {

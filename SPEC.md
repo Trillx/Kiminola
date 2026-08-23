@@ -13,7 +13,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 ## 2. Core loop
 
 1. **Idle / library** — sidebar shows Spaces tree and recent meetings; "New meeting" starts capture.
-2. **Recording** — the full screen is a notes-first sketch notepad. A subtle **Live transcript** pill sits bottom-left; clicking it opens a floating square that pushes the notepad right. Mic and loopback channels transcribe in parallel, labeled **You** / **Others**.
+2. **Recording** — the full screen is a notes-first sketch notepad. A subtle **Live transcript** pill sits bottom-left; clicking it opens a floating square that pushes the notepad right. Mic and loopback channels transcribe in parallel, labeled **You** / **Others**. Concurrent partial utterances remain independent; finalized cross-source copies caused by laptop-speaker bleed are conservatively reconciled in favor of the clean loopback result.
 3. **Stop** — "Stop meeting" ends capture. Post-meeting defaults to the **My notes** tab with pills: **My notes → Enhance Notes → Transcript**.
 4. **Enhance (optional)** — user clicks **Enhance Notes**, picks a template, and gets a read-only AI artifact generated from their raw notes + transcript. Raw notes are never overwritten; re-enhance overwrites the AI artifact.
 
@@ -43,8 +43,10 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 ### 4.2 Rust backend
 
-- **Audio pipeline**: WASAPI process loopback + cpal mic → dual ring buffers (QPC time-aligned) → rubato → 16 kHz mono → Silero VAD → sherpa-onnx streaming ASR per lane.
-- **Persistence**: sqlx + SQLite; tables for meetings, transcript segments, notes, spaces, templates, settings.
+- **Audio pipeline**: WASAPI process-tree loopback when a meeting prompt supplies a PID, with classic default-output fallback, plus cpal mic → independent resampling → 16 kHz mono → sherpa-onnx streaming ASR per lane. The lanes are never mixed before ASR.
+- **Transcript events**: each lane emits stable utterance IDs, monotonically increasing revisions, partial/final state, and audio-relative segment timing. On stop, capture queues drain, both ASR lanes flush, and the backend returns an authoritative final snapshot before persistence.
+- **Echo reconciliation**: finalized mic/system segments are compared only when their audio windows overlap. High-confidence text matches retain the system (`Others`) copy; short acknowledgements and non-overlapping repetition are never automatically suppressed. This is a local transcript correction, not speaker diarization or audio retention.
+- **Persistence**: sqlx + SQLite; tables for meetings, timestamped transcript segments, notes, spaces, templates, settings.
 - **LLM enhancement**: ChatProvider trait with streaming SSE; sends transcript text + raw notes + template prompt to the configured cloud provider.
 - **Model manager**: downloads ASR model on first run from Hugging Face; verifies SHA-256; stores in `%LOCALAPPDATA%\Kiminola\models`.
 - **Updater**: Tauri updater plugin with GitHub Releases JSON manifest.
@@ -57,6 +59,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Global hotkey: configurable start/stop (Tauri global-shortcut plugin), sensible default.
 - Onboarding: minimal first-run wizard — mic permission → model download with progress → optional BYOK key (skippable).
 - Companion layout: when the user chooses **Start recording** from a Meeting prompt, Kimi Nola arranges the detected meeting window on the left at roughly two-thirds of the active display and its own Notepad window on the right at roughly one-third. The arrangement is a starting point: normal windows may be resized, true full-screen/presentation windows are not forced to change, and user movement/resizing is never overridden.
+- Meeting-prompt recording also uses the detected meeting process tree as the preferred loopback target. Manual recording and unsupported/failed process activation use classic default-output loopback.
 
 ## 6. Data model & storage
 
@@ -151,3 +154,4 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - **Targets**: Windows x64 (`x86_64-pc-windows-msvc`) and ARM64 (`aarch64-pc-windows-msvc`).
 - **Validation**: Snapdragon X Elite Copilot+ PC (32 GB) for ARM64; GitHub Actions for x64 CI.
 - **Spike results**: native ARM64 WASAPI loopback delivered non-silent packets; sherpa-onnx v1.13.5 Nemotron INT8 ran at 0.14 weighted RTF, 865 MiB peak working set, 2.6% normalized WER.
+- **Transcript regression matrix**: remote-only playback is `Others`; local-only mic speech is `You`; double-talk retains both lanes; speaker bleed does not create a duplicate `You` line; short acknowledgements are not over-suppressed; and stop waits for finalized text with monotonic audio-relative timing.
