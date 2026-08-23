@@ -71,15 +71,39 @@ pub fn is_model_pack_present(app: &AppHandle) -> bool {
 fn is_model_pack_present_at(dir: &Path, manifest: &ModelManifest) -> bool {
     for file in &manifest.files {
         let path = dir.join(&file.path);
-        let meta = match fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        if meta.len() != file.bytes {
+        if !is_model_file_present_at(&path, file) {
             return false;
         }
     }
     true
+}
+
+fn is_model_file_present_at(path: &Path, file: &ModelFile) -> bool {
+    let meta = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if meta.len() != file.bytes {
+        return false;
+    }
+
+    // A placeholder hash is used only for manifest entries whose upstream
+    // digest is not known yet. Size remains the strongest available check.
+    if file.sha256.starts_with("PLACEHOLDER") {
+        return true;
+    }
+
+    match sha256_file(path) {
+        Ok(hash) => hash.eq_ignore_ascii_case(&file.sha256),
+        Err(_) => false,
+    }
+}
+
+fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let mut hasher = Sha256::new();
+    let mut reader = std::io::BufReader::new(File::open(path)?);
+    std::io::copy(&mut reader, &mut hasher)?;
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /* ---------- progress event ---------- */
@@ -226,15 +250,7 @@ async fn download_file(
         }
 
         // Verify SHA-256 against the manifest (hash the complete part file so resume is safe).
-        let hash = {
-            let mut hasher = Sha256::new();
-            let mut reader = std::io::BufReader::new(
-                File::open(&part_path).map_err(|e| format!("reopen part for hash: {e}"))?,
-            );
-            let _ = std::io::copy(&mut reader, &mut hasher)
-                .map_err(|e| format!("hash part file: {e}"))?;
-            hex::encode(hasher.finalize())
-        };
+        let hash = sha256_file(&part_path).map_err(|e| format!("hash part file: {e}"))?;
         if !hash.eq_ignore_ascii_case(&file.sha256) {
             // Placeholder hashes are clearly marked; if the manifest still holds
             // placeholders, skip verification rather than fail every download.
@@ -277,18 +293,16 @@ pub async fn download_model_pack(
 
     for file in &manifest.files {
         let final_path = dir.join(&file.path);
-        if let Ok(meta) = fs::metadata(&final_path) {
-            if meta.len() == file.bytes {
-                overall_downloaded += file.bytes;
-                let _ = on_progress.send(DownloadEvent {
-                    file: file.name.clone(),
-                    downloaded: file.bytes,
-                    total: file.bytes,
-                    overall_downloaded,
-                    overall_total,
-                });
-                continue;
-            }
+        if is_model_file_present_at(&final_path, file) {
+            overall_downloaded += file.bytes;
+            let _ = on_progress.send(DownloadEvent {
+                file: file.name.clone(),
+                downloaded: file.bytes,
+                total: file.bytes,
+                overall_downloaded,
+                overall_total,
+            });
+            continue;
         }
 
         download_file(file, &dir, &on_progress, overall_downloaded, overall_total).await?;
@@ -300,7 +314,9 @@ pub async fn download_model_pack(
 
 #[tauri::command]
 pub async fn check_model_pack(app: AppHandle) -> Result<bool, String> {
-    Ok(is_model_pack_present(&app))
+    tokio::task::spawn_blocking(move || is_model_pack_present(&app))
+        .await
+        .map_err(|e| format!("model health check panicked: {e}"))
 }
 
 /* ---------- microphone permission probe ---------- */
@@ -408,13 +424,15 @@ mod tests {
                     name: "encoder".into(),
                     path: "encoder.onnx".into(),
                     bytes: 4,
-                    sha256: "unused".into(),
+                    sha256: "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4"
+                        .into(),
                 },
                 ModelFile {
                     name: "tokens".into(),
                     path: "nested/tokens.txt".into(),
                     bytes: 3,
-                    sha256: "unused".into(),
+                    sha256: "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"
+                        .into(),
                 },
             ],
         };
@@ -426,6 +444,36 @@ mod tests {
         assert!(!is_model_pack_present_at(&root, &manifest));
 
         fs::write(nested.join("tokens.txt"), b"123").unwrap();
+        assert!(is_model_pack_present_at(&root, &manifest));
+
+        fs::write(root.join("encoder.onnx"), b"5678").unwrap();
+        assert!(!is_model_pack_present_at(&root, &manifest));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn model_pack_validation_allows_size_only_placeholder_hashes() {
+        let temp_id = NEXT_TEMP_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "kiminola-model-pack-placeholder-test-{}-{temp_id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let manifest = ModelManifest {
+            name: "test".into(),
+            repo: "test/repo".into(),
+            revision: "main".into(),
+            total_bytes: 4,
+            files: vec![ModelFile {
+                name: "tokens".into(),
+                path: "tokens.txt".into(),
+                bytes: 4,
+                sha256: "PLACEHOLDER_FILL_BEFORE_RELEASE_tokens_txt".into(),
+            }],
+        };
+
+        fs::write(root.join("tokens.txt"), b"5678").unwrap();
         assert!(is_model_pack_present_at(&root, &manifest));
 
         fs::remove_dir_all(&root).unwrap();
