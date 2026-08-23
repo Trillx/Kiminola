@@ -15,7 +15,7 @@ use crate::recording_session::{
 /// Shared Tauri state for recording.
 pub struct RecordingState {
     session: Mutex<Option<ActiveRecording>>,
-    asr_engine: Arc<tokio::sync::OnceCell<Option<Arc<AsrEngine>>>>,
+    asr_engine: Arc<Mutex<Option<Arc<AsrEngine>>>>,
     pending_loopback_target: SyncMutex<Option<PendingLoopbackTarget>>,
     active: AtomicBool,
 }
@@ -73,7 +73,7 @@ impl RecordingState {
     fn new() -> Self {
         Self {
             session: Mutex::new(None),
-            asr_engine: Arc::new(tokio::sync::OnceCell::new()),
+            asr_engine: Arc::new(Mutex::new(None)),
             pending_loopback_target: SyncMutex::new(None),
             active: AtomicBool::new(false),
         }
@@ -117,23 +117,38 @@ pub fn queue_process_loopback_target(app: &AppHandle, process_id: u32) {
     }
 }
 
-/// Get the shared ASR engine, loading the model on first use. The load runs on
-/// a blocking thread; concurrent callers share the same in-flight load.
-async fn ensure_asr_engine(
-    cell: &tokio::sync::OnceCell<Option<Arc<AsrEngine>>>,
-) -> Option<Arc<AsrEngine>> {
-    cell.get_or_init(|| async {
-        let start = std::time::Instant::now();
-        let engine = tokio::task::spawn_blocking(|| {
-            resolve_asr_model_dir().and_then(|d| AsrEngine::new(&d).map(Arc::new))
-        })
-        .await
-        .unwrap_or(None);
-        eprintln!("[recording] ASR engine loaded in {:?}", start.elapsed());
-        engine
+/// Get the shared ASR engine, loading the model on first use. Failed loads stay
+/// retryable so a model installed during onboarding works without an app
+/// restart; successful loads remain cached for the process lifetime.
+async fn ensure_asr_engine(cache: &Mutex<Option<Arc<AsrEngine>>>) -> Option<Arc<AsrEngine>> {
+    let start = std::time::Instant::now();
+    let engine = get_or_try_init(cache, || {
+        resolve_asr_model_dir().and_then(|directory| AsrEngine::new(&directory))
     })
-    .await
-    .clone()
+    .await;
+    eprintln!("[recording] ASR engine resolved in {:?}", start.elapsed());
+    engine
+}
+
+async fn get_or_try_init<T, F>(cache: &Mutex<Option<Arc<T>>>, loader: F) -> Option<Arc<T>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Option<T> + Send + 'static,
+{
+    let mut cached = cache.lock().await;
+    if let Some(value) = cached.as_ref() {
+        return Some(Arc::clone(value));
+    }
+
+    let loaded = tokio::task::spawn_blocking(loader)
+        .await
+        .ok()
+        .flatten()
+        .map(Arc::new);
+    if let Some(value) = loaded.as_ref() {
+        *cached = Some(Arc::clone(value));
+    }
+    loaded
 }
 
 struct TauriTranscriptSink {
@@ -255,13 +270,13 @@ pub async fn resume_recording(
 /// Helper used by `lib.rs` to install the recording state into the Tauri manager.
 pub fn setup(app: &mut tauri::App) {
     let state = RecordingState::new();
-    let cell = Arc::clone(&state.asr_engine);
+    let cache = Arc::clone(&state.asr_engine);
     app.manage(state);
 
     // Warm the ASR model in the background so the first recording doesn't
     // wait on the ~650 MB encoder load.
     tauri::async_runtime::spawn(async move {
-        let _ = ensure_asr_engine(&cell).await;
+        let _ = ensure_asr_engine(&cache).await;
     });
 }
 
@@ -269,6 +284,7 @@ pub fn setup(app: &mut tauri::App) {
 mod tests {
     use super::*;
     use crate::recording_session::TranscriptChannel;
+    use std::sync::atomic::AtomicUsize;
 
     fn event(utterance_id: u64, revision: u32, text: &str) -> TranscriptEvent {
         TranscriptEvent {
@@ -280,6 +296,40 @@ mod tests {
             start_ms: 100,
             end_ms: 500,
         }
+    }
+
+    #[tokio::test]
+    async fn asr_cache_retries_failed_loads_and_keeps_the_first_success() {
+        let cache = Mutex::new(None);
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        let first_attempts = Arc::clone(&attempts);
+        let missing = get_or_try_init(&cache, move || {
+            first_attempts.fetch_add(1, Ordering::Relaxed);
+            None::<String>
+        })
+        .await;
+        assert!(missing.is_none());
+
+        let second_attempts = Arc::clone(&attempts);
+        let loaded = get_or_try_init(&cache, move || {
+            second_attempts.fetch_add(1, Ordering::Relaxed);
+            Some("ready".to_string())
+        })
+        .await
+        .expect("a later install should be loadable");
+
+        let third_attempts = Arc::clone(&attempts);
+        let cached = get_or_try_init(&cache, move || {
+            third_attempts.fetch_add(1, Ordering::Relaxed);
+            Some("replacement".to_string())
+        })
+        .await
+        .expect("the successful load should remain cached");
+
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert!(Arc::ptr_eq(&loaded, &cached));
+        assert_eq!(cached.as_str(), "ready");
     }
 
     #[test]
