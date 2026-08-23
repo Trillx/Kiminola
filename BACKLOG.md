@@ -4,9 +4,9 @@ Ordered by user impact: data loss and crashes first, then broken flows, test gap
 
 ## Queued
 
-- [ ] **P1 · Guard navigation away from active recording.** Sidebar or route navigation tears down native capture and leaves only a recovery draft without asking whether to save, keep the draft, or continue recording.
 - [ ] **P2 · Base elapsed duration on a monotonic clock.** The one-second UI interval can drift while the app is suspended or the window is hidden.
 - [ ] **P2 · Add model repair to Settings.** Model installation and repair only exist inside first-run onboarding, so an unavailable-transcription warning cannot route to a focused in-app recovery flow.
+- [ ] **P2 · Guard navigation during recording startup.** Navigation before native startup returns still relies on teardown cleanup; it should offer an explicit recovery-only exit without allowing an empty meeting save.
 
 ## Completed
 
@@ -22,3 +22,4 @@ Ordered by user impact: data loss and crashes first, then broken flows, test gap
 - [x] **P1 · Retry ASR loading after in-app model installation.** Failed launch-time model loads are no longer cached permanently; later starts retry serially, while the first successful engine remains shared for the process lifetime. Verified 2026-08-23.
 - [x] **P2 · Surface transcript-finalization warnings.** Stop now returns the best transcript plus a non-fatal warning; save retries preserve it, and the saved meeting explains that its ending may be incomplete with a direct transcript-review action. Verified 2026-08-23.
 - [x] **P0 · Make the global stop shortcut save-safe.** The global listener now only starts recordings; while recording, the page routes shortcut presses through the same guarded, retry-safe finalization and durable save path as the Stop button. Verified 2026-08-23.
+- [x] **P1 · Guard navigation away from active recording.** Internal navigation during capture or after a failed save now pauses for an explicit choice to continue, finish through the durable save path, or checkpoint the final transcript into a recovery copy before leaving. Verified 2026-08-23.

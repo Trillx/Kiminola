@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { page } from "$app/state";
-  import { goto } from "$app/navigation";
+  import { beforeNavigate, goto } from "$app/navigation";
   import LiveTranscript from "$lib/components/LiveTranscript.svelte";
   import {
     applyTranscriptEvent,
@@ -19,6 +19,7 @@
     recordingPhaseLabel,
     shouldAdvanceElapsed,
     shouldDiscardAutoDraft,
+    shouldGuardRecordingNavigation,
     type RecordingPhase,
   } from "$lib/recording-ui-state";
   import { Button } from "$lib/components/ui/button";
@@ -41,6 +42,7 @@
     onRecordingQuitBlocked,
     onShortcutTriggered,
     type AudioPressureEvent,
+    type RecordingStopResult,
     type TranscriptEvent,
     type TranscriptLine,
   } from "$lib/tauri";
@@ -70,6 +72,8 @@
   let quitBlocked = $state(false);
   let recoveryDraftCreated = $state(false);
   let noteSaveStatus = $state("");
+  let navigationDialogOpen = $state(false);
+  let pendingNavigationTarget: string | null = null;
   let transcriptOffsetMs = 0;
 
   type FinishMode = "save" | "generate" | "enhance";
@@ -98,6 +102,13 @@
           : "meeting audio",
   );
 
+  beforeNavigate(({ cancel, to }) => {
+    if (!to || to.url.href === page.url.href || !shouldGuardRecordingNavigation(phase)) return;
+    pendingNavigationTarget = `${to.url.pathname}${to.url.search}${to.url.hash}`;
+    navigationDialogOpen = true;
+    cancel();
+  });
+
   function errorMessage(error: unknown, fallback: string): string {
     if (error instanceof Error) return error.message;
     if (typeof error === "string") return error;
@@ -110,6 +121,14 @@
       durationSeconds: elapsed,
       transcript: recoverableTranscript(lines),
     };
+  }
+
+  function applyStopResult(result: RecordingStopResult) {
+    transcriptFinalizationWarning =
+      result.finalization_warning ?? transcriptFinalizationWarning;
+    for (const event of result.transcript) {
+      lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
+    }
   }
 
   function configureNoteAutosave(draftId: number) {
@@ -320,10 +339,7 @@
       if (nativeSessionActive) {
         const stopResult = await stopRecording();
         nativeSessionActive = false;
-        transcriptFinalizationWarning = stopResult.finalization_warning;
-        for (const event of stopResult.transcript) {
-          lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
-        }
+        applyStopResult(stopResult);
       }
       await flushNoteCheckpoint();
       meetingId = await saveMeeting({
@@ -356,13 +372,56 @@
   }
 
   async function openRecoveryDraft() {
+    phase = "stopping";
     await flushNoteCheckpoint();
-    closeNoteAutosave();
     if (nativeSessionActive) {
-      await stopRecording().catch(() => undefined);
-      nativeSessionActive = false;
+      const stopResult = await stopRecording().catch(() => null);
+      if (stopResult) {
+        nativeSessionActive = false;
+        applyStopResult(stopResult);
+        await flushNoteCheckpoint();
+      }
     }
+    closeNoteAutosave();
     await goto(noteDraftId === null ? "/" : `/note/${noteDraftId}`);
+  }
+
+  function continueRecordingHere() {
+    navigationDialogOpen = false;
+    pendingNavigationTarget = null;
+  }
+
+  function finishBeforeLeaving() {
+    navigationDialogOpen = false;
+    pendingNavigationTarget = null;
+    if (canRetryFinish(phase)) {
+      retryFinish();
+    } else {
+      void finishMeeting("save");
+    }
+  }
+
+  async function keepRecoveryAndLeave() {
+    const destination = pendingNavigationTarget ?? "/";
+    navigationDialogOpen = false;
+    phase = "stopping";
+    await flushNoteCheckpoint();
+    if (nativeSessionActive) {
+      const stopResult = await stopRecording().catch(() => null);
+      if (stopResult) {
+        nativeSessionActive = false;
+        applyStopResult(stopResult);
+        await flushNoteCheckpoint();
+      }
+    }
+    closeNoteAutosave();
+    pendingNavigationTarget = null;
+    await goto(destination);
+  }
+
+  function onNavigationDialogOpenChange(open: boolean) {
+    navigationDialogOpen = open;
+    if (!open) pendingNavigationTarget = null;
   }
 
   async function cancel() {
@@ -595,6 +654,34 @@
   </Dialog.Content>
 </Dialog.Root>
 
+<Dialog.Root open={navigationDialogOpen} onOpenChange={onNavigationDialogOpenChange}>
+  <Dialog.Content showCloseButton={false} class="sm:max-w-md">
+    <Dialog.Header>
+      <Dialog.Title>
+        {phase === "finish_failed" ? "This meeting isn't saved yet" : "Leave this recording?"}
+      </Dialog.Title>
+      <Dialog.Description>
+        {#if phase === "finish_failed"}
+          Retry the save, keep the recovery copy and leave, or stay here without losing your work.
+        {:else}
+          Finish and save the meeting, keep only its recovery copy, or continue recording here.
+        {/if}
+      </Dialog.Description>
+    </Dialog.Header>
+    <div class="navigation-guard-actions">
+      <Button variant="outline" onclick={continueRecordingHere}>
+        {phase === "finish_failed" ? "Stay here" : "Continue recording"}
+      </Button>
+      <Button variant="secondary" onclick={() => void keepRecoveryAndLeave()}>
+        Keep recovery copy and leave
+      </Button>
+      <Button onclick={finishBeforeLeaving}>
+        {phase === "finish_failed" ? "Retry saving" : "Finish and save"}
+      </Button>
+    </div>
+  </Dialog.Content>
+</Dialog.Root>
+
 <LiveTranscript {lines} bind:open={transcriptOpen} />
 
 <style>
@@ -712,6 +799,13 @@
   }
 
   .pause-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+  }
+
+  .navigation-guard-actions {
     display: flex;
     flex-direction: column;
     gap: 10px;

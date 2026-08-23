@@ -46,6 +46,10 @@ export function canHandleStopShortcut(
   return !controlBusy && (canStopRecording(phase) || canRetryFinish(phase));
 }
 
+export function shouldGuardRecordingNavigation(phase: RecordingPhase): boolean {
+  return canStopRecording(phase) || canRetryFinish(phase);
+}
+
 export function shouldDiscardAutoDraft(
   recoveryDraftCreated: boolean,
   nativeSessionActive: boolean,

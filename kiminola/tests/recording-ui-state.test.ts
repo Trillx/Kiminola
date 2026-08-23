@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // @ts-expect-error Node's strip-types test runner imports the TypeScript source directly.
-import { canHandleStopShortcut, canPauseRecording, canResumeRecording, canRetryFinish, canStopRecording, recordingPhaseLabel, shouldAdvanceElapsed, shouldDiscardAutoDraft } from "../src/lib/recording-ui-state.ts";
+import { canHandleStopShortcut, canPauseRecording, canResumeRecording, canRetryFinish, canStopRecording, recordingPhaseLabel, shouldAdvanceElapsed, shouldDiscardAutoDraft, shouldGuardRecordingNavigation } from "../src/lib/recording-ui-state.ts";
 
 test("only an active recording advances elapsed time", () => {
   assert.equal(shouldAdvanceElapsed("starting"), false);
@@ -50,6 +50,15 @@ test("the stop shortcut only enters a safe save or retry state", () => {
   assert.equal(canHandleStopShortcut("failed", false), false);
   assert.equal(canHandleStopShortcut("stopping", false), false);
   assert.equal(canHandleStopShortcut("recording", true), false);
+});
+
+test("navigation is guarded while capture or a failed save needs a decision", () => {
+  assert.equal(shouldGuardRecordingNavigation("recording"), true);
+  assert.equal(shouldGuardRecordingNavigation("paused"), true);
+  assert.equal(shouldGuardRecordingNavigation("finish_failed"), true);
+  assert.equal(shouldGuardRecordingNavigation("starting"), false);
+  assert.equal(shouldGuardRecordingNavigation("failed"), false);
+  assert.equal(shouldGuardRecordingNavigation("stopping"), false);
 });
 
 test("leaving after startup failure preserves the recovery draft", () => {
