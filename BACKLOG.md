@@ -4,7 +4,7 @@ Ordered by user impact: data loss and crashes first, then broken flows, test gap
 
 ## Queued
 
-- [ ] **P2 · Guard navigation during recording startup.** Navigation before native startup returns still relies on teardown cleanup; it should offer an explicit recovery-only exit without allowing an empty meeting save.
+- [ ] **P1 · Prevent navigation actions from racing pause or resume.** The navigation dialog can open while a capture-control command is in flight; its save/recovery actions must wait rather than issuing Stop against a transitioning source.
 - [ ] **P2 · Checkpoint recovery on pause.** The timer freezes after a successful pause, but the newest duration and transcript can remain only in memory until recording resumes or another edit triggers autosave.
 - [ ] **P2 · Verify model contents during health checks.** Settings currently validates the expected files and sizes; same-size corruption in files with real manifest hashes can still be reported as ready until ASR loading fails.
 
@@ -25,3 +25,4 @@ Ordered by user impact: data loss and crashes first, then broken flows, test gap
 - [x] **P1 · Guard navigation away from active recording.** Internal navigation during capture or after a failed save now pauses for an explicit choice to continue, finish through the durable save path, or checkpoint the final transcript into a recovery copy before leaving. Verified 2026-08-23.
 - [x] **P2 · Base elapsed duration on a monotonic clock.** Active capture segments now use `performance.now()`, catch up after delayed callbacks, exclude pauses, seed from recovered duration, and checkpoint correctly even when timer callbacks skip exact five-second boundaries. Verified 2026-08-23.
 - [x] **P2 · Add model repair to Settings.** Settings now has a focused speech-model health view with local file verification, resumable download/repair progress, post-download verification, model-folder access, and a direct route from the unavailable-transcription warning. Verified 2026-08-23.
+- [x] **P2 · Guard navigation during recording startup.** Startup navigation now offers only stay or recovery-only exit; exit waits for draft creation, avoids starting capture when possible, or immediately stops and checkpoints if native startup already completed, without creating an empty meeting. Verified 2026-08-23.

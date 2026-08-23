@@ -84,7 +84,7 @@ export function canHandleStopShortcut(
 }
 
 export function shouldGuardRecordingNavigation(phase: RecordingPhase): boolean {
-  return canStopRecording(phase) || canRetryFinish(phase);
+  return phase === "starting" || canStopRecording(phase) || canRetryFinish(phase);
 }
 
 export function shouldDiscardAutoDraft(

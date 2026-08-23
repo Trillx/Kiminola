@@ -70,7 +70,7 @@ test("navigation is guarded while capture or a failed save needs a decision", ()
   assert.equal(shouldGuardRecordingNavigation("recording"), true);
   assert.equal(shouldGuardRecordingNavigation("paused"), true);
   assert.equal(shouldGuardRecordingNavigation("finish_failed"), true);
-  assert.equal(shouldGuardRecordingNavigation("starting"), false);
+  assert.equal(shouldGuardRecordingNavigation("starting"), true);
   assert.equal(shouldGuardRecordingNavigation("failed"), false);
   assert.equal(shouldGuardRecordingNavigation("stopping"), false);
 });

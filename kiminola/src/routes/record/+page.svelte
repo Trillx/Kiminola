@@ -80,6 +80,7 @@
   let noteSaveStatus = $state("");
   let navigationDialogOpen = $state(false);
   let pendingNavigationTarget: string | null = null;
+  let startupRecoveryExitTarget: string | null = null;
   let transcriptOffsetMs = 0;
 
   type FinishMode = "save" | "generate" | "enhance";
@@ -110,6 +111,10 @@
 
   beforeNavigate(({ cancel, to }) => {
     if (!to || to.url.href === page.url.href || !shouldGuardRecordingNavigation(phase)) return;
+    if (startupRecoveryExitTarget) {
+      cancel();
+      return;
+    }
     pendingNavigationTarget = `${to.url.pathname}${to.url.search}${to.url.hash}`;
     navigationDialogOpen = true;
     cancel();
@@ -227,6 +232,28 @@
     noteAutosave = undefined;
   }
 
+  async function completeStartupRecoveryExit(): Promise<boolean> {
+    const destination = startupRecoveryExitTarget;
+    if (!destination) return false;
+
+    freezeElapsedTiming();
+    phase = "stopping";
+    await flushNoteCheckpoint();
+    if (nativeSessionActive) {
+      const stopResult = await stopRecording().catch(() => null);
+      if (stopResult) {
+        nativeSessionActive = false;
+        applyStopResult(stopResult);
+        await flushNoteCheckpoint();
+      }
+    }
+    closeNoteAutosave();
+    startupRecoveryExitTarget = null;
+    pendingNavigationTarget = null;
+    await goto(destination);
+    return true;
+  }
+
   async function prepareAndStart() {
     phase = "starting";
     startError = null;
@@ -238,14 +265,19 @@
     transcriptionWarningDismissed = false;
     try {
       if (noteDraftId === null) await prepareNoteDraft(requestedDraftId);
+      if (await completeStartupRecoveryExit()) return;
       const status = await startRecording();
       meetingAudioAvailable = status.meeting_audio_available;
       transcriptionAvailable = status.transcription_available;
       nativeSessionActive = true;
+      if (await completeStartupRecoveryExit()) return;
       beginElapsedTiming();
       phase = "recording";
     } catch (error) {
       nativeSessionActive = false;
+      if (await completeStartupRecoveryExit()) return;
+      navigationDialogOpen = false;
+      pendingNavigationTarget = null;
       phase = "failed";
       startError = errorMessage(error, "Windows could not start the microphone.");
       console.error("Failed to start recording:", error);
@@ -439,6 +471,12 @@
   async function keepRecoveryAndLeave() {
     const destination = pendingNavigationTarget ?? "/";
     navigationDialogOpen = false;
+    if (phase === "starting") {
+      startupRecoveryExitTarget = destination;
+      pendingNavigationTarget = null;
+      noteSaveStatus = "Preparing recovery copy before leaving...";
+      return;
+    }
     freezeElapsedTiming();
     phase = "stopping";
     await flushNoteCheckpoint();
@@ -695,10 +733,17 @@
   <Dialog.Content showCloseButton={false} class="sm:max-w-md">
     <Dialog.Header>
       <Dialog.Title>
-        {phase === "finish_failed" ? "This meeting isn't saved yet" : "Leave this recording?"}
+        {phase === "starting"
+          ? "Recording is still starting"
+          : phase === "finish_failed"
+            ? "This meeting isn't saved yet"
+            : "Leave this recording?"}
       </Dialog.Title>
       <Dialog.Description>
-        {#if phase === "finish_failed"}
+        {#if phase === "starting"}
+          Stay while Windows finishes startup, or prepare a recovery copy and leave without
+          creating an empty meeting.
+        {:else if phase === "finish_failed"}
           Retry the save, keep the recovery copy and leave, or stay here without losing your work.
         {:else}
           Finish and save the meeting, keep only its recovery copy, or continue recording here.
@@ -707,14 +752,20 @@
     </Dialog.Header>
     <div class="navigation-guard-actions">
       <Button variant="outline" onclick={continueRecordingHere}>
-        {phase === "finish_failed" ? "Stay here" : "Continue recording"}
+        {phase === "starting"
+          ? "Stay here"
+          : phase === "finish_failed"
+            ? "Stay here"
+            : "Continue recording"}
       </Button>
       <Button variant="secondary" onclick={() => void keepRecoveryAndLeave()}>
         Keep recovery copy and leave
       </Button>
-      <Button onclick={finishBeforeLeaving}>
-        {phase === "finish_failed" ? "Retry saving" : "Finish and save"}
-      </Button>
+      {#if canHandleStopShortcut(phase, false)}
+        <Button onclick={finishBeforeLeaving}>
+          {phase === "finish_failed" ? "Retry saving" : "Finish and save"}
+        </Button>
+      {/if}
     </div>
   </Dialog.Content>
 </Dialog.Root>
