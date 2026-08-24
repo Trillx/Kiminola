@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --experimental-strip-types --test tests/draft-autosave.test.ts tests/library-loading.test.ts tests/library-tree.test.ts tests/recording-ui-state.test.ts tests/transcript-state.test.ts tests/update-policy.test.ts",
+    "test": "node --experimental-strip-types --test tests/draft-autosave.test.ts tests/library-loading.test.ts tests/library-tree.test.ts tests/recording-ui-state.test.ts tests/transcript-state.test.ts tests/update-policy.test.ts tests/window-resize.test.ts",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri"
   },

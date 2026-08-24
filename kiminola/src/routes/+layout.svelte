@@ -15,6 +15,7 @@
 
   let { children } = $props();
   let compactWindow = $state(false);
+  let compactWindowResizing = $state(false);
 
   // Reflect theme + sidebar state onto the document so the CSS variables
   // (--sidebar-width drives all fixed-position math) stay in sync.
@@ -29,6 +30,10 @@
       useCompactShell ? "0px" : "240px",
     );
     document.documentElement.dataset.compactWindow = compactWindow ? "true" : "false";
+    document.documentElement.setAttribute(
+      "data-compact-window-resizing",
+      compactWindowResizing ? "true" : "false",
+    );
   });
 
   // A companion layout can make the main window much narrower than the
@@ -36,12 +41,27 @@
   // without changing the user's saved sidebar preference.
   onMount(() => {
     const media = window.matchMedia("(max-width: 760px)");
+    let clearResizeFrame: number | undefined;
     const syncCompactWindow = () => {
-      compactWindow = media.matches;
+      const nextCompactWindow = media.matches;
+      if (nextCompactWindow === compactWindow) return;
+
+      compactWindowResizing = true;
+      compactWindow = nextCompactWindow;
+      if (clearResizeFrame !== undefined) cancelAnimationFrame(clearResizeFrame);
+      clearResizeFrame = requestAnimationFrame(() => {
+        clearResizeFrame = requestAnimationFrame(() => {
+          compactWindowResizing = false;
+          clearResizeFrame = undefined;
+        });
+      });
     };
     syncCompactWindow();
     media.addEventListener("change", syncCompactWindow);
-    return () => media.removeEventListener("change", syncCompactWindow);
+    return () => {
+      media.removeEventListener("change", syncCompactWindow);
+      if (clearResizeFrame !== undefined) cancelAnimationFrame(clearResizeFrame);
+    };
   });
 
   // Onboarding gate: the library is inaccessible until onboarding completes.
