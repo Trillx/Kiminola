@@ -37,6 +37,7 @@
   import {
     nextSettingsSection,
     resolveSettingsSection,
+    SETTINGS_SECTIONS,
     settingsSectionHref,
     templateNeedsDeleteConfirmation,
     type SettingsSection,
@@ -46,15 +47,6 @@
   import Moon from "@lucide/svelte/icons/moon";
   import Plus from "@lucide/svelte/icons/plus";
   import Sun from "@lucide/svelte/icons/sun";
-
-  const SECTIONS: { id: SettingsSection; label: string }[] = [
-    { id: "general", label: "General" },
-    { id: "models", label: "Speech model" },
-    { id: "ai", label: "AI provider" },
-    { id: "shortcut", label: "Shortcut" },
-    { id: "templates", label: "Templates" },
-    { id: "about", label: "About" },
-  ];
 
   let active = $state<SettingsSection>(resolveSettingsSection(page.url.searchParams.get("section")));
   let shortcut = $state("");
@@ -327,7 +319,7 @@
       <a class="settings-back" href="/"><ArrowLeft size={15} aria-hidden="true" /> Meetings</a>
       <h1 class="display settings-title">Settings</h1>
       <div class="settings-nav" role="tablist" aria-label="Settings sections">
-        {#each SECTIONS as section}
+        {#each SETTINGS_SECTIONS as section}
           <button
             id={`settings-tab-${section.id}`}
             class="settings-nav-item"
@@ -636,20 +628,22 @@
                     <Label for="template-name">Name</Label>
                     <Input id="template-name" bind:value={editingName} placeholder="Template name" />
                   </div>
-                  <div class="field">
-                    <Label for="template-prompt">Prompt</Label>
-                    <Textarea
-                      id="template-prompt"
-                      class="template-prompt-editor"
-                      bind:value={editingPrompt}
-                      rows={12}
-                    />
-                  </div>
-                  <div class="template-actions">
-                    <Button onclick={saveTemplate}>Save template</Button>
-                    {#if selectedTemplateId !== -1}
-                      <Button variant="destructive" onclick={requestTemplateDelete}>Delete template</Button>
-                    {/if}
+                  <div class="template-editor-scroll">
+                    <div class="field">
+                      <Label for="template-prompt">Prompt</Label>
+                      <Textarea
+                        id="template-prompt"
+                        class="template-prompt-editor"
+                        bind:value={editingPrompt}
+                        rows={12}
+                      />
+                    </div>
+                    <div class="template-actions">
+                      <Button onclick={saveTemplate}>Save template</Button>
+                      {#if selectedTemplateId !== -1}
+                        <Button variant="destructive" onclick={requestTemplateDelete}>Delete template</Button>
+                      {/if}
+                    </div>
                   </div>
                 </div>
               {/if}

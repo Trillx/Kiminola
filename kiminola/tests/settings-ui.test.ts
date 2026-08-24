@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // @ts-expect-error Node's strip-types test runner imports the TypeScript source directly.
-import { isProviderConfigDirty, nextSettingsSection, resolveSettingsSection, settingsSectionHref, shouldUseFocusedSettingsShell, templateNeedsDeleteConfirmation } from "../src/lib/settings-ui.ts";
+import { isProviderConfigDirty, nextSettingsSection, providerIsConfigured, resolveSettingsSection, SETTINGS_SECTIONS, settingsSectionHref, shouldUseFocusedSettingsShell, templateNeedsDeleteConfirmation } from "../src/lib/settings-ui.ts";
 
 test("every settings section can be opened directly", () => {
+  assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.label), ["General", "Speech model", "AI provider", "Shortcut", "Templates", "About"]);
   for (const section of ["general", "models", "ai", "shortcut", "templates", "about"] as const) {
     assert.equal(resolveSettingsSection(section), section);
   }
@@ -39,10 +40,19 @@ test("provider save state tracks config and API key edits", () => {
     base_url: "https://api.openai.com/v1",
     model: "gpt-4o-mini",
   };
-  assert.equal(isProviderConfigDirty(saved, { ...saved }, false), false);
-  assert.equal(isProviderConfigDirty(saved, { ...saved, model: "gpt-4.1-mini" }, false), true);
-  assert.equal(isProviderConfigDirty(saved, { ...saved }, true), true);
-  assert.equal(isProviderConfigDirty(null, { ...saved }, false), true);
+  assert.equal(isProviderConfigDirty(saved, { ...saved }, ""), false);
+  assert.equal(isProviderConfigDirty(saved, { ...saved, model: "gpt-4.1-mini" }, ""), true);
+  assert.equal(isProviderConfigDirty(saved, { ...saved }, "new-secret"), true);
+  assert.equal(isProviderConfigDirty(saved, { ...saved }, "   "), false);
+  assert.equal(isProviderConfigDirty(null, { ...saved }, ""), true);
+});
+
+test("cloud providers require a stored key while local providers do not", () => {
+  const base = { base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" };
+  assert.equal(providerIsConfigured({ ...base, kind: "open_ai", has_api_key: false }), false);
+  assert.equal(providerIsConfigured({ ...base, kind: "open_ai", has_api_key: true }), true);
+  assert.equal(providerIsConfigured({ ...base, kind: "ollama", has_api_key: false }), true);
+  assert.equal(providerIsConfigured({ ...base, kind: "lm_studio" }), true);
 });
 
 test("only persisted custom templates require destructive confirmation", () => {

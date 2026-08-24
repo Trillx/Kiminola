@@ -74,6 +74,24 @@ impl Default for ProviderConfig {
     }
 }
 
+/// Provider settings returned to the UI. The credential itself never leaves
+/// the OS keychain; only its presence is exposed for accurate status copy.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderConfigView {
+    #[serde(flatten)]
+    pub config: ProviderConfig,
+    pub has_api_key: bool,
+}
+
+impl ProviderConfigView {
+    fn new(config: ProviderConfig, has_api_key: bool) -> Self {
+        Self {
+            config,
+            has_api_key,
+        }
+    }
+}
+
 /// A single chat message for the completion endpoint.
 #[derive(Debug, Clone, Serialize)]
 pub struct Message {
@@ -218,7 +236,10 @@ impl ChatProvider for OpenAiCompatibleProvider {
                             Ok(chunk) => {
                                 for choice in chunk.choices {
                                     if let Some(text) = choice.delta.content {
-                                        return Some((LlmEvent::Chunk(text), (byte_stream, pending)));
+                                        return Some((
+                                            LlmEvent::Chunk(text),
+                                            (byte_stream, pending),
+                                        ));
                                     }
                                 }
                             }
@@ -341,9 +362,11 @@ impl PromptBuilder {
 }
 
 #[tauri::command]
-pub async fn get_llm_config(state: State<'_, DbState>) -> Result<ProviderConfig, String> {
+pub async fn get_llm_config(state: State<'_, DbState>) -> Result<ProviderConfigView, String> {
     let pool = ensure_pool(&state.pool).await?;
-    load_config(&pool).await
+    let config = load_config(&pool).await?;
+    let has_api_key = load_api_key()?.is_some();
+    Ok(ProviderConfigView::new(config, has_api_key))
 }
 
 #[tauri::command]
@@ -489,10 +512,22 @@ mod tests {
 
     #[async_trait]
     impl ChatProvider for FakeProvider {
-        async fn complete(&self, _messages: &[Message]) -> Result<BoxStream<'static, LlmEvent>, String> {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+        ) -> Result<BoxStream<'static, LlmEvent>, String> {
             let events = self.events.clone();
             Ok(Box::pin(stream::iter(events)))
         }
+    }
+
+    #[test]
+    fn provider_config_view_exposes_only_key_presence() {
+        let view = ProviderConfigView::new(ProviderConfig::default(), true);
+        let json = serde_json::to_value(view).unwrap();
+        assert_eq!(json["has_api_key"], true);
+        assert_eq!(json["kind"], "open_ai");
+        assert!(json.get("api_key").is_none());
     }
 
     #[test]

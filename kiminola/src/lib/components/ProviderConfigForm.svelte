@@ -15,7 +15,7 @@
   import * as Select from "$lib/components/ui/select";
   import CheckIcon from "@lucide/svelte/icons/check";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
-  import { isProviderConfigDirty } from "$lib/settings-ui";
+  import { isProviderConfigDirty, providerIsConfigured } from "$lib/settings-ui";
 
   interface Props {
     onSaved?: () => void;
@@ -47,7 +47,6 @@
   let config = $state<ProviderConfig | null>(null);
   let savedConfig = $state<ProviderConfig | null>(null);
   let apiKey = $state("");
-  let apiKeyTouched = $state(false);
   let loaded = $state(false);
   let saving = $state(false);
   let testing = $state(false);
@@ -85,9 +84,10 @@
     saveSuccess = false;
     saveError = "";
     try {
-      await setLlmConfig(config, apiKeyTouched ? apiKey : undefined);
+      const hasReplacementKey = apiKey.trim() !== "";
+      await setLlmConfig(config, hasReplacementKey ? apiKey : undefined);
+      if (hasReplacementKey) config = { ...config, has_api_key: true };
       apiKey = "";
-      apiKeyTouched = false;
       savedConfig = { ...config };
       saveSuccess = true;
       setTimeout(() => (saveSuccess = false), 3000);
@@ -137,15 +137,22 @@
     PROVIDER_KINDS.find((o) => o.value === config?.kind)?.label ?? "Provider",
   );
 
-  const isConfigured = $derived(
-    loaded &&
-      config != null &&
-      config.base_url.trim() !== "" &&
-      config.model.trim() !== "",
+  const isConfigured = $derived(loaded && config != null && providerIsConfigured(config));
+
+  const usesLocalProvider = $derived(
+    config?.kind === "ollama" || config?.kind === "lm_studio",
   );
 
   const isDirty = $derived(
-    config != null && isProviderConfigDirty(savedConfig, config, apiKeyTouched),
+    config != null && isProviderConfigDirty(savedConfig, config, apiKey),
+  );
+
+  const canTestAfterSave = $derived(
+    config != null &&
+      providerIsConfigured({
+        ...config,
+        has_api_key: config.has_api_key === true || apiKey.trim() !== "",
+      }),
   );
 </script>
 
@@ -213,8 +220,11 @@
         id="provider-key"
         type="password"
         bind:value={apiKey}
-        oninput={() => (apiKeyTouched = true)}
-        placeholder={isConfigured ? "Saved — enter a new key to replace it" : "Enter API key"}
+        placeholder={config.has_api_key
+          ? "Saved — enter a new key to replace it"
+          : usesLocalProvider
+            ? "Optional for local provider"
+            : "Enter API key"}
         autocomplete="off"
       />
       <span class="field-help">
@@ -224,7 +234,7 @@
     </div>
 
     <div class="config-actions">
-      <Button onclick={() => void save(true)} disabled={saving || testing || !isDirty}>
+      <Button onclick={() => void save(true)} disabled={saving || testing || !isDirty || !canTestAfterSave}>
         {saving ? "Saving…" : testing ? "Testing…" : "Save and test"}
       </Button>
       <Button variant="outline" onclick={test} disabled={saving || testing || !isConfigured}>

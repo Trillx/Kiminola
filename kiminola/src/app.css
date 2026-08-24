@@ -1624,43 +1624,6 @@ html[data-compact-window="true"] .sidebar-collapse-btn {
   background: var(--danger-soft);
 }
 
-.provider-status {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
-  border-radius: var(--radius-input);
-  background: var(--brand-soft);
-  border: 1px solid var(--hairline-soft);
-  color: var(--brand-deep);
-  font-size: 14px;
-}
-
-.provider-status .status-icon {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--brand);
-  color: var(--canvas);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  flex-shrink: 0;
-  margin-top: 1px;
-}
-
-.provider-status .status-title {
-  font-weight: 600;
-  color: var(--ink-strong);
-  margin-bottom: 2px;
-}
-
-.provider-status .status-detail {
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
 .save-success {
   display: flex;
   align-items: center;
@@ -2053,10 +2016,17 @@ html[data-compact-window="true"] .sidebar-collapse-btn {
   gap: 14px;
 }
 
-textarea.template-prompt-editor {
-  min-height: 260px;
-  height: min(46vh, 420px);
+.template-editor-scroll {
+  max-height: min(56vh, 520px);
   overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+textarea.template-prompt-editor {
+  min-height: 360px;
+  height: 360px;
+  overflow: hidden;
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;

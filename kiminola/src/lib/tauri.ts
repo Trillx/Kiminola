@@ -229,6 +229,7 @@ export interface ProviderConfig {
   kind: ProviderKind;
   base_url: string;
   model: string;
+  has_api_key?: boolean;
 }
 
 export interface Template {
