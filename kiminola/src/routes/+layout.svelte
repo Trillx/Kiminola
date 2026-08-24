@@ -12,9 +12,11 @@
   import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import { libraryDestinationState, recordingHref } from "$lib/library-tree.svelte";
   import { startAutomaticUpdateCheck } from "$lib/update.svelte";
+  import { setupCompactWindowSync } from "$lib/compact-window";
 
   let { children } = $props();
   let compactWindow = $state(false);
+  let compactWindowResizing = $state(false);
 
   // Reflect theme + sidebar state onto the document so the CSS variables
   // (--sidebar-width drives all fixed-position math) stay in sync.
@@ -29,6 +31,10 @@
       useCompactShell ? "0px" : "240px",
     );
     document.documentElement.dataset.compactWindow = compactWindow ? "true" : "false";
+    document.documentElement.setAttribute(
+      "data-compact-window-resizing",
+      compactWindowResizing ? "true" : "false",
+    );
   });
 
   // A companion layout can make the main window much narrower than the
@@ -36,12 +42,16 @@
   // without changing the user's saved sidebar preference.
   onMount(() => {
     const media = window.matchMedia("(max-width: 760px)");
-    const syncCompactWindow = () => {
-      compactWindow = media.matches;
-    };
-    syncCompactWindow();
-    media.addEventListener("change", syncCompactWindow);
-    return () => media.removeEventListener("change", syncCompactWindow);
+    return setupCompactWindowSync({
+      media,
+      initialCompactWindow: compactWindow,
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      cancelFrame: (handle) => cancelAnimationFrame(handle),
+      onStateChange: ({ compactWindow: nextCompactWindow, compactWindowResizing: resizing }) => {
+        compactWindow = nextCompactWindow;
+        compactWindowResizing = resizing;
+      },
+    });
   });
 
   // Onboarding gate: the library is inaccessible until onboarding completes.

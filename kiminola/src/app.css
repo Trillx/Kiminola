@@ -381,6 +381,20 @@ html[data-compact-window="true"] .sidebar-collapse-btn {
   color: var(--ink);
 }
 
+/* Breakpoint changes happen during a live native resize. Do not make the
+   shell chase the pointer with a layout animation; manual sidebar collapse
+   keeps its normal motion because this guard is only set by +layout.svelte. */
+html[data-compact-window-resizing="true"] .sidebar,
+html[data-compact-window-resizing="true"] .main,
+html[data-compact-window-resizing="true"] .sidebar-collapse-btn,
+html[data-compact-window-resizing="true"] .bottom-bar,
+html[data-compact-window-resizing="true"] .ai-disclaimer,
+html[data-compact-window-resizing="true"] .transcript-indicator,
+html[data-compact-window-resizing="true"] .transcript-strip,
+html[data-compact-window-resizing="true"] .transcript-sheet {
+  transition: none !important;
+}
+
 .sidebar .wordmark {
   display: block;
   padding: 2px 6px 14px;
@@ -1803,7 +1817,7 @@ html[data-compact-window="true"] .sidebar-collapse-btn {
   gap: 10px;
   box-shadow: 0 4px 20px var(--shadow-paper);
   z-index: 900;
-  transition: left 200ms ease, width 200ms ease;
+  transition: left 200ms ease;
 }
 
 .bottom-bar .mic-btn {
