@@ -1,6 +1,6 @@
 [package]
 name = "kiminola"
-version = "0.1.1"
+version = "0.1.2"
 description = "Kiminola — local-first meeting transcription and AI-enhanced notes"
 authors = ["Kiminola contributors"]
 edition = "2021"
