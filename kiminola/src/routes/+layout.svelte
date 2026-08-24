@@ -12,6 +12,7 @@
   import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import { libraryDestinationState, recordingHref } from "$lib/library-tree.svelte";
   import { startAutomaticUpdateCheck } from "$lib/update.svelte";
+  import { setupCompactWindowSync } from "$lib/compact-window";
 
   let { children } = $props();
   let compactWindow = $state(false);
@@ -41,27 +42,16 @@
   // without changing the user's saved sidebar preference.
   onMount(() => {
     const media = window.matchMedia("(max-width: 760px)");
-    let clearResizeFrame: number | undefined;
-    const syncCompactWindow = () => {
-      const nextCompactWindow = media.matches;
-      if (nextCompactWindow === compactWindow) return;
-
-      compactWindowResizing = true;
-      compactWindow = nextCompactWindow;
-      if (clearResizeFrame !== undefined) cancelAnimationFrame(clearResizeFrame);
-      clearResizeFrame = requestAnimationFrame(() => {
-        clearResizeFrame = requestAnimationFrame(() => {
-          compactWindowResizing = false;
-          clearResizeFrame = undefined;
-        });
-      });
-    };
-    syncCompactWindow();
-    media.addEventListener("change", syncCompactWindow);
-    return () => {
-      media.removeEventListener("change", syncCompactWindow);
-      if (clearResizeFrame !== undefined) cancelAnimationFrame(clearResizeFrame);
-    };
+    return setupCompactWindowSync({
+      media,
+      initialCompactWindow: compactWindow,
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      cancelFrame: (handle) => cancelAnimationFrame(handle),
+      onStateChange: ({ compactWindow: nextCompactWindow, compactWindowResizing: resizing }) => {
+        compactWindow = nextCompactWindow;
+        compactWindowResizing = resizing;
+      },
+    });
   });
 
   // Onboarding gate: the library is inaccessible until onboarding completes.
