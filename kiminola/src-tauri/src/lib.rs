@@ -15,11 +15,104 @@ mod window_layout;
 #[allow(dead_code)]
 mod vad;
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::{Emitter, Manager};
 
+#[cfg(target_os = "windows")]
+struct StartupLock(isize);
+
+#[cfg(target_os = "windows")]
+impl StartupLock {
+    fn acquire() -> Result<Self, String> {
+        use windows::core::w;
+        use windows::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{
+            CreateMutexW, WaitForSingleObject, INFINITE,
+        };
+
+        let handle = unsafe {
+            CreateMutexW(
+                None,
+                false,
+                w!("Local\\com.kiminola.app-startup-lock"),
+            )
+        }
+        .map_err(|error| format!("could not create startup lock: {error}"))?;
+
+        let wait_result = unsafe { WaitForSingleObject(handle, INFINITE) };
+        if wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED {
+            Ok(Self(handle.0 as isize))
+        } else {
+            let _ = unsafe { CloseHandle(handle) };
+            Err(format!("could not acquire startup lock: {wait_result:?}"))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for StartupLock {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::System::Threading::ReleaseMutex;
+
+        let handle = HANDLE(self.0 as _);
+        let _ = unsafe { ReleaseMutex(handle) };
+        let _ = unsafe { CloseHandle(handle) };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+struct StartupLock;
+
+#[cfg(not(target_os = "windows"))]
+impl StartupLock {
+    fn acquire() -> Result<Self, String> {
+        Ok(Self)
+    }
+}
+
+#[derive(Default)]
+struct ActivationState {
+    requested: AtomicBool,
+    setup_complete: AtomicBool,
+}
+
+impl ActivationState {
+    fn request(&self) -> bool {
+        self.requested.store(true, Ordering::SeqCst);
+        self.setup_complete.load(Ordering::SeqCst)
+    }
+
+    fn finish_setup(&self) -> bool {
+        self.setup_complete.store(true, Ordering::SeqCst);
+        self.requested.swap(false, Ordering::SeqCst)
+    }
+
+    fn mark_handled(&self) {
+        self.requested.store(false, Ordering::SeqCst);
+    }
+}
+
+fn should_activate_existing_instance(args: &[String]) -> bool {
+    !args.iter().any(|arg| arg == "--background")
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let startup_lock = StartupLock::acquire().expect("could not coordinate application startup");
+
+    let app = tauri::Builder::default()
+        .manage(ActivationState::default())
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if should_activate_existing_instance(&args) {
+                let state = app.state::<ActivationState>();
+                if state.request() {
+                    meeting_presence::show_main_window(app);
+                    state.mark_handled();
+                }
+            }
+        }))
         .manage(shortcuts::ShortcutState::new())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -50,6 +143,9 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
+            }
+            if app.state::<ActivationState>().finish_setup() {
+                meeting_presence::show_main_window(app.handle());
             }
             Ok(())
         })
@@ -134,8 +230,11 @@ pub fn run() {
             shortcuts::get_global_shortcut,
             shortcuts::set_global_shortcut,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    drop(startup_lock);
+    app.run(|_, _| {});
 }
 
 #[cfg(all(test, target_os = "windows"))]
@@ -171,6 +270,57 @@ mod windows_test_runtime {
         assert!(
             !entry_point.is_null(),
             "Common Controls v6 is not active for this test executable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod startup_wiring_tests {
+    use super::{should_activate_existing_instance, ActivationState};
+
+    #[test]
+    fn activation_before_setup_is_replayed_after_setup() {
+        let state = ActivationState::default();
+
+        assert!(!state.request());
+        assert!(state.finish_setup());
+    }
+
+    #[test]
+    fn ordinary_second_launch_activates_existing_instance() {
+        let args = vec!["kiminola.exe".to_string()];
+
+        assert!(should_activate_existing_instance(&args));
+    }
+
+    #[test]
+    fn background_second_launch_keeps_existing_instance_hidden() {
+        let args = vec!["kiminola.exe".to_string(), "--background".to_string()];
+
+        assert!(!should_activate_existing_instance(&args));
+    }
+
+    #[test]
+    fn bootstrap_registers_single_instance_before_setup() {
+        let manifest = include_str!("../Cargo.toml");
+        let source = include_str!("lib.rs");
+        let dependency = ["tauri-plugin-single-", "instance"].concat();
+        let registration = [".plugin(tauri_plugin_single_", "instance::init"].concat();
+
+        assert!(
+            manifest.contains(&dependency),
+            "the single-instance plugin must be a runtime dependency"
+        );
+
+        let registration_index = source
+            .find(&registration)
+            .expect("the app builder must register the single-instance plugin");
+        let setup_index = source
+            .find(".setup(|app|")
+            .expect("the app builder must retain its setup hook");
+        assert!(
+            registration_index < setup_index,
+            "the single-instance plugin must be registered before setup"
         );
     }
 }
