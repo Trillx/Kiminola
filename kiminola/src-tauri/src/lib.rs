@@ -301,11 +301,12 @@ mod startup_wiring_tests {
     }
 
     #[test]
-    fn bootstrap_registers_single_instance_before_setup() {
+    fn bootstrap_registers_single_instance_first() {
         let manifest = include_str!("../Cargo.toml");
         let source = include_str!("lib.rs");
         let dependency = ["tauri-plugin-single-", "instance"].concat();
         let registration = [".plugin(tauri_plugin_single_", "instance::init"].concat();
+        let plugin_prefix = [".plu", "gin("].concat();
 
         assert!(
             manifest.contains(&dependency),
@@ -315,12 +316,12 @@ mod startup_wiring_tests {
         let registration_index = source
             .find(&registration)
             .expect("the app builder must register the single-instance plugin");
-        let setup_index = source
-            .find(".setup(|app|")
-            .expect("the app builder must retain its setup hook");
-        assert!(
-            registration_index < setup_index,
-            "the single-instance plugin must be registered before setup"
+        let first_plugin_index = source
+            .find(&plugin_prefix)
+            .expect("the app builder must register at least one plugin");
+        assert_eq!(
+            registration_index, first_plugin_index,
+            "the single-instance plugin must be registered first"
         );
     }
 }
