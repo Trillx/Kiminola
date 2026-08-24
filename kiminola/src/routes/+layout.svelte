@@ -12,9 +12,11 @@
   import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import { libraryDestinationState, recordingHref } from "$lib/library-tree.svelte";
   import { startAutomaticUpdateCheck } from "$lib/update.svelte";
+  import { shouldUseFocusedSettingsShell } from "$lib/settings-ui";
 
   let { children } = $props();
   let compactWindow = $state(false);
+  let isSettings = $derived(shouldUseFocusedSettingsShell(page.url.pathname));
 
   // Reflect theme + sidebar state onto the document so the CSS variables
   // (--sidebar-width drives all fixed-position math) stay in sync.
@@ -23,7 +25,7 @@
   });
 
   $effect(() => {
-    const useCompactShell = compactWindow || sidebarState.collapsed;
+    const useCompactShell = compactWindow || sidebarState.collapsed || isSettings;
     document.documentElement.style.setProperty(
       "--sidebar-width",
       useCompactShell ? "0px" : "240px",
@@ -85,10 +87,10 @@
 {:else if isMeetingPromptOverlay}
   <MeetingPresencePrompt overlay />
 {:else}
-  <div class="app" class:sidebar-collapsed={sidebarState.collapsed}>
-    <Sidebar />
+  <div class="app" class:sidebar-collapsed={sidebarState.collapsed} class:focused-settings={isSettings}>
+    {#if !isSettings}<Sidebar />{/if}
     <main class="main">
-      <Topbar />
+      {#if !isSettings}<Topbar />{/if}
       {@render children()}
       <MeetingPresencePrompt />
       <UpdateBanner />

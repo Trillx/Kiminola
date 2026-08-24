@@ -14,6 +14,8 @@
   import { Label } from "$lib/components/ui/label";
   import * as Select from "$lib/components/ui/select";
   import CheckIcon from "@lucide/svelte/icons/check";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import { isProviderConfigDirty } from "$lib/settings-ui";
 
   interface Props {
     onSaved?: () => void;
@@ -43,6 +45,7 @@
   };
 
   let config = $state<ProviderConfig | null>(null);
+  let savedConfig = $state<ProviderConfig | null>(null);
   let apiKey = $state("");
   let apiKeyTouched = $state(false);
   let loaded = $state(false);
@@ -56,6 +59,7 @@
     getLlmConfig()
       .then((c) => {
         config = c;
+        savedConfig = { ...c };
       })
       .catch((err) => {
         console.error("Failed to load LLM config:", err);
@@ -75,7 +79,7 @@
     };
   }
 
-  async function save() {
+  async function save(runTest = false) {
     if (!config) return;
     saving = true;
     saveSuccess = false;
@@ -84,9 +88,11 @@
       await setLlmConfig(config, apiKeyTouched ? apiKey : undefined);
       apiKey = "";
       apiKeyTouched = false;
+      savedConfig = { ...config };
       saveSuccess = true;
       setTimeout(() => (saveSuccess = false), 3000);
       onSaved?.();
+      if (runTest) await test();
     } catch (err) {
       saveError = String(err);
       console.error("Failed to save LLM config:", err);
@@ -137,27 +143,25 @@
       config.base_url.trim() !== "" &&
       config.model.trim() !== "",
   );
+
+  const isDirty = $derived(
+    config != null && isProviderConfigDirty(savedConfig, config, apiKeyTouched),
+  );
 </script>
 
 {#if !loaded}
   <div class="empty-state">Loading provider settings…</div>
 {:else if config}
-  <div class="provider-config">
-    {#if isConfigured}
-      <div class="provider-status">
-        <span class="status-icon"><CheckIcon size={12} strokeWidth={3} /></span>
-        <div>
-          <div class="status-title">AI provider is configured</div>
-          <div class="status-detail">{providerLabel} — {config.model}</div>
-        </div>
+  <div class="provider-config provider-settings-form">
+    <header class="provider-heading">
+      <div>
+        <h2>AI provider</h2>
+        <p>Configure the provider used to enhance meeting notes.</p>
       </div>
-    {:else}
-      <div class="enhance-title">Configure AI provider</div>
-    {/if}
-    <div class="enhance-copy">
-      Your API key is stored in the OS keychain. It is never sent anywhere except to the provider
-      you choose.
-    </div>
+      {#if isConfigured}
+        <span class="provider-status"><CheckIcon size={13} strokeWidth={2.5} aria-hidden="true" /> Configured · {providerLabel} · {config.model}</span>
+      {/if}
+    </header>
 
     <div class="field">
       <Label for="provider-kind">Provider</Label>
@@ -180,16 +184,6 @@
     </div>
 
     <div class="field">
-      <Label for="provider-base-url">Base URL</Label>
-      <Input
-        id="provider-base-url"
-        type="text"
-        bind:value={config.base_url}
-        placeholder="https://api.openai.com/v1"
-      />
-    </div>
-
-    <div class="field">
       <Label for="provider-model">Model</Label>
       <Input
         id="provider-model"
@@ -199,6 +193,20 @@
       />
     </div>
 
+    <details class="provider-advanced">
+      <summary><span>Advanced</span><ChevronDown size={15} aria-hidden="true" /></summary>
+      <div class="field">
+        <Label for="provider-base-url">Base URL</Label>
+        <Input
+          id="provider-base-url"
+          type="text"
+          bind:value={config.base_url}
+          placeholder="https://api.openai.com/v1"
+        />
+        <span class="field-help">Change this only for a custom or self-hosted endpoint.</span>
+      </div>
+    </details>
+
     <div class="field">
       <Label for="provider-key">API key</Label>
       <Input
@@ -206,30 +214,40 @@
         type="password"
         bind:value={apiKey}
         oninput={() => (apiKeyTouched = true)}
-        placeholder="sk-..."
+        placeholder={isConfigured ? "Saved — enter a new key to replace it" : "Enter API key"}
+        autocomplete="off"
       />
+      <span class="field-help">
+        Stored in Windows Credential Manager. Leave blank to keep the saved key; it is sent only to
+        the provider you choose.
+      </span>
     </div>
 
     <div class="config-actions">
-      <Button onclick={save} disabled={saving}>
-        {saving ? "Saving…" : "Save provider"}
+      <Button onclick={() => void save(true)} disabled={saving || testing || !isDirty}>
+        {saving ? "Saving…" : testing ? "Testing…" : "Save and test"}
       </Button>
-      <Button variant="outline" onclick={test} disabled={testing}>
-        {testing ? "Testing…" : "Test connection"}
+      <Button variant="outline" onclick={test} disabled={saving || testing || !isConfigured}>
+        {testing ? "Testing…" : "Test saved connection"}
       </Button>
+      {#if !isDirty && isConfigured}<span class="saved-indicator">Saved</span>{/if}
     </div>
 
     {#if saveSuccess}
-      <div class="save-success">
-        <span class="status-icon"><CheckIcon size={12} strokeWidth={3} /></span>
-        <span>Provider saved. You're ready to enhance notes.</span>
+      <div class="save-success" role="status">
+        <CheckIcon size={14} aria-hidden="true" />
+        <span>Provider saved.</span>
       </div>
     {/if}
     {#if saveError}
-      <div class="test-output error">{saveError}</div>
+      <div class="test-output error" role="alert">{saveError}</div>
     {/if}
     {#if testOutput}
-      <div class="test-output" class:error={testOutput.startsWith("Connection failed")}>
+      <div
+        class="test-output"
+        class:error={testOutput.startsWith("Connection failed")}
+        role={testOutput.startsWith("Connection failed") ? "alert" : "status"}
+      >
         {testOutput}
       </div>
     {/if}
