@@ -59,6 +59,9 @@ identity.
 7. After publication, verify the public manifest and both installer URLs. The
    manifest must contain complete entries for `windows-x86_64` and
    `windows-aarch64`, with literal signature contents rather than `.sig` URLs.
+   Installer URLs must be the permanent tag-versioned
+   `releases/download/<tag>/` URLs; draft-only `untagged-*` URLs stop
+   resolving at publication.
 
 The existing `v0.1.1` installation predates the updater configuration. Users
 on that version need one manual install of the first updater-enabled release;
