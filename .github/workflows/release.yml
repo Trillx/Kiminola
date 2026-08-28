@@ -48,7 +48,7 @@ jobs:
               tag_name = $env:RELEASE_TAG
               target_commitish = $env:RELEASE_COMMIT
               name = "Kimi Nola $env:RELEASE_TAG"
-              body = "Windows x64 and ARM64 installers for Kimi Nola $env:RELEASE_TAG. This release remains a draft until the signed installers and in-app update path have been tested."
+              body = "Windows x64 and ARM64 installers for Kimi Nola $env:RELEASE_TAG."
               draft = $true
               prerelease = $false
             } | ConvertTo-Json
@@ -180,6 +180,10 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Test updater manifest generator
+        shell: pwsh
+        run: .\kiminola\scripts\generate-updater-manifest.test.ps1
 
       - name: Generate and upload latest.json
         shell: pwsh
