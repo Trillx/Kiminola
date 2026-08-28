@@ -41,7 +41,19 @@ static MANIFEST: std::sync::OnceLock<ModelManifest> = std::sync::OnceLock::new()
 
 pub fn manifest() -> &'static ModelManifest {
     MANIFEST.get_or_init(|| {
-        serde_json::from_str(MANIFEST_JSON).expect("embedded manifest.json is valid JSON")
+        let manifest: ModelManifest =
+            serde_json::from_str(MANIFEST_JSON).expect("embedded manifest.json is valid JSON");
+        // Production files must always be content-verified. Placeholder hashes
+        // remain available to test fixtures only; the embedded production
+        // manifest may never carry one.
+        assert!(
+            manifest
+                .files
+                .iter()
+                .all(|f| !f.sha256.starts_with("PLACEHOLDER")),
+            "embedded production manifest must not contain placeholder hashes"
+        );
+        manifest
     })
 }
 
@@ -87,8 +99,9 @@ fn is_model_file_present_at(path: &Path, file: &ModelFile) -> bool {
         return false;
     }
 
-    // A placeholder hash is used only for manifest entries whose upstream
-    // digest is not known yet. Size remains the strongest available check.
+    // Placeholder hashes exist only in test fixtures; the embedded production
+    // manifest is rejected by `manifest()` if it carries one. Size remains the
+    // strongest available check for such fixtures.
     if file.sha256.starts_with("PLACEHOLDER") {
         return true;
     }
@@ -266,8 +279,9 @@ async fn download_file(
         drop(part_file);
         let hash = sha256_file_async(part_path.clone()).await?;
         if !hash.eq_ignore_ascii_case(&file.sha256) {
-            // Placeholder hashes are clearly marked; if the manifest still holds
-            // placeholders, skip verification rather than fail every download.
+            // Placeholder hashes are a test-fixture convenience (the embedded
+            // production manifest never carries one); skip verification only
+            // for those rather than fail every fixture download.
             if !file.sha256.starts_with("PLACEHOLDER") {
                 last_err = Some(format!("sha256 mismatch for {}", file.name));
                 tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
@@ -489,6 +503,108 @@ mod tests {
 
         fs::write(root.join("tokens.txt"), b"5678").unwrap();
         assert!(is_model_pack_present_at(&root, &manifest));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn production_manifest_pins_revision_and_tokens_digest() {
+        let m = manifest();
+        assert_eq!(
+            m.revision, "237e551abd7a411ef92d3595454d9f6ab5fe7d6c",
+            "production manifest must pin the verified upstream revision"
+        );
+        let tokens = m
+            .files
+            .iter()
+            .find(|f| f.path == "tokens.txt")
+            .expect("manifest has a tokens.txt entry");
+        assert_eq!(
+            tokens.sha256, "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff",
+            "tokens.txt must carry the verified SHA-256"
+        );
+        assert!(
+            m.files.iter().all(|f| !f.sha256.starts_with("PLACEHOLDER")),
+            "production files must not bypass content verification via placeholder hashes"
+        );
+    }
+
+    #[test]
+    fn production_tokens_txt_health_accepts_valid_rejects_corrupt() {
+        // The real production manifest entry for tokens.txt.
+        let tokens = manifest()
+            .files
+            .iter()
+            .find(|f| f.path == "tokens.txt")
+            .expect("manifest has a tokens.txt entry")
+            .clone();
+        // Pack-level health over the single production entry: the same check
+        // `check_model_pack` reports, without staging the 650MB ONNX files.
+        // This test covers health only; fetch selection is covered separately
+        // at `is_model_file_present_async` below.
+        let pack_view = ModelManifest {
+            name: "production-tokens-view".into(),
+            repo: manifest().repo.clone(),
+            revision: manifest().revision.clone(),
+            total_bytes: tokens.bytes,
+            files: vec![tokens],
+        };
+
+        let temp_id = NEXT_TEMP_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "kiminola-model-pack-corrupt-tokens-test-{}-{temp_id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("tokens.txt");
+
+        // Verified upstream content (SHA-256 dc0b4584…8188ff): pack healthy.
+        let valid = include_bytes!("../tests/fixtures/tokens.txt");
+        assert_eq!(valid.len() as u64, pack_view.files[0].bytes);
+        fs::write(&path, valid).unwrap();
+        assert!(is_model_pack_present_at(&root, &pack_view));
+
+        // Same size, corrupted content: pack unhealthy.
+        let mut corrupted = valid.to_vec();
+        corrupted[0] ^= 0xFF;
+        fs::write(&path, corrupted).unwrap();
+        assert!(!is_model_pack_present_at(&root, &pack_view));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_selects_refetch_for_corrupted_production_tokens_txt() {
+        // The exact per-file decision seam `download_model_pack` uses
+        // (models.rs: `if is_model_file_present_async(...) { skip } else {
+        // download_file(...) }`): Ok(false) means the file is re-fetched.
+        let tokens = manifest()
+            .files
+            .iter()
+            .find(|f| f.path == "tokens.txt")
+            .expect("manifest has a tokens.txt entry")
+            .clone();
+
+        let temp_id = NEXT_TEMP_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "kiminola-model-fetch-selection-test-{}-{temp_id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(&tokens.path);
+
+        // Valid production bytes: file present, no fetch — no network I/O.
+        let valid = include_bytes!("../tests/fixtures/tokens.txt");
+        fs::write(&path, valid).unwrap();
+        assert!(is_model_file_present_async(path.clone(), tokens.clone())
+            .await
+            .unwrap());
+
+        // Same size, corrupted content: file absent, fetch required.
+        let mut corrupted = valid.to_vec();
+        corrupted[0] ^= 0xFF;
+        fs::write(&path, corrupted).unwrap();
+        assert!(!is_model_file_present_async(path, tokens).await.unwrap());
 
         fs::remove_dir_all(&root).unwrap();
     }

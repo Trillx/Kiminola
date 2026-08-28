@@ -1,0 +1,2 @@
+# Test fixtures must keep their exact upstream bytes; autocrlf would corrupt them.
+kiminola/src-tauri/tests/fixtures/** -text
