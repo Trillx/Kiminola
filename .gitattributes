@@ -1,2 +1,5 @@
 # Test fixtures must keep their exact upstream bytes; autocrlf would corrupt them.
 kiminola/src-tauri/tests/fixtures/** -text
+
+# SQLx embeds checksums of migration text; keep new checkouts deterministic.
+kiminola/src-tauri/migrations/*.sql text eol=lf

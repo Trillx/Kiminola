@@ -5,6 +5,7 @@ mod llm;
 mod loopback;
 mod meeting_presence;
 mod models;
+mod migrations;
 mod recording;
 mod recording_session;
 mod resampler;

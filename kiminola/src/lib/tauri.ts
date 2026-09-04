@@ -246,8 +246,15 @@ export async function setLlmConfig(config: ProviderConfig, apiKey?: string): Pro
   await invoke("set_llm_config", { config, apiKey });
 }
 
-export async function testLlmConfig(): Promise<void> {
-  await invoke("test_llm_config");
+export type LlmStreamEvent =
+  | { event: "chunk"; data: string }
+  | { event: "done" }
+  | { event: "error"; data: string };
+
+export async function testLlmConfig(onEvent: (event: LlmStreamEvent) => void = () => {}): Promise<void> {
+  const onEventChannel = new Channel<LlmStreamEvent>();
+  onEventChannel.onmessage = onEvent;
+  await invoke("test_llm_config", { onEvent: onEventChannel });
 }
 
 export async function listTemplates(): Promise<Template[]> {
@@ -278,20 +285,14 @@ export async function searchMeetings(query: string): Promise<MeetingSummary[]> {
   return invoke("search_meetings", { query });
 }
 
-export async function enhanceMeeting(meetingId: number, templateId?: number): Promise<void> {
-  await invoke("enhance_meeting", { meetingId, templateId });
-}
-
-export function onLlmChunk(handler: (text: string) => void): Promise<UnlistenFn> {
-  return listen<string>("llm:chunk", (payload) => handler(payload.payload));
-}
-
-export function onLlmDone(handler: () => void): Promise<UnlistenFn> {
-  return listen<unknown>("llm:done", () => handler());
-}
-
-export function onLlmError(handler: (error: string) => void): Promise<UnlistenFn> {
-  return listen<string>("llm:error", (payload) => handler(payload.payload));
+export async function enhanceMeeting(
+  meetingId: number,
+  templateId?: number,
+  onEvent: (event: LlmStreamEvent) => void = () => {},
+): Promise<void> {
+  const onEventChannel = new Channel<LlmStreamEvent>();
+  onEventChannel.onmessage = onEvent;
+  await invoke("enhance_meeting", { meetingId, templateId, onEvent: onEventChannel });
 }
 
 /* ---------- export (src-tauri export.rs) ---------- */

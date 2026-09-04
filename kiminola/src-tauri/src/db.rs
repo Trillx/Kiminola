@@ -47,10 +47,10 @@ async fn init_pool(path: &Path) -> Result<SqlitePool, String> {
         .connect_with(options)
         .await
         .map_err(|e| format!("failed to open database: {e}"))?;
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .map_err(|e| format!("migration failed: {e}"))?;
+    if let Err(error) = crate::migrations::run(&pool).await {
+        pool.close().await;
+        return Err(format!("migration failed: {error}"));
+    }
     Ok(pool)
 }
 
@@ -1650,6 +1650,107 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let pool = init_pool(&path).await.expect("init test pool");
         (pool, path)
+    }
+
+    async fn assert_legacy_migrations_reopen(name: &str, crlf: bool) {
+        use sqlx::migrate::{Migration, Migrator};
+        let path =
+            std::env::temp_dir().join(format!("kiminola-eol-{}-{name}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        let embedded = sqlx::migrate!("./migrations");
+        let migrations = embedded
+            .iter()
+            .map(|m| {
+                let lf = m.sql.replace("\r\n", "\n");
+                let sql = if crlf { lf.replace('\n', "\r\n") } else { lf };
+                Migration::new(
+                    m.version,
+                    m.description.clone(),
+                    m.migration_type,
+                    sql.into(),
+                    m.no_tx,
+                )
+            })
+            .collect::<Vec<_>>();
+        Migrator {
+            migrations: migrations.into(),
+            ..Migrator::DEFAULT
+        }
+        .run(&pool)
+        .await
+        .unwrap();
+        let id = save_meeting_impl(&pool, "Existing meeting", 42, "Keep these notes", &[])
+            .await
+            .unwrap();
+        let before: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+
+        let reopened = init_pool(&path)
+            .await
+            .expect("line endings must not block startup");
+        assert_eq!(
+            get_meeting_impl(&reopened, id).await.unwrap().notepad,
+            "Keep these notes"
+        );
+        let after: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&reopened)
+                .await
+                .unwrap();
+        assert_eq!(
+            before, after,
+            "legacy checksums must remain unchanged on disk"
+        );
+        reopened.close().await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn migration_compatibility_reopens_lf_database() {
+        assert_legacy_migrations_reopen("lf", false).await;
+    }
+
+    #[tokio::test]
+    async fn migration_compatibility_reopens_crlf_database() {
+        assert_legacy_migrations_reopen("crlf", true).await;
+    }
+
+    #[tokio::test]
+    async fn migration_compatibility_rejects_changed_sql() {
+        use sha2::{Digest, Sha384};
+        let (pool, path) = test_pool("changed-migration").await;
+        let sql = sqlx::migrate!("./migrations")
+            .iter()
+            .next()
+            .unwrap()
+            .sql
+            .to_string();
+        let changed = Sha384::digest(format!("{sql}\nCREATE TABLE unexpected (id INTEGER);"));
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 1")
+            .bind(changed.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let error = init_pool(&path).await.unwrap_err();
+        assert!(
+            error.contains("migration 1 was previously applied but has been modified"),
+            "{error}"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
