@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
+  import { createMeetingNotesAutosave, loadMeetingAfterAutosave } from "$lib/meeting-notes";
   import { page } from "$app/state";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
@@ -14,9 +16,6 @@
     saveTranscriptExport,
     updateSegmentText,
     deleteSegment,
-    onLlmChunk,
-    onLlmDone,
-    onLlmError,
     type MeetingDetail,
     type ProviderConfig,
     type Template,
@@ -38,7 +37,16 @@
   let tab = $state<Tab>("mynotes");
   let notes = $state("");
   let showTranscriptFinalizationWarning = $state(false);
-  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let notesSaveError = $state(false);
+  const notesAutosave = createMeetingNotesAutosave(updateNotes, (status) => {
+    notesSaveError = status === "error";
+  });
+  let enhancementVersion = 0;
+  onDestroy(() => {
+    enhancementVersion++;
+    clearTimeout(renderTimer);
+    void notesAutosave.close().catch((error) => console.error("Failed to save notes:", error));
+  });
 
   // Inline title editing
   let editingTitle = $state(false);
@@ -100,43 +108,38 @@
   }
 
   async function runEnhancement() {
-    if (!meeting) return;
+    if (!meeting || enhancing) return;
+    const id = meeting.id;
+    const version = ++enhancementVersion;
     enhancing = true;
     enhanceError = null;
     enhancedMd = "";
     enhancedHtml = "";
     enhancedGenerated = false;
 
-    const unlisten = await Promise.all([
-      onLlmChunk((text) => {
-        enhancedMd += text;
-        scheduleEnhancedRender();
-      }),
-      onLlmDone(() => {
-        enhancedGenerated = true;
-        hasEverEnhanced = true;
-        enhancing = false;
-        renderEnhancedNow();
-        cleanup();
-      }),
-      onLlmError((err) => {
-        enhanceError = err;
-        enhancing = false;
-        renderEnhancedNow();
-        cleanup();
-      }),
-    ]);
-
-    function cleanup() {
-      unlisten.forEach((fn) => fn());
-    }
-
     try {
-      await enhanceMeeting(meeting.id, selectedTemplateId);
+      await notesAutosave.flush();
+      if (version !== enhancementVersion) return;
+      await enhanceMeeting(id, selectedTemplateId, (event) => {
+        if (version !== enhancementVersion) return;
+        if (event.event === "chunk") {
+          enhancedMd += event.data;
+          scheduleEnhancedRender();
+        } else {
+          enhancing = false;
+          if (event.event === "done") {
+            enhancedGenerated = true;
+            hasEverEnhanced = true;
+          } else {
+            enhanceError = event.data;
+          }
+          renderEnhancedNow();
+        }
+      });
     } catch (err) {
+      if (version !== enhancementVersion) return;
       enhanceError = String(err);
       enhancing = false;
-      cleanup();
     }
   }
 
@@ -145,6 +148,12 @@
     const id = Number(page.params.id);
     const mode = page.url.searchParams.get("mode");
     const warning = page.url.searchParams.get("warning");
+    let active = true;
+    enhancementVersion++;
+    enhancing = false;
+    enhanceError = null;
+    clearTimeout(renderTimer);
+    renderTimer = undefined;
     meeting = null;
     notFound = false;
     tab = "mynotes";
@@ -160,10 +169,15 @@
       return;
     }
     loadConfig();
-    getMeeting(id)
+    loadMeetingAfterAutosave(
+      notesAutosave,
+      () => getMeeting(id),
+      (error) => console.error("Failed to save notes:", error),
+    )
       .then((m) => {
+        if (!active) return;
         meeting = m;
-        notes = m.notepad;
+        notes = notesAutosave.pendingNotes(id) ?? m.notepad;
         if (m.enhanced_markdown) {
           enhancedMd = m.enhanced_markdown;
           renderEnhancedNow();
@@ -178,8 +192,9 @@
         }
       })
       .catch(() => {
-        notFound = true;
+        if (active) notFound = true;
       });
+    return () => { active = false; };
   });
 
   $effect(() => {
@@ -241,6 +256,7 @@
     if (!meeting) return;
     const id = meeting.id;
     try {
+      await notesAutosave.flush();
       switch (action) {
         case "copy-notes":
           await navigator.clipboard.writeText(await exportNotesMarkdown(id));
@@ -322,12 +338,7 @@
 
   // Notes edits persist automatically, debounced.
   function onNotesInput() {
-    if (!meeting) return;
-    const id = meeting.id;
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      updateNotes(id, notes).catch((err) => console.error("Failed to save notes:", err));
-    }, 500);
+    if (meeting) notesAutosave.schedule(meeting.id, notes);
   }
 
   function formatMeta(m: MeetingDetail): string {
@@ -461,6 +472,12 @@
               aria-label="My notes"
               class="notes-textarea"
             />
+            {#if notesSaveError}
+              <p role="alert">Some edits could not be saved. Retry saving before closing this page.</p>
+              <Button variant="secondary" onclick={() => void notesAutosave.flush().catch((error) => console.error("Failed to save notes:", error))}>
+                Retry saving
+              </Button>
+            {/if}
           </div>
         </Tabs.Content>
         <Tabs.Content value="enhance" class="post-content">

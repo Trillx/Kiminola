@@ -1,11 +1,9 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import {
     getLlmConfig,
     setLlmConfig,
     testLlmConfig,
-    onLlmChunk,
-    onLlmDone,
-    onLlmError,
     type ProviderConfig,
     type ProviderKind,
   } from "$lib/tauri";
@@ -95,35 +93,24 @@
     }
   }
 
+  let disposed = false;
+  onDestroy(() => { disposed = true; });
+
   async function test() {
-    if (!config) return;
+    if (!config || testing) return;
     testing = true;
     testOutput = "";
-
-    const unlisten = await Promise.all([
-      onLlmChunk((text) => {
-        testOutput += text;
-      }),
-      onLlmDone(() => {
-        testOutput = testOutput.trim() || "Connection succeeded.";
-        cleanup();
-      }),
-      onLlmError((err) => {
-        testOutput = `Connection failed: ${err}`;
-        cleanup();
-      }),
-    ]);
-
-    function cleanup() {
-      testing = false;
-      unlisten.forEach((fn) => fn());
-    }
-
     try {
-      await testLlmConfig();
+      await testLlmConfig((event) => {
+        if (disposed) return;
+        if (event.event === "chunk") testOutput += event.data;
+        if (event.event === "done") testOutput = testOutput.trim() || "Connection succeeded.";
+        if (event.event === "error") testOutput = `Connection failed: ${event.data}`;
+      });
     } catch (err) {
-      testOutput = `Connection failed: ${err}`;
-      cleanup();
+      if (!disposed) testOutput = `Connection failed: ${err}`;
+    } finally {
+      testing = false;
     }
   }
 
