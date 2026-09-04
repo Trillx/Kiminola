@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { createMeetingNotesAutosave } from "$lib/meeting-notes";
+  import { createMeetingNotesAutosave, loadMeetingAfterAutosave } from "$lib/meeting-notes";
   import { page } from "$app/state";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
@@ -154,7 +154,6 @@
     enhanceError = null;
     clearTimeout(renderTimer);
     renderTimer = undefined;
-    const savedNotes = notesAutosave.flush();
     meeting = null;
     notFound = false;
     tab = "mynotes";
@@ -170,11 +169,15 @@
       return;
     }
     loadConfig();
-    savedNotes.then(() => getMeeting(id))
+    loadMeetingAfterAutosave(
+      notesAutosave,
+      () => getMeeting(id),
+      (error) => console.error("Failed to save notes:", error),
+    )
       .then((m) => {
         if (!active) return;
         meeting = m;
-        notes = m.notepad;
+        notes = notesAutosave.pendingNotes(id) ?? m.notepad;
         if (m.enhanced_markdown) {
           enhancedMd = m.enhanced_markdown;
           renderEnhancedNow();
@@ -470,7 +473,10 @@
               class="notes-textarea"
             />
             {#if notesSaveError}
-              <p role="alert">Could not save your latest notes. Keep this page open and try editing again.</p>
+              <p role="alert">Some edits could not be saved. Retry saving before closing this page.</p>
+              <Button variant="secondary" onclick={() => void notesAutosave.flush().catch((error) => console.error("Failed to save notes:", error))}>
+                Retry saving
+              </Button>
             {/if}
           </div>
         </Tabs.Content>

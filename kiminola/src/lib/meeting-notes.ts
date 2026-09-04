@@ -9,32 +9,60 @@ export function createMeetingNotesAutosave(
   onStatus: (status: DraftAutosaveStatus) => void,
   delayMs = 500,
 ) {
-  let pending: NotesSnapshot | undefined;
+  const pending = new Map<number, NotesSnapshot>();
+  const failed = new Set<number>();
+  let scheduled: NotesSnapshot | undefined;
   const autosave = createDraftAutosave<NotesSnapshot>(
     async (snapshot) => {
-      await save(snapshot.meetingId, snapshot.notes);
-      if (pending === snapshot) pending = undefined;
+      try {
+        await save(snapshot.meetingId, snapshot.notes);
+        failed.delete(snapshot.meetingId);
+        if (pending.get(snapshot.meetingId) === snapshot) pending.delete(snapshot.meetingId);
+      } catch (error) {
+        failed.add(snapshot.meetingId);
+        throw error;
+      }
     },
-    onStatus,
+    (status) => onStatus(failed.size ? "error" : status),
     delayMs,
   );
+
+  async function flush() {
+    const results = await Promise.allSettled(
+      [...pending.values()].map((snapshot) => autosave.flush(snapshot)),
+    );
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  }
 
   return {
     schedule(meetingId: number, notes: string) {
       // A new meeting must not cancel the previous meeting's pending edit.
-      if (pending && pending.meetingId !== meetingId) {
-        void autosave.flush(pending).catch(() => undefined);
+      if (scheduled && scheduled.meetingId !== meetingId && pending.get(scheduled.meetingId) === scheduled) {
+        void autosave.flush(scheduled).catch(() => undefined);
       }
-      pending = { meetingId, notes };
-      autosave.schedule(pending);
+      scheduled = { meetingId, notes };
+      pending.set(meetingId, scheduled);
+      autosave.schedule(scheduled);
     },
-    async flush() {
-      if (pending) await autosave.flush(pending);
+    pendingNotes(meetingId: number) {
+      return pending.get(meetingId)?.notes;
     },
+    flush,
     async close() {
-      const saving = pending ? autosave.flush(pending) : Promise.resolve();
+      const saving = flush();
       autosave.cancel();
       await saving;
     },
   };
+}
+
+/** A write failure must not turn an existing destination into a missing meeting. */
+export async function loadMeetingAfterAutosave<T>(
+  autosave: { flush(): Promise<void> },
+  load: () => Promise<T>,
+  onSaveError: (error: unknown) => void,
+): Promise<T> {
+  await autosave.flush().catch(onSaveError);
+  return load();
 }
