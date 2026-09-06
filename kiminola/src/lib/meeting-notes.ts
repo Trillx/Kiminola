@@ -11,6 +11,8 @@ export function createMeetingNotesAutosave(
 ) {
   const pending = new Map<number, NotesSnapshot>();
   const failed = new Set<number>();
+  const listeners = new Set([onStatus]);
+  let currentStatus: DraftAutosaveStatus = "saved";
   let scheduled: NotesSnapshot | undefined;
   const autosave = createDraftAutosave<NotesSnapshot>(
     async (snapshot) => {
@@ -23,19 +25,31 @@ export function createMeetingNotesAutosave(
         throw error;
       }
     },
-    (status) => onStatus(failed.size ? "error" : status),
+    (status) => {
+      currentStatus = failed.size ? "error" : status;
+      listeners.forEach((listener) => listener(currentStatus));
+    },
     delayMs,
   );
 
-  async function flush() {
-    const results = await Promise.allSettled(
-      [...pending.values()].map((snapshot) => autosave.flush(snapshot)),
-    );
+  async function flush(meetingId?: number) {
+    const snapshots = [...pending.values()].filter((snapshot) => meetingId === undefined || snapshot.meetingId === meetingId);
+    const saving = snapshots.map((snapshot) => autosave.flush(snapshot));
+    // flush cancels the shared debounce timer. Keep an unrelated edit scheduled.
+    if (meetingId !== undefined && scheduled && scheduled.meetingId !== meetingId && pending.get(scheduled.meetingId) === scheduled) {
+      autosave.schedule(scheduled);
+    }
+    const results = await Promise.allSettled(saving);
     const failure = results.find((result) => result.status === "rejected");
     if (failure?.status === "rejected") throw failure.reason;
   }
 
   return {
+    subscribe(listener: (status: DraftAutosaveStatus) => void) {
+      listeners.add(listener);
+      listener(currentStatus);
+      return () => { listeners.delete(listener); };
+    },
     schedule(meetingId: number, notes: string) {
       // A new meeting must not cancel the previous meeting's pending edit.
       if (scheduled && scheduled.meetingId !== meetingId && pending.get(scheduled.meetingId) === scheduled) {

@@ -116,3 +116,38 @@ test("destination reads wait for an in-flight save", async () => {
   gate.resolve();
   assert.equal(await pending, "loaded");
 });
+
+test("saving one meeting does not retry another meeting's failed notes", async () => {
+  let failA = true;
+  const writes: Array<[number, string]> = [];
+  const autosave = createMeetingNotesAutosave(async (id, notes) => {
+    if (id === 1 && failA) throw new Error("A cannot be saved");
+    writes.push([id, notes]);
+  }, () => {}, 1000);
+  try {
+    autosave.schedule(1, "A pending");
+    await assert.rejects(autosave.flush(), /A cannot be saved/);
+    autosave.schedule(2, "B current");
+    await autosave.flush(2);
+    assert.equal(autosave.pendingNotes(1), "A pending");
+    assert.equal(autosave.pendingNotes(2), undefined);
+    assert.ok(writes.some(([id, notes]) => id === 2 && notes === "B current"));
+  } finally {
+    failA = false;
+    await autosave.close();
+  }
+});
+
+test("a scoped flush preserves the other meeting's scheduled autosave", async () => {
+  const writes: Array<[number, string]> = [];
+  const autosave = createMeetingNotesAutosave(async (id, notes) => {
+    writes.push([id, notes]);
+  }, () => {}, 10);
+  autosave.schedule(1, "A");
+  autosave.schedule(2, "B");
+  await autosave.flush(1);
+  await wait(30);
+  assert.ok(writes.some(([id]) => id === 2));
+  assert.equal(autosave.pendingNotes(2), undefined);
+  await autosave.close();
+});
