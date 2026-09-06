@@ -69,6 +69,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: .\scripts\prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
 
+      # Hosted windows-latest is x64, so execute the native process tests there.
+      # The ARM64 matrix still compiles the same code in the installer build below;
+      # runtime evidence for ARM64 must come from a native ARM64 runner.
+      - name: Test startup coordination and activation
+        if: matrix.arch == 'x64'
+        working-directory: kiminola/src-tauri
+        run: |
+          cargo test --target '${{ matrix.target }}' --lib startup_coordination
+          cargo test --target '${{ matrix.target }}' --lib startup_wiring_tests
+
       - name: Build unsigned CI installer
         working-directory: kiminola
         run: |
@@ -77,3 +87,9 @@ jobs:
           npm.cmd run tauri build -- `
             --target '${{ matrix.target }}' `
             --config src-tauri/tauri.ci.conf.json
+
+      - name: Test startup PID and window behavior
+        if: matrix.arch == 'x64'
+        working-directory: kiminola
+        shell: pwsh
+        run: ./scripts/startup-behavior.test.ps1 -Executable 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe' -TimeoutSeconds 30
