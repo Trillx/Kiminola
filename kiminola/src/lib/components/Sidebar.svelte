@@ -23,6 +23,9 @@
   import * as Dialog from "$lib/components/ui/dialog";
   import { ContextMenu } from "bits-ui";
   import Plus from "@lucide/svelte/icons/plus";
+  import House from "@lucide/svelte/icons/house";
+  import Search from "@lucide/svelte/icons/search";
+  import SettingsIcon from "@lucide/svelte/icons/settings";
   import SearchDialog from "$lib/components/SearchDialog.svelte";
   import LibraryTreeNode from "$lib/components/LibraryTreeNode.svelte";
 
@@ -313,14 +316,14 @@
   </a>
 
   <button class="search-pill" onclick={() => (searchOpen = true)} aria-label="Search meetings">
-    <span>🔍 Search</span>
+    <span class="search-label"><Search size={15} aria-hidden="true" /> Search</span>
     <span>Ctrl+K</span>
   </button>
 
   <SearchDialog bind:open={searchOpen} />
 
   <nav>
-    <a class="nav-item" class:active={pathname === "/"} href="/">🏠 <span>Home</span></a>
+    <a class="nav-item" class:active={pathname === "/"} href="/"><House size={16} aria-hidden="true" /> <span>Home</span></a>
 
     <ContextMenu.Root>
       <ContextMenu.Trigger class="spaces-header-trigger" role="group" tabindex={0}>
@@ -399,7 +402,7 @@
   </nav>
 
   <div class="sidebar-bottom">
-    <a class="nav-item" class:active={pathname === "/settings"} href="/settings">⚙️ <span>Settings</span></a>
+    <a class="nav-item" class:active={pathname === "/settings"} href="/settings"><SettingsIcon size={16} aria-hidden="true" /> <span>Settings</span></a>
     <div class="account-row">
       <div class="avatar">K</div>
       <div class="name">

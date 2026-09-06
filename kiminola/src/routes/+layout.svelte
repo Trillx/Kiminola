@@ -14,6 +14,7 @@
   import { libraryDestinationState, recordingHref } from "$lib/library-tree.svelte";
   import { startAutomaticUpdateCheck, updateState } from "$lib/update.svelte";
   import DatabaseGate from "$lib/components/DatabaseGate.svelte";
+  import { shouldUseFocusedSettingsShell } from "$lib/settings-ui";
 
   let { children } = $props();
   let databaseReady = $state(false);
@@ -22,6 +23,7 @@
   import { setupCompactWindowSync } from "$lib/compact-window";
   let compactWindow = $state(false);
   let compactWindowResizing = $state(false);
+  let isSettings = $derived(shouldUseFocusedSettingsShell(page.url.pathname));
 
   // Reflect theme + sidebar state onto the document so the CSS variables
   // (--sidebar-width drives all fixed-position math) stay in sync.
@@ -30,7 +32,7 @@
   });
 
   $effect(() => {
-    document.documentElement.dataset.sidebarCollapsed = String(sidebarState.collapsed);
+    document.documentElement.dataset.sidebarCollapsed = String(sidebarState.collapsed || isSettings);
     document.documentElement.setAttribute("data-compact-window-resizing", compactWindowResizing ? "true" : "false");
   });
 
@@ -97,10 +99,10 @@
 {:else if isMeetingPromptOverlay}
   <MeetingPresencePrompt overlay />
 {:else}
-  <div class="app" class:sidebar-collapsed={sidebarState.collapsed}>
-    <Sidebar />
+  <div class="app" class:sidebar-collapsed={sidebarState.collapsed} class:focused-settings={isSettings}>
+    {#if !isSettings}<Sidebar />{/if}
     <main class="main">
-      <Topbar />
+      {#if !isSettings}<Topbar />{/if}
       {@render children()}
       <MeetingPresencePrompt />
       <UpdateBanner />

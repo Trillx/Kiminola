@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { page } from "$app/state";
+  import { goto } from "$app/navigation";
   import { getVersion } from "@tauri-apps/api/app";
   import ProviderConfigForm from "$lib/components/ProviderConfigForm.svelte";
   import { themeState, toggleTheme } from "$lib/theme.svelte";
@@ -29,24 +30,25 @@
   import { Label } from "$lib/components/ui/label";
   import { Progress } from "$lib/components/ui/progress";
   import * as Select from "$lib/components/ui/select";
+  import * as Dialog from "$lib/components/ui/dialog";
+  import { Switch } from "$lib/components/ui/switch";
   import { compactReleaseNotes, isRecordingPath } from "$lib/update-policy";
   import { checkForUpdates, installUpdate, updateState } from "$lib/update.svelte";
+  import {
+    nextSettingsSection,
+    resolveSettingsSection,
+    SETTINGS_SECTIONS,
+    settingsSectionHref,
+    templateNeedsDeleteConfirmation,
+    type SettingsSection,
+  } from "$lib/settings-ui";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import Check from "@lucide/svelte/icons/check";
+  import Moon from "@lucide/svelte/icons/moon";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Sun from "@lucide/svelte/icons/sun";
 
-  type Section = "general" | "models" | "ai" | "shortcut" | "about" | "templates";
-
-  const SECTIONS: { id: Section; label: string }[] = [
-    { id: "general", label: "General" },
-    { id: "models", label: "Speech model" },
-    { id: "ai", label: "AI provider" },
-    { id: "shortcut", label: "Shortcut" },
-    { id: "templates", label: "Templates" },
-    { id: "about", label: "About" },
-  ];
-
-  const requestedSection = page.url.searchParams.get("section");
-  let active = $state<Section>(
-    requestedSection === "models" || requestedSection === "about" ? requestedSection : "general",
-  );
+  let active = $state<SettingsSection>(resolveSettingsSection(page.url.searchParams.get("section")));
   let shortcut = $state("");
   let savingShortcut = $state(false);
   let shortcutSaved = $state(false);
@@ -75,6 +77,7 @@
   let editingPrompt = $state("");
   let templatesLoading = $state(false);
   let templateStatus = $state<{ message: string; error: boolean } | null>(null);
+  let deleteConfirmOpen = $state(false);
   let templateStatusTimer: ReturnType<typeof setTimeout> | undefined;
   const selectedTemplate = $derived(templates.find((t) => t.id === selectedTemplateId));
 
@@ -155,10 +158,16 @@
       selectedTemplateId = undefined;
       editingName = "";
       editingPrompt = "";
+      deleteConfirmOpen = false;
       flashTemplateStatus("Template deleted.");
     } catch (err) {
       flashTemplateStatus(String(err), true);
     }
+  }
+
+  function requestTemplateDelete() {
+    if (!selectedTemplate || !templateNeedsDeleteConfirmation(selectedTemplate)) return;
+    deleteConfirmOpen = true;
   }
 
   function activateTemplates() {
@@ -210,17 +219,36 @@
     }
   }
 
-  function activateSection(section: Section) {
+  function activateSection(section: SettingsSection) {
     if (section === "templates") {
       activateTemplates();
-      return;
+    } else {
+      active = section;
     }
-    active = section;
+    void goto(settingsSectionHref(section), { replaceState: true, noScroll: true, keepFocus: true });
     if (section === "models" && modelState !== "downloading") void refreshModelHealth();
   }
 
+  function onSectionKeydown(event: KeyboardEvent, section: SettingsSection) {
+    const next = nextSettingsSection(section, event.key);
+    if (!next) return;
+    event.preventDefault();
+    activateSection(next);
+    requestAnimationFrame(() => document.getElementById(`settings-tab-${next}`)?.focus());
+  }
+
+  $effect(() => {
+    const requested = resolveSettingsSection(page.url.searchParams.get("section"));
+    if (requested !== active) {
+      active = requested;
+      if (requested === "templates") void loadTemplates();
+      if (requested === "models" && modelState !== "downloading") void refreshModelHealth();
+    }
+  });
+
   onMount(() => {
     if (active === "models") void refreshModelHealth();
+    if (active === "templates") void loadTemplates();
     getGlobalShortcut()
       .then((s) => {
         shortcut = s ?? "";
@@ -285,74 +313,111 @@
   <title>Settings — Kimi Nola</title>
 </svelte:head>
 
-<div class="main-content">
+<div class="main-content settings-page">
   <div class="post-shell settings-layout">
-    <aside class="settings-rail">
-      <div class="display" style="margin-bottom: 16px; font-size: 24px;">Settings</div>
-      <div class="settings-nav" role="tablist">
-        {#each SECTIONS as section}
+    <aside class="settings-rail" aria-label="Settings sections">
+      <a class="settings-back" href="/"><ArrowLeft size={15} aria-hidden="true" /> Meetings</a>
+      <h1 class="display settings-title">Settings</h1>
+      <div class="settings-nav" role="tablist" aria-label="Settings sections">
+        {#each SETTINGS_SECTIONS as section}
           <button
+            id={`settings-tab-${section.id}`}
             class="settings-nav-item"
             class:active={active === section.id}
             role="tab"
             aria-selected={active === section.id}
+            aria-controls="settings-panel"
+            tabindex={active === section.id ? 0 : -1}
             onclick={() => activateSection(section.id)}
+            onkeydown={(event) => onSectionKeydown(event, section.id)}
           >
             {section.label}
           </button>
         {/each}
       </div>
-      <a class="btn btn-ghost btn-sm" href="/" style="margin-top: auto;">← Back to meetings</a>
     </aside>
 
-    <div class="settings-pane">
+    <div
+      id="settings-panel"
+      class="settings-pane"
+      role="tabpanel"
+      aria-labelledby={`settings-tab-${active}`}
+      tabindex="0"
+    >
       {#if active === "general"}
-        <div class="my-notes-card provider-config">
-          <div class="enhance-title">General</div>
-          <div class="enhance-copy">Choose how Kimi Nola looks on your machine.</div>
-          <div class="field inline">
-            <span>Theme</span>
-            <button class="btn btn-ghost" onclick={toggleTheme}>
-              {themeState.theme === "dark" ? "☀️ Switch to light" : "🌙 Switch to dark"}
-            </button>
+        <section class="settings-card general-settings-card">
+          <header class="settings-card-header">
+            <h2>General</h2>
+            <p>Appearance and meeting prompt preferences.</p>
+          </header>
+
+          <div class="settings-group">
+            <div class="settings-row">
+              <div class="settings-row-copy">
+                <strong>Theme</strong>
+                <span>Choose the appearance used throughout Kimi Nola.</span>
+              </div>
+              <div class="theme-options" role="group" aria-label="Theme">
+                <button
+                  class:active={themeState.theme === "light"}
+                  aria-pressed={themeState.theme === "light"}
+                  onclick={() => themeState.theme !== "light" && toggleTheme()}
+                ><Sun size={15} aria-hidden="true" /> Light</button>
+                <button
+                  class:active={themeState.theme === "dark"}
+                  aria-pressed={themeState.theme === "dark"}
+                  onclick={() => themeState.theme !== "dark" && toggleTheme()}
+                ><Moon size={15} aria-hidden="true" /> Dark</button>
+              </div>
+            </div>
           </div>
-        </div>
-        <div class="my-notes-card provider-config presence-settings">
-          <div class="enhance-title">Meeting prompts</div>
-          <div class="enhance-copy">
-            Kimi Nola can look for meeting apps locally and ask before it does anything. It never
-            starts recording automatically.
+
+          <div class="settings-section-divider"></div>
+
+          <div class="settings-subheader">
+            <h2>Meeting prompts</h2>
+            <p>
+              Look for supported meeting apps locally and ask before doing anything. Recording never
+              starts automatically.
+            </p>
           </div>
-          <div class="field inline">
-            <span>Meeting detection</span>
-            <button class="btn btn-ghost" onclick={() => changePresence("enabled", !presence.enabled)}>
-              {presence.enabled ? "On" : "Off"}
-            </button>
+
+          <div class="settings-group">
+            <div class="settings-row">
+              <div class="settings-row-copy">
+                <strong>Meeting detection</strong>
+                <span>{presenceLabel()}</span>
+              </div>
+              <Switch
+                checked={presence.enabled}
+                onCheckedChange={(checked) => void changePresence("enabled", checked)}
+                aria-label="Meeting detection"
+              />
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-copy">
+                <strong>Start with Windows</strong>
+                <span>Keep meeting prompts available after signing in.</span>
+              </div>
+              <Switch
+                checked={presence.start_with_windows}
+                onCheckedChange={(checked) => void changePresence("startup", checked)}
+                aria-label="Start with Windows"
+              />
+            </div>
           </div>
-          <div class="field inline">
-            <span>Start with Windows</span>
-            <button
-              class="btn btn-ghost"
-              onclick={() => changePresence("startup", !presence.start_with_windows)}
-            >
-              {presence.start_with_windows ? "On" : "Off"}
-            </button>
-          </div>
-          <div class="field inline">
-            <span>Status</span>
-            <span class="enhance-copy">{presenceLabel()}</span>
-          </div>
+
           {#if presence.enabled}
-            <div class="config-actions">
+            <div class="settings-inline-actions">
               <Button variant="outline" onclick={() => changePresence("paused", !presence.paused)}>
                 {presence.paused ? "Resume detection" : "Pause detection"}
               </Button>
             </div>
           {/if}
-          {#if presenceError}<div class="test-output error">{presenceError}</div>{/if}
-        </div>
+          {#if presenceError}<div class="test-output error" role="alert">{presenceError}</div>{/if}
+        </section>
       {:else if active === "models"}
-        <div class="my-notes-card provider-config">
+        <div class="settings-card provider-config">
           <div class="enhance-title">On-device speech model</div>
           <div class="enhance-copy">
             Kimi Nola uses this local model for live transcription. Model files stay on this
@@ -400,11 +465,11 @@
           </div>
         </div>
       {:else if active === "ai"}
-        <div class="my-notes-card">
+        <div class="settings-card">
           <ProviderConfigForm />
         </div>
       {:else if active === "shortcut"}
-        <div class="my-notes-card provider-config">
+        <div class="settings-card provider-config">
           <div class="enhance-title">Global shortcut</div>
           <div class="enhance-copy">
             Press this key combination anywhere in the app to start or stop a recording. Examples:
@@ -425,7 +490,7 @@
           {/if}
         </div>
       {:else if active === "about"}
-        <div class="my-notes-card provider-config">
+        <div class="settings-card provider-config">
           <div class="enhance-title">About Kimi Nola</div>
           <div class="enhance-copy">
             Local-first meeting transcription and AI-enhanced notes for Windows.
@@ -439,7 +504,7 @@
             <span class="enhance-copy">MIT</span>
           </div>
         </div>
-        <div class="my-notes-card provider-config update-settings-card">
+        <div class="settings-card provider-config update-settings-card">
           <div class="enhance-title">Updates</div>
           <div class="enhance-copy">
             Kimi Nola checks the published stable GitHub release after launch. It never installs an
@@ -507,22 +572,32 @@
           </div>
         </div>
       {:else if active === "templates"}
-        <div class="my-notes-card provider-config">
-          <div class="enhance-title">Summary templates</div>
-          <div class="enhance-copy">
-            Built-in templates cannot be edited or deleted. Custom templates must include
-            <code>{`{transcript}`}</code> and <code>{`{notes}`}</code>.
+        <section class="settings-card template-settings-card">
+          <header class="settings-card-header settings-card-header-row">
+            <div>
+              <h2>Summary templates</h2>
+              <p>Choose a built-in template or create a custom prompt.</p>
+            </div>
+            <Button variant="outline" onclick={newTemplate}><Plus size={15} aria-hidden="true" /> New template</Button>
+          </header>
+
+          <div class="template-requirements">
+            <span>Required variables</span>
+            <code>{`{transcript}`}</code>
+            <code>{`{notes}`}</code>
           </div>
 
           {#if templatesLoading}
-            <div class="empty-state" style="margin-top: 16px;">Loading templates…</div>
+            <div class="empty-state" aria-live="polite">Loading templates…</div>
           {:else}
             <div class="template-picker-row">
               <div class="template-select-wrap">
                 <Label for="template-select">Template</Label>
                 <Select.Root
                   type="single"
-                  value={selectedTemplateId !== undefined ? String(selectedTemplateId) : ""}
+                  value={selectedTemplateId !== undefined && selectedTemplateId !== -1
+                    ? String(selectedTemplateId)
+                    : ""}
                   onValueChange={(value) => {
                     const id = Number(value);
                     const t = templates.find((x) => x.id === id);
@@ -530,8 +605,7 @@
                   }}
                 >
                   <Select.Trigger id="template-select" class="w-full">
-                    {selectedTemplate?.name ??
-                      (selectedTemplateId === -1 ? editingName : "Choose a template")}
+                    {selectedTemplateId === -1 ? "New custom template" : (selectedTemplate?.name ?? "Choose a template")}
                   </Select.Trigger>
                   <Select.Content>
                     {#each templates as t (t.id)}
@@ -542,45 +616,69 @@
                   </Select.Content>
                 </Select.Root>
               </div>
-              <Button variant="outline" size="sm" onclick={newTemplate}>New template</Button>
             </div>
 
             {#if selectedTemplateId !== undefined}
-              <div class="field">
-                <Label for="template-name">Name</Label>
-                <Input
-                  id="template-name"
-                  bind:value={editingName}
-                  disabled={selectedTemplate?.is_builtin === 1}
-                />
-              </div>
-              <div class="field">
-                <Label for="template-prompt">Prompt</Label>
-                <Textarea
-                  id="template-prompt"
-                  bind:value={editingPrompt}
-                  rows={12}
-                  disabled={selectedTemplate?.is_builtin === 1}
-                />
-              </div>
-              {#if !selectedTemplate?.is_builtin}
-                <div class="config-actions">
-                  <Button onclick={saveTemplate}>Save template</Button>
-                  <Button variant="outline" onclick={deleteSelectedTemplate}>Delete</Button>
+              {#if selectedTemplate?.is_builtin}
+                <div class="template-readonly-heading">
+                  <div>
+                    <span class="template-readonly-badge"><Check size={13} aria-hidden="true" /> Built-in · read-only</span>
+                    <h3>{editingName}</h3>
+                  </div>
+                </div>
+                <pre class="template-preview" role="region" aria-label="Built-in template prompt">{editingPrompt}</pre>
+              {:else}
+                <div class="template-editor">
+                  <div class="field">
+                    <Label for="template-name">Name</Label>
+                    <Input id="template-name" bind:value={editingName} placeholder="Template name" />
+                  </div>
+                  <div class="template-editor-scroll">
+                    <div class="field">
+                      <Label for="template-prompt">Prompt</Label>
+                      <Textarea
+                        id="template-prompt"
+                        class="template-prompt-editor"
+                        bind:value={editingPrompt}
+                        rows={12}
+                      />
+                    </div>
+                    <div class="template-actions">
+                      <Button onclick={saveTemplate}>Save template</Button>
+                      {#if selectedTemplateId !== -1}
+                        <Button variant="destructive" onclick={requestTemplateDelete}>Delete template</Button>
+                      {/if}
+                    </div>
+                  </div>
                 </div>
               {/if}
             {/if}
             {#if templateStatus}
-              <div class="test-output" class:error={templateStatus.error}>
+              <div class="test-output" class:error={templateStatus.error} role={templateStatus.error ? "alert" : "status"}>
                 {templateStatus.message}
               </div>
             {/if}
           {/if}
-        </div>
+        </section>
       {/if}
     </div>
   </div>
 </div>
+
+<Dialog.Root bind:open={deleteConfirmOpen}>
+  <Dialog.Content>
+    <Dialog.Header>
+      <Dialog.Title>Delete “{selectedTemplate?.name ?? "template"}”?</Dialog.Title>
+      <Dialog.Description>
+        This permanently removes the custom template. Meetings that already used it are unchanged.
+      </Dialog.Description>
+    </Dialog.Header>
+    <Dialog.Footer>
+      <Button variant="outline" onclick={() => (deleteConfirmOpen = false)}>Cancel</Button>
+      <Button variant="destructive" onclick={() => void deleteSelectedTemplate()}>Delete template</Button>
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
   .model-status {
