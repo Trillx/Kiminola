@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kimi Nola — Calendar surfaces prototype</title>
+  <!--
+    PROTOTYPE QUESTION: Three variants of the calendar surfaces flow, switchable
+    via ?variant=A/B/C. Standalone throwaway because the flow spans Home,
+    Settings, the Meeting prompt, and Meeting detail.
+  -->
+  <style>
+    :root {
+      --paper: #f2efe9;
+      --beige: #dfd7c8;
+      --gold: #ccc0a8;
+      --deepgold: #a88b4f;
+      --ink: #242424;
+      --ink2: #2e2e2e;
+      --grey: #474747;
+      --muted: #777067;
+      --hair-light: rgba(36, 36, 36, .14);
+      --hair-soft: rgba(36, 36, 36, .08);
+      --shadow: rgba(36, 30, 20, .10);
+      --radius: 14px;
+      --radius-sm: 9px;
+      --mono: "IBM Plex Mono", Consolas, monospace;
+      --ui: Archivo, "Segoe UI", sans-serif;
+      --display: "Gentium Book Plus", Georgia, serif;
+    }
+
+    [data-theme="dark"] {
+      --paper: #242424;
+      --beige: #2e2e2e;
+      --gold: #ccc0a8;
+      --deepgold: #ccc0a8;
+      --ink: #f2efe9;
+      --ink2: #1d1d1d;
+      --grey: #c2bbb1;
+      --muted: #9f978d;
+      --hair-light: rgba(242, 239, 233, .14);
+      --hair-soft: rgba(242, 239, 233, .08);
+      --shadow: rgba(0, 0, 0, .30);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--paper); color: var(--ink); }
+    body { font-family: var(--ui); -webkit-font-smoothing: antialiased; }
+    button { font: inherit; }
+    button:focus-visible { outline: 2px solid var(--deepgold); outline-offset: 3px; }
+    .prototype-note {
+      position: sticky; top: 0; z-index: 50; padding: 9px 16px;
+      background: var(--ink2); color: var(--paper); text-align: center;
+      font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase;
+    }
+    .prototype-note strong { color: var(--gold); font-weight: 500; }
+    .shell { min-height: calc(100vh - 34px); display: flex; }
+    .nav {
+      width: 218px; flex: 0 0 218px; padding: 24px 16px; background: var(--beige);
+      border-right: 1px solid var(--hair-soft); display: flex; flex-direction: column; gap: 18px;
+    }
+    .wordmark { font: 21px var(--display); letter-spacing: -.03em; }
+    .wordmark span { color: var(--deepgold); }
+    .nav-label { margin: 8px 10px 4px; color: var(--muted); font: 10px var(--mono); letter-spacing: .13em; }
+    .nav button, .nav-link {
+      width: 100%; border: 0; background: transparent; color: var(--ink); cursor: pointer;
+      padding: 10px 11px; border-radius: var(--radius-sm); text-align: left; display: flex; gap: 10px; align-items: center;
+    }
+    .nav button:hover, .nav-link:hover { background: rgba(255,255,255,.23); }
+    .nav button.active { background: var(--paper); box-shadow: 0 1px 5px var(--shadow); }
+    .nav-spacer { flex: 1; }
+    .nav-foot { color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; line-height: 1.6; }
+    .main { flex: 1; min-width: 0; }
+    .topbar { min-height: 70px; padding: 18px 28px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--hair-soft); }
+    .eyebrow { color: var(--muted); font: 10px var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font: 32px/1.1 var(--display); letter-spacing: -.035em; }
+    h2 { font: 22px/1.15 var(--display); letter-spacing: -.025em; }
+    h3 { font-size: 14px; }
+    .top-actions { display: flex; gap: 8px; align-items: center; }
+    .button {
+      border: 1px solid var(--hair-light); background: transparent; color: var(--ink); border-radius: 999px;
+      padding: 9px 14px; cursor: pointer; font-size: 12px; transition: background .16s ease, transform .12s ease;
+    }
+    .button:hover { background: rgba(255,255,255,.26); }
+    .button:active { transform: translateY(1px); }
+    .button.primary { background: var(--deepgold); border-color: var(--deepgold); color: #fff; }
+    .button.primary:hover { background: var(--gold); color: var(--ink); }
+    .button.quiet { border-color: transparent; color: var(--muted); }
+    .button.danger { border-color: var(--deepgold); color: var(--deepgold); }
+    .content { max-width: 1080px; margin: 0 auto; padding: 38px 40px 132px; }
+    .content.narrow { max-width: 840px; }
+    .intro { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin-bottom: 30px; }
+    .intro-copy { display: grid; gap: 9px; }
+    .intro-copy p { max-width: 560px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+    .status-line { display: flex; gap: 8px; align-items: center; color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--deepgold); }
+    .status-dot.stale { background: var(--gold); }
+    .status-dot.off { background: var(--muted); }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(270px, .65fr); gap: 18px; }
+    .panel { border: 1px solid var(--hair-light); background: rgba(255,255,255,.18); border-radius: var(--radius); padding: 20px; }
+    .panel.paper { background: var(--paper); }
+    .panel-title { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; margin-bottom: 16px; }
+    .panel-title small { color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .event-list { display: grid; gap: 8px; }
+    .event-row { width: 100%; border: 1px solid var(--hair-soft); background: var(--paper); border-radius: 11px; padding: 13px; color: var(--ink); text-align: left; cursor: pointer; display: grid; grid-template-columns: 58px minmax(0,1fr) auto; gap: 12px; align-items: center; }
+    .event-row:hover, .event-row.selected { border-color: var(--deepgold); }
+    .event-time { color: var(--muted); font: 10px var(--mono); letter-spacing: .05em; text-transform: uppercase; }
+    .event-name { font-size: 14px; font-weight: 600; }
+    .event-meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .event-chip { color: var(--deepgold); font: 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .event-row.all-day { opacity: .72; }
+    .event-row.all-day .event-chip { color: var(--muted); }
+    .rule { border: 0; border-top: 1px solid var(--hair-soft); margin: 20px 0; }
+    .empty { padding: 30px 10px; color: var(--muted); text-align: center; font-size: 13px; }
+    .empty strong { display: block; color: var(--ink); font: 21px var(--display); margin-bottom: 7px; }
+    .account { display: grid; gap: 12px; }
+    .account-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--hair-soft); }
+    .account-row:last-child { border-bottom: 0; }
+    .provider-mark { width: 30px; height: 30px; border: 1px solid var(--hair-light); border-radius: 8px; display: grid; place-items: center; font: 11px var(--mono); color: var(--deepgold); }
+    .account-info { flex: 1; min-width: 0; }
+    .account-info strong { display: block; font-size: 13px; }
+    .account-info span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .field-stack { display: grid; gap: 12px; }
+    .field-line { display: flex; justify-content: space-between; gap: 18px; padding: 12px 0; border-bottom: 1px solid var(--hair-soft); font-size: 13px; }
+    .field-line:last-child { border-bottom: 0; }
+    .field-line span:last-child { color: var(--muted); text-align: right; }
+    .toggle { width: 38px; height: 22px; padding: 3px; border-radius: 999px; border: 0; background: var(--muted); cursor: pointer; text-align: right; }
+    .toggle.on { background: var(--deepgold); text-align: left; }
+    .toggle i { display: inline-block; width: 16px; height: 16px; border-radius: 50%; background: var(--paper); }
+    .callout { border-left: 3px solid var(--deepgold); padding: 12px 14px; background: rgba(204,192,168,.18); display: grid; gap: 6px; }
+    .callout strong { font-size: 14px; }
+    .callout p { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .prompt-card { max-width: 540px; margin: 34px auto; padding: 26px; border: 1px solid var(--hair-light); background: var(--paper); border-radius: 18px; box-shadow: 0 16px 40px var(--shadow); }
+    .prompt-card .prompt-icon { width: 36px; height: 36px; border-radius: 50%; background: var(--ink2); color: var(--gold); display: grid; place-items: center; margin-bottom: 18px; }
+    .prompt-card h2 { margin-bottom: 8px; }
+    .prompt-card .prompt-copy { color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .possible-event { display: grid; grid-template-columns: 5px minmax(0, 1fr); gap: 12px; margin: 22px 0; padding: 13px 14px; background: rgba(204,192,168,.16); border-radius: 10px; }
+    .possible-event .bar { background: var(--deepgold); border-radius: 4px; }
+    .possible-event strong { display: block; font-size: 14px; }
+    .possible-event span { display: block; color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; margin-top: 4px; text-transform: uppercase; }
+    .prompt-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+    .prompt-actions .button.primary { margin-left: auto; }
+    .detail-head { display: flex; justify-content: space-between; gap: 20px; align-items: start; margin-bottom: 24px; }
+    .detail-meta { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+    .meta-pill { border: 1px solid var(--hair-light); border-radius: 999px; color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; padding: 6px 9px; text-transform: uppercase; }
+    .linked-box { display: grid; gap: 5px; border-top: 1px solid var(--hair-light); border-bottom: 1px solid var(--hair-light); padding: 16px 0; margin: 18px 0 24px; }
+    .linked-box .eyebrow { margin-bottom: 4px; }
+    .linked-box strong { font-size: 15px; }
+    .linked-box span { color: var(--muted); font: 10px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    .notes-placeholder { min-height: 220px; padding: 20px; border: 1px solid var(--hair-soft); border-radius: 12px; color: var(--muted); line-height: 1.8; }
+    .schedule-layout { display: grid; grid-template-columns: 180px minmax(0,1fr) 260px; gap: 0; border: 1px solid var(--hair-light); border-radius: var(--radius); overflow: hidden; min-height: 520px; }
+    .schedule-layout > * { padding: 20px; }
+    .schedule-sidebar { background: var(--beige); border-right: 1px solid var(--hair-soft); }
+    .schedule-sidebar .day { padding: 12px 0; border-bottom: 1px solid var(--hair-soft); }
+    .schedule-sidebar .day strong { display: block; font: 23px var(--display); }
+    .schedule-sidebar .day span { color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .schedule-main { background: var(--paper); }
+    .timeline { display: grid; gap: 0; margin-top: 16px; }
+    .timeline-row { display: grid; grid-template-columns: 55px 1fr; min-height: 84px; border-top: 1px solid var(--hair-soft); padding-top: 13px; }
+    .timeline-time { color: var(--muted); font: 10px var(--mono); }
+    .timeline-event { border-left: 3px solid var(--deepgold); padding: 0 0 16px 14px; }
+    .timeline-event.muted { border-left-color: var(--gold); opacity: .65; }
+    .timeline-event strong { display: block; font-size: 14px; }
+    .timeline-event span { color: var(--muted); display: block; font-size: 12px; margin-top: 5px; }
+    .schedule-side { border-left: 1px solid var(--hair-soft); background: rgba(255,255,255,.18); }
+    .side-section { display: grid; gap: 10px; margin-bottom: 22px; }
+    .side-section h3 { color: var(--muted); font: 10px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+    .mini-event { border: 1px solid var(--hair-soft); border-radius: 9px; padding: 11px; cursor: pointer; background: var(--paper); }
+    .mini-event:hover, .mini-event.selected { border-color: var(--deepgold); }
+    .mini-event strong { display: block; font-size: 12px; }
+    .mini-event span { display: block; color: var(--muted); font: 10px var(--mono); margin-top: 4px; }
+    .stack { display: grid; gap: 14px; }
+    .stack-card { border-top: 1px solid var(--hair-light); padding-top: 15px; display: grid; gap: 8px; }
+    .stack-card:first-child { border-top: 0; padding-top: 0; }
+    .stack-card strong { font: 20px var(--display); }
+    .stack-card p { color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .connect-hero { border: 1px solid var(--hair-light); border-radius: 18px; padding: 30px; background: var(--beige); display: grid; gap: 14px; }
+    .connect-hero p { color: var(--muted); font-size: 14px; max-width: 580px; line-height: 1.6; }
+    .provider-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .provider-choice { border: 1px solid var(--hair-light); border-radius: 11px; background: var(--paper); padding: 16px; text-align: left; cursor: pointer; color: var(--ink); }
+    .provider-choice:hover { border-color: var(--deepgold); }
+    .provider-choice strong { display: block; font-size: 13px; }
+    .provider-choice span { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .state-inspector { margin-top: 22px; border: 1px dashed var(--hair-light); border-radius: 10px; padding: 13px; background: rgba(255,255,255,.12); }
+    .state-inspector summary { cursor: pointer; color: var(--muted); font: 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+    .state-inspector pre { white-space: pre-wrap; color: var(--muted); font: 10px/1.55 var(--mono); margin: 12px 0 0; }
+    .action-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+    .toast { position: fixed; right: 22px; bottom: 76px; z-index: 42; max-width: 340px; padding: 12px 14px; background: var(--ink2); color: var(--paper); border-radius: 10px; box-shadow: 0 12px 30px var(--shadow); font-size: 12px; }
+    .toast strong { color: var(--gold); }
+    .proto-switcher { position: fixed; z-index: 100; bottom: 17px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; align-items: center; background: var(--ink2); color: var(--paper); border-radius: 999px; padding: 6px 8px; box-shadow: 0 10px 28px var(--shadow); }
+    .proto-switcher button { width: 29px; height: 29px; border: 0; border-radius: 50%; background: transparent; color: var(--paper); cursor: pointer; }
+    .proto-switcher button:hover { background: rgba(255,255,255,.12); }
+    .proto-switcher .label { min-width: 160px; text-align: center; font: 10px var(--mono); letter-spacing: .07em; text-transform: uppercase; }
+    .shortcut { color: var(--gold); font: 10px var(--mono); }
+    @media (max-width: 860px) {
+      .nav { width: 76px; flex-basis: 76px; padding-inline: 10px; }
+      .wordmark { font-size: 0; text-align: center; }
+      .wordmark::after { content: "K"; font: 22px var(--display); }
+      .nav-label, .nav button span, .nav-foot { display: none; }
+      .nav button { justify-content: center; }
+      .content { padding-inline: 22px; }
+      .grid, .schedule-layout { grid-template-columns: 1fr; }
+      .schedule-sidebar, .schedule-side { border: 0; border-bottom: 1px solid var(--hair-soft); }
+      .schedule-sidebar { display: flex; gap: 18px; overflow: auto; }
+      .schedule-sidebar .day { min-width: 100px; border: 0; }
+    }
+    @media (max-width: 560px) {
+      .topbar { padding-inline: 16px; }
+      .content { padding: 26px 16px 132px; }
+      .intro { display: grid; }
+      .provider-pair { grid-template-columns: 1fr; }
+      .event-row { grid-template-columns: 48px minmax(0,1fr); }
+      .event-chip { grid-column: 2; }
+      .prompt-actions .button.primary { margin-left: 0; }
+      .proto-switcher .label { min-width: 112px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="prototype-note"><strong>THROWAWAY PROTOTYPE</strong> · Calendar surfaces · click through the state, then switch variants with the bottom control</div>
+  <div id="app"></div>
+  <div id="toast" class="toast" hidden></div>
+  <div class="proto-switcher" aria-label="Prototype variant switcher">
+    <button data-variant-prev aria-label="Previous variant">←</button>
+    <div class="label" id="variant-label"></div>
+    <button data-variant-next aria-label="Next variant">→</button>
+  </div>
+
+  <script>
+    const variants = [
+      { key: 'A', name: 'Home rail' },
+      { key: 'B', name: 'Schedule cockpit' },
+      { key: 'C', name: 'Prompt first' },
+    ];
+    const events = [
+      { id: 'google-standup', provider: 'Google', time: '09:30–10:00', title: 'Product standup', meta: 'Work · today', timed: true },
+      { id: 'outlook-design', provider: 'Microsoft', time: '09:45–10:30', title: 'Design review', meta: 'Work · today', timed: true },
+      { id: 'google-holiday', provider: 'Google', time: 'ALL DAY', title: 'Company holiday', meta: 'Personal · today', timed: false },
+    ];
+    const state = {
+      screen: 'home',
+      connected: true,
+      sync: 'fresh',
+      selectedEventId: 'google-standup',
+      linkedEventId: null,
+      candidateMode: 'single',
+      pendingDisconnect: false,
+      outcome: 'Ready to explore the calendar flow.',
+      draft: false,
+    };
+
+    function getVariant() {
+      const raw = new URLSearchParams(location.search).get('variant');
+      return variants.some(v => v.key === raw) ? raw : 'A';
+    }
+    let variant = getVariant();
+    const variantInfo = () => variants.find(v => v.key === variant);
+    const selectedEvent = () => events.find(e => e.id === state.selectedEventId) || null;
+    const linkEvent = () => events.find(e => e.id === state.linkedEventId) || null;
+    const candidateEvents = () => state.candidateMode === 'multi' ? events.filter(e => e.timed) : events.filter(e => e.timed).slice(0, 1);
+
+    function esc(value) {
+      return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]));
+    }
+    function button(label, action, cls = '') {
+      return `<button class="button ${cls}" data-action="${action}">${label}</button>`;
+    }
+    function eventRow(event, compact = false) {
+      const selected = event.id === state.selectedEventId ? ' selected' : '';
+      const allDay = event.timed ? '' : ' all-day';
+      return `<button class="${compact ? 'mini-event' : 'event-row'}${selected}" data-event="${event.id}">
+        ${compact ? `<strong>${esc(event.title)}</strong><span>${esc(event.time)} · ${esc(event.provider)}</span>` : `<span class="event-time">${esc(event.time)}</span><span><span class="event-name">${esc(event.title)}</span><span class="event-meta">${esc(event.meta)} · ${esc(event.provider)}</span></span><span class="event-chip">${event.timed ? (event.id === state.selectedEventId ? 'SELECTED' : 'TIMED') : 'DISPLAY ONLY'}</span>`}
+      </button>`;
+    }
+    function statusMarkup() {
+      const disconnected = !state.connected;
+      const status = disconnected ? 'disconnected' : state.sync;
+      const cls = disconnected ? 'off' : state.sync === 'stale' ? 'stale' : '';
+      return `<div class="status-line"><i class="status-dot ${cls}"></i>${status} · ${disconnected ? 'credentials removed' : 'last refresh 4 min ago'}</div>`;
+    }
+    function nav(active) {
+      return `<aside class="nav">
+        <div class="wordmark">kimi <span>nola</span></div>
+        <div>
+          <div class="nav-label">Library</div>
+          <button class="${active === 'home' ? 'active' : ''}" data-action="home">⌂ <span>Home</span></button>
+          <button class="${active === 'prompt' ? 'active' : ''}" data-action="prompt">◌ <span>Meeting prompt</span></button>
+          <button class="${active === 'detail' ? 'active' : ''}" data-action="detail">▱ <span>Meeting detail</span></button>
+        </div>
+        <div>
+          <div class="nav-label">Control</div>
+          <button class="${active === 'settings' ? 'active' : ''}" data-action="settings">⚙ <span>Settings</span></button>
+        </div>
+        <div class="nav-spacer"></div>
+        <div class="nav-foot">LOCAL-FIRST<br>NOT RECORDING</div>
+      </aside>`;
+    }
+    function topbar(title, action = 'settings') {
+      return `<header class="topbar"><div><div class="eyebrow">${esc(title)}</div></div><div class="top-actions">${statusMarkup()} ${button('Reset flow', 'reset', 'quiet')}</div></header>`;
+    }
+    function stateInspector() {
+      const snapshot = {
+        screen: state.screen,
+        connected: state.connected,
+        sync: state.sync,
+        candidateMode: state.candidateMode,
+        selectedEvent: selectedEvent()?.id || null,
+        linkedEvent: linkEvent()?.id || null,
+        noteDraft: state.draft,
+        lastAction: state.outcome,
+      };
+      return `<details class="state-inspector"><summary>Prototype state after every action</summary><pre>${esc(JSON.stringify(snapshot, null, 2))}</pre></details>`;
+    }
+    function homeA() {
+      const hasEvents = state.connected && state.sync !== 'empty';
+      return `<div class="content">
+        <div class="intro"><div class="intro-copy"><div class="eyebrow">THURSDAY · AUGUST 24</div><h1>Coming up</h1><p>Upcoming events stay local. Choose one when you are ready to take notes or start a Meeting.</p></div>${button('Open settings', 'settings')}</div>
+        <div class="grid"><section class="panel paper"><div class="panel-title"><h2>Today</h2><small>LOCAL TIME · 8-DAY WINDOW</small></div>${hasEvents ? `<div class="event-list">${events.map(eventRow).join('')}</div><div class="action-row">${button('Show meeting prompt', 'prompt', 'primary')}${button('Refresh now', 'refresh')}</div>` : `<div class="empty"><strong>No current calendar view</strong>Connect an account or refresh the selected calendars.</div>${button('Connect calendar', 'connect', 'primary')}`}</section><aside class="panel"><div class="panel-title"><h3>Calendar connection</h3><small>${state.connected ? '2 CALENDARS' : 'OFF'}</small></div>${state.connected ? `<div class="account"><div class="account-row"><div class="provider-mark">G</div><div class="account-info"><strong>Google Calendar</strong><span>miker@example.com · 1 selected calendar</span></div><span class="event-chip">READY</span></div><div class="account-row"><div class="provider-mark">M</div><div class="account-info"><strong>Microsoft 365</strong><span>Work account · 1 selected calendar</span></div><span class="event-chip">READY</span></div></div>${button('Manage calendars', 'settings', 'quiet')}` : `<div class="empty"><strong>Calendar off</strong>Credentials are not connected.</div>${button('Connect Google or Microsoft', 'connect', 'primary')}`}</aside></div>${stateInspector()}</div>`;
+    }
+    function settingsA() {
+      return `<div class="content narrow"><div class="intro"><div class="intro-copy"><div class="eyebrow">SETTINGS · CALENDAR SYNC</div><h1>Keep the calendar close</h1><p>Read-only context for upcoming events. Calendar data never enters AI enhancement or starts recording by itself.</p></div>${button('Back home', 'home')}</div><div class="panel paper"><div class="panel-title"><h2>Accounts</h2><small>${state.connected ? 'CONNECTED' : 'DISCONNECTED'}</small></div>${state.connected ? `<div class="account"><div class="account-row"><div class="provider-mark">G</div><div class="account-info"><strong>Google Calendar</strong><span>miker@example.com</span></div>${button('Disconnect', 'disconnect', 'quiet')}</div><div class="field-line"><span>Selected calendars</span><span>Personal · Work</span></div><div class="field-line"><span>Refresh</span><span>Every 15 min · last 4 min ago</span></div><div class="field-line"><span>Prompt context</span><span>Fresh timed events only</span></div></div>` : `<div class="connect-hero"><h2>Connect a read-only calendar</h2><p>Use the provider's browser sign-in, then choose which calendars Kimi Nola may read.</p><div class="provider-pair"><button class="provider-choice" data-action="connect"><strong>G · Google Calendar</strong><span>Read calendar list and events</span></button><button class="provider-choice" data-action="connect"><strong>M · Microsoft 365 / Outlook</strong><span>Read calendar list and events</span></button></div></div>`}${state.pendingDisconnect ? `<div class="callout" style="margin-top:18px"><strong>What should happen to local calendar data?</strong><p>Credentials are removed either way. Choose whether stale local history remains.</p><div class="action-row">${button('Disconnect and keep data', 'keep', 'primary')}${button('Disconnect and delete data', 'erase', 'danger')}</div></div>` : ''}</div>${state.connected ? `<div class="panel" style="margin-top:18px"><div class="panel-title"><h3>Sync health</h3><small>PER CALENDAR</small></div><div class="field-stack"><div class="field-line"><span>Work calendar</span><span>${state.sync === 'fresh' ? 'Fresh · 4 min ago' : 'Stale · reconnect or refresh'}</span></div><div class="field-line"><span>Personal calendar</span><span>${state.sync === 'fresh' ? 'Fresh · 4 min ago' : 'Stale · reconnect or refresh'}</span></div></div><div class="action-row">${button('Refresh now', 'refresh', 'primary')}${button(state.sync === 'fresh' ? 'Simulate stale state' : 'Restore fresh state', 'toggle-stale')}</div></div>` : ''}${stateInspector()}</div>`;
+    }
+    function promptA() {
+      const candidates = candidateEvents();
+      const event = selectedEvent() || candidates[0];
+      return `<div class="content narrow"><div class="intro"><div class="intro-copy"><div class="eyebrow">MEETING PRESENCE · EVENT-AWARE</div><h1>One clear question</h1><p>The calendar adds context only after local app and audio evidence agree.</p></div>${button('Back home', 'home')}</div><div class="prompt-card"><div class="prompt-icon">◌</div><h2>You may be in a meeting.</h2><p class="prompt-copy">Kimi Nola is not recording. Want to jot notes?</p>${state.connected && state.sync === 'fresh' ? `<div class="possible-event"><div class="bar"></div><div><strong>Possible event: ${esc(event.title)}</strong><span>${esc(event.time)} · ${esc(event.provider)}${state.candidateMode === 'multi' ? ' · CHOOSE BEFORE RECORDING' : ''}</span></div></div>${state.candidateMode === 'multi' ? `<div class="event-list">${candidates.map(eventRow).join('')}</div>` : ''}` : `<div class="callout" style="margin-top:18px"><strong>No fresh event context</strong><p>The generic prompt remains available. Nothing will be linked unless you choose an event later.</p></div>`}<div class="prompt-actions">${button('Jot notes', 'jot')}${button('Not now', 'home', 'quiet')}${state.connected && state.sync === 'fresh' ? button('Start recording', 'start-recording', 'primary') : button('Start without calendar event', 'start-without-event', 'primary')}</div></div><div class="action-row">${button(state.candidateMode === 'multi' ? 'Use one candidate' : 'Simulate competing events', 'toggle-candidates')}${button(state.sync === 'fresh' ? 'Make event stale' : 'Restore fresh event', 'toggle-stale')}</div>${stateInspector()}</div>`;
+    }
+    function detailA() {
+      const linked = linkEvent();
+      return `<div class="content narrow"><div class="detail-head"><div><div class="eyebrow">MEETING DETAIL · JUST NOW</div><h1>${state.draft ? 'Untitled note draft' : 'Product standup'}</h1><div class="detail-meta"><span class="meta-pill">${state.draft ? 'NOTE DRAFT' : 'MEETING'}</span><span class="meta-pill">LOCAL</span></div></div>${button('Back home', 'home')}</div>${linked ? `<div class="linked-box"><div class="eyebrow">LINKED EVENT SNAPSHOT</div><strong>${esc(linked.title)}</strong><span>${esc(linked.provider)} · ${esc(linked.time)} · snapshot confirmed</span><div class="action-row">${button('Unlink event', 'unlink', 'quiet')}${button('Choose another', 'prompt')}</div></div>` : `<div class="callout"><strong>${state.draft ? 'Standalone notes' : 'No calendar event linked'}</strong><p>${state.draft ? 'Jot notes does not attach calendar context. Start a Meeting later if you want a link.' : 'This Meeting can still be renamed or linked later from the detail view.'}</p>${!state.draft ? button('Link an event', 'prompt', 'primary') : ''}</div>`}<div class="notes-placeholder">My notes<br><br><span>Transcript and notes would appear here in the real Meeting detail view.</span></div>${stateInspector()}</div>`;
+    }
+
+    function homeB() {
+      return `<div class="content"><div class="intro"><div class="intro-copy"><div class="eyebrow">THURSDAY · AUGUST 24 · SCHEDULE</div><h1>Schedule cockpit</h1><p>A denser work surface for people who want the calendar to be the organizing spine.</p></div>${button('Calendar settings', 'settings')}</div><div class="schedule-layout"><aside class="schedule-sidebar"><div class="eyebrow">AUGUST</div><div class="day"><strong>24</strong><span>Thursday · today</span></div><div class="day"><strong>25</strong><span>Friday</span></div><div class="day"><strong>26</strong><span>Saturday</span></div><div class="day"><strong>27</strong><span>Sunday</span></div></aside><section class="schedule-main"><div class="panel-title"><h2>Today’s timeline</h2><small>WINDOW · 8 DAYS</small></div><div class="timeline"><div class="timeline-row"><span class="timeline-time">09:30</span><button class="timeline-event" data-event="google-standup"><strong>Product standup</strong><span>Google · Work · 30 min · select to preview</span></button></div><div class="timeline-row"><span class="timeline-time">09:45</span><button class="timeline-event" data-event="outlook-design"><strong>Design review</strong><span>Microsoft · Work · overlaps standup</span></button></div><div class="timeline-row"><span class="timeline-time">12:00</span><button class="timeline-event muted" data-event="google-holiday"><strong>Company holiday</strong><span>All day · display only</span></button></div></div><div class="action-row">${button('Open event chooser', 'prompt', 'primary')}${button('Refresh now', 'refresh')}</div></section><aside class="schedule-side"><div class="side-section"><h3>Selected event</h3>${eventRow(selectedEvent() || events[0], true)}</div><div class="side-section"><h3>Meeting state</h3><div class="callout"><strong>Local evidence required</strong><p>Calendar time helps choose context. App and audio signals still decide whether a prompt appears.</p></div></div>${button('Show prompt', 'prompt', 'primary')}</aside></div>${stateInspector()}</div>`;
+    }
+    function settingsB() {
+      return `<div class="content"><div class="intro"><div class="intro-copy"><div class="eyebrow">SETTINGS · SOURCES</div><h1>Calendar sources</h1><p>Connection and selection are treated as a source-management workspace.</p></div>${button('Back to schedule', 'home')}</div><div class="grid"><section class="panel paper"><div class="panel-title"><h2>Connected accounts</h2><small>${state.connected ? '2 SOURCES' : 'NONE'}</small></div>${state.connected ? `<div class="stack"><div class="stack-card"><strong>Google Calendar</strong><p>miker@example.com<br>Personal selected · Work selected</p>${state.pendingDisconnect ? `<div class="action-row">${button('Keep local data', 'keep', 'primary')}${button('Delete local data', 'erase', 'danger')}</div>` : button('Disconnect', 'disconnect', 'quiet')}</div><div class="stack-card"><strong>Microsoft 365</strong><p>Work account<br>Work selected</p>${button('Manage selection', 'noop', 'quiet')}</div></div>` : `<div class="connect-hero"><h2>No accounts connected</h2><p>Connect one or more read-only providers, then choose calendars individually.</p>${button('Connect provider', 'connect', 'primary')}</div>`}</section><aside class="panel"><div class="panel-title"><h3>Refresh contract</h3><small>READ ONLY</small></div><div class="field-stack"><div class="field-line"><span>Cadence</span><span>15 min + jitter</span></div><div class="field-line"><span>Freshness</span><span>30 min</span></div><div class="field-line"><span>Window</span><span>Today + 7 days</span></div><div class="field-line"><span>Prompt use</span><span>Fresh timed only</span></div></div></aside></div>${stateInspector()}</div>`;
+    }
+    function promptB() {
+      const eventsForChooser = candidateEvents();
+      return `<div class="content"><div class="intro"><div class="intro-copy"><div class="eyebrow">PROMPT · SELECT THEN START</div><h1>Choose your context</h1><p>The cockpit makes ambiguity visible before recording begins.</p></div>${button('Back to schedule', 'home')}</div><div class="grid"><section class="panel paper"><div class="panel-title"><h2>Possible events</h2><small>${state.candidateMode === 'multi' ? '2 CANDIDATES' : '1 CANDIDATE'}</small></div><div class="event-list">${eventsForChooser.map(eventRow).join('')}</div><div class="action-row">${button('Jot notes', 'jot')}${button('Not now', 'home', 'quiet')}${button('Start recording', 'start-recording', 'primary')}</div></section><aside class="panel"><div class="callout"><strong>You may be in a meeting.</strong><p>Kimi Nola is not recording. Select an event if one is correct, then Start recording to confirm it.</p></div><div class="action-row">${button('Start without event', 'start-without-event')}${button('Simulate stale state', 'toggle-stale')}</div></aside></div>${stateInspector()}</div>`;
+    }
+    function detailB() {
+      const linked = linkEvent();
+      return `<div class="content"><div class="intro"><div class="intro-copy"><div class="eyebrow">MEETING · LINKED CONTEXT</div><h1>${linked ? linked.title : 'Product standup'}</h1><p>${linked ? 'The calendar snapshot is visible beside the saved Meeting, without changing the calendar.' : 'This Meeting has no linked calendar event.'}</p></div>${button('Back to schedule', 'home')}</div><div class="grid"><section class="panel paper"><div class="panel-title"><h2>My notes</h2><small>RECORDING COMPLETE</small></div><div class="notes-placeholder">Meeting notes and transcript stay in the main content area.<br><br><span>Calendar context is local metadata only and is not included in Note enhancement.</span></div></section><aside class="panel">${linked ? `<div class="linked-box"><div class="eyebrow">SNAPSHOT</div><strong>${esc(linked.title)}</strong><span>${esc(linked.provider)} · ${esc(linked.time)}</span><div class="action-row">${button('Unlink', 'unlink')}${button('Relink', 'prompt', 'quiet')}</div></div>` : `<div class="callout"><strong>No linked event</strong><p>Explicitly choose one from the event chooser if needed.</p>${button('Choose event', 'prompt', 'primary')}</div>`}</aside></div>${stateInspector()}</div>`;
+    }
+
+    function homeC() {
+      return `<div class="content narrow"><div class="intro"><div class="intro-copy"><div class="eyebrow">HOME · QUIET BY DEFAULT</div><h1>Today, gently.</h1><p>Calendar context stays close to the recording moment instead of becoming a second calendar app.</p></div>${button('Settings', 'settings')}</div><div class="stack"><section class="stack-card"><div class="eyebrow">NEXT UP</div><strong>${esc(selectedEvent()?.title || 'No fresh event')}</strong><p>${selectedEvent() ? `${esc(selectedEvent().time)} · ${esc(selectedEvent().provider)} · fresh context` : 'Connect a calendar to see upcoming context.'}</p><div class="action-row">${selectedEvent() ? button('Start from this event', 'prompt', 'primary') : button('Connect calendar', 'connect', 'primary')}${button('View all today', 'prompt', 'quiet')}</div></section><section class="stack-card"><div class="eyebrow">LOCAL DETECTOR</div><strong>Not recording</strong><p>When two local signals agree, Kimi Nola may ask a single question. Calendar alone stays quiet.</p>${button('Open meeting prompt', 'prompt')}</section><section class="stack-card"><div class="eyebrow">RECENT</div><strong>Product standup</strong><p>Just now · Meeting detail with optional linked context.</p>${button('Open detail', 'detail', 'quiet')}</section></div>${stateInspector()}</div>`;
+    }
+    function settingsC() {
+      return `<div class="content narrow"><div class="intro"><div class="intro-copy"><div class="eyebrow">SETTINGS · PRIVACY</div><h1>Calendar boundaries</h1><p>A short set of decisions, with the data boundary visible before connection.</p></div>${button('Back home', 'home')}</div><div class="stack"><section class="stack-card"><div class="eyebrow">CONNECTION</div><strong>${state.connected ? 'Connected sources' : 'Nothing connected'}</strong><p>${state.connected ? 'Google Calendar · Microsoft 365 · selected calendars are managed below.' : 'Read-only browser sign-in. Choose calendars after connecting.'}</p>${state.connected ? button('Disconnect', 'disconnect') : button('Connect a provider', 'connect', 'primary')}</section><section class="stack-card"><div class="eyebrow">SYNC CONTRACT</div><strong>15 min · 30 min fresh</strong><p>Current day plus seven days. Failed refreshes keep stale data visible. Calendar data stays local and never enters Note enhancement.</p><div class="field-line"><span>Sync status</span><span>${state.connected ? state.sync : 'disconnected'}</span></div>${state.connected ? button('Refresh now', 'refresh', 'quiet') : ''}</section><section class="stack-card"><div class="eyebrow">CALENDAR SELECTION</div><strong>Choose sources, not everything</strong><p>Only explicitly selected calendars are read. Deselecting offers a keep-or-delete choice for local data.</p>${state.connected ? button('Review selections', 'home', 'quiet') : ''}</section></div>${state.pendingDisconnect ? `<div class="callout" style="margin-top:22px"><strong>Keep or delete local data?</strong><p>Credentials are removed either way. Retained events become stale and never prompt.</p><div class="action-row">${button('Keep stale history', 'keep', 'primary')}${button('Delete local calendar data', 'erase', 'danger')}</div></div>` : ''}${stateInspector()}</div>`;
+    }
+    function promptC() {
+      const event = selectedEvent();
+      return `<div class="content narrow"><div class="prompt-card"><div class="eyebrow">MEETING PRESENCE · QUESTION</div><div class="prompt-icon">◌</div><h2>You may be in a meeting.</h2><p class="prompt-copy">Kimi Nola is not recording.</p>${state.connected && state.sync === 'fresh' && event ? `<div class="possible-event"><div class="bar"></div><div><strong>Possible event: ${esc(event.title)}</strong><span>${esc(event.time)} · ${esc(event.provider)}</span></div></div>` : `<div class="callout" style="margin-top:18px"><strong>No fresh event context</strong><p>You can still start a Meeting without linking a calendar event.</p></div>`}<div class="prompt-actions">${button('Jot notes', 'jot')}${button('Not now', 'home', 'quiet')}${state.connected && state.sync === 'fresh' && event ? button('Start recording', 'start-recording', 'primary') : button('Start without event', 'start-without-event', 'primary')}</div></div><div class="action-row">${button('Choose another event', 'toggle-candidates')}${button('Back home', 'home', 'quiet')}</div>${stateInspector()}</div>`;
+    }
+    function detailC() {
+      const linked = linkEvent();
+      return `<div class="content narrow"><div class="eyebrow">MEETING DETAIL</div><h1 style="margin-top:8px">Product standup</h1>${linked ? `<div class="linked-box"><div class="eyebrow">CALENDAR SNAPSHOT</div><strong>${esc(linked.title)}</strong><span>${esc(linked.provider)} · ${esc(linked.time)} · explicit link</span>${button('Unlink or relink', 'prompt', 'quiet')}</div>` : `<div class="callout" style="margin-top:20px"><strong>No event linked</strong><p>Calendar context is optional and can be added explicitly.</p>${button('Link an event', 'prompt', 'primary')}</div>`}<div class="notes-placeholder" style="margin-top:22px">My notes and transcript<br><br><span>Simple detail view keeps calendar metadata secondary to the Meeting itself.</span></div>${stateInspector()}</div>`;
+    }
+
+    function render() {
+      const active = state.screen;
+      let body = '';
+      if (variant === 'A') {
+        body = active === 'home' ? homeA() : active === 'settings' ? settingsA() : active === 'prompt' ? promptA() : detailA();
+      } else if (variant === 'B') {
+        body = active === 'home' ? homeB() : active === 'settings' ? settingsB() : active === 'prompt' ? promptB() : detailB();
+      } else {
+        body = active === 'home' ? homeC() : active === 'settings' ? settingsC() : active === 'prompt' ? promptC() : detailC();
+      }
+      document.getElementById('app').innerHTML = `<div class="shell">${nav(active)}<main class="main">${topbar(variantInfo().name)}${body}</main></div>`;
+      document.getElementById('variant-label').textContent = `${variant} · ${variantInfo().name}`;
+      document.documentElement.dataset.theme = localStorage.getItem('kiminola-calendar-proto-theme') || 'light';
+      bind();
+    }
+    function setVariant(next) {
+      variant = next;
+      const url = new URL(location.href);
+      url.searchParams.set('variant', variant);
+      history.replaceState({}, '', url);
+      render();
+    }
+    function toast(message) {
+      const el = document.getElementById('toast');
+      el.innerHTML = `<strong>State changed</strong><br>${esc(message)}`;
+      el.hidden = false;
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => (el.hidden = true), 2400);
+    }
+    function act(action) {
+      if (action === 'home') state.screen = 'home';
+      if (action === 'settings') state.screen = 'settings';
+      if (action === 'prompt') state.screen = 'prompt';
+      if (action === 'detail') state.screen = 'detail';
+      if (action === 'connect') { state.connected = true; state.sync = 'fresh'; state.pendingDisconnect = false; state.outcome = 'Connected read-only provider; selected calendars are fresh.'; }
+      if (action === 'disconnect') { state.pendingDisconnect = true; state.outcome = 'Waiting for the user to choose whether local calendar data is retained.'; }
+      if (action === 'keep') { state.connected = false; state.sync = 'stale'; state.pendingDisconnect = false; state.outcome = 'Disconnected; credentials removed; stale local history retained.'; }
+      if (action === 'erase') { state.connected = false; state.sync = 'empty'; state.pendingDisconnect = false; state.linkedEventId = null; state.outcome = 'Disconnected; local calendar cache and links erased.'; }
+      if (action === 'refresh') { if (state.connected) { state.sync = 'fresh'; state.outcome = 'All selected calendars refreshed independently.'; } else state.outcome = 'Refresh unavailable until a provider reconnects.'; }
+      if (action === 'toggle-stale') { state.sync = state.sync === 'fresh' ? 'stale' : 'fresh'; state.outcome = state.sync === 'fresh' ? 'Calendar cache restored to fresh.' : 'Calendar cache marked stale; prompts must fall back to generic.'; }
+      if (action === 'toggle-candidates') { state.candidateMode = state.candidateMode === 'single' ? 'multi' : 'single'; state.outcome = state.candidateMode === 'multi' ? 'Two overlapping timed candidates are now visible.' : 'One candidate is now selected.'; }
+      if (action === 'start-recording') { if (state.connected && state.sync === 'fresh' && selectedEvent()) { state.linkedEventId = state.selectedEventId; state.draft = false; state.screen = 'detail'; state.outcome = `Recording started; ${selectedEvent().title} explicitly linked.`; } else state.outcome = 'Event is unavailable; choose Start without calendar event or cancel.'; }
+      if (action === 'start-without-event') { state.linkedEventId = null; state.draft = false; state.screen = 'detail'; state.outcome = 'Recording started without a calendar link.'; }
+      if (action === 'jot') { state.linkedEventId = null; state.draft = true; state.screen = 'detail'; state.outcome = 'Standalone Note draft created; no calendar link attached.'; }
+      if (action === 'unlink') { state.linkedEventId = null; state.outcome = 'Calendar snapshot unlinked; Meeting remains saved.'; }
+      if (action === 'reset') { Object.assign(state, { screen: 'home', connected: true, sync: 'fresh', selectedEventId: 'google-standup', linkedEventId: null, candidateMode: 'single', pendingDisconnect: false, outcome: 'Flow reset.' , draft: false }); }
+      if (action === 'noop') state.outcome = 'Prototype-only control; no state mutation wired.';
+      toast(state.outcome);
+      render();
+    }
+    function bind() {
+      document.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', () => act(el.dataset.action)));
+      document.querySelectorAll('[data-event]').forEach(el => el.addEventListener('click', () => {
+        state.selectedEventId = el.dataset.event;
+        state.outcome = `Selected ${selectedEvent()?.title || 'event'} for explicit confirmation.`;
+        toast(state.outcome);
+        render();
+      }));
+      document.querySelector('[data-variant-prev]').addEventListener('click', () => {
+        const i = variants.findIndex(v => v.key === variant);
+        setVariant(variants[(i + variants.length - 1) % variants.length].key);
+      });
+      document.querySelector('[data-variant-next]').addEventListener('click', () => {
+        const i = variants.findIndex(v => v.key === variant);
+        setVariant(variants[(i + 1) % variants.length].key);
+      });
+    }
+    document.addEventListener('keydown', e => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable) return;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const i = variants.findIndex(v => v.key === variant);
+        const delta = e.key === 'ArrowRight' ? 1 : -1;
+        setVariant(variants[(i + variants.length + delta) % variants.length].key);
+      }
+      if (e.key.toLowerCase() === 'd') { document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('kiminola-calendar-proto-theme', document.documentElement.dataset.theme); }
+    });
+    render();
+  </script>
+</body>
+</html>
