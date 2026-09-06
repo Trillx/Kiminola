@@ -1,20 +1,17 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { createMeetingNotesAutosave, loadMeetingAfterAutosave } from "$lib/meeting-notes";
+  import { loadMeetingAfterAutosave } from "$lib/meeting-notes";
+  import { meetingNotesAutosave as notesAutosave } from "$lib/meeting-notes-session";
+  import { exportMeeting, type MeetingExportAction } from "$lib/meeting-export";
   import { page } from "$app/state";
-  import { registerUpdateGuard, registerPendingSave } from "$lib/pending-work";
+  import { registerUpdateGuard } from "$lib/pending-work";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
     getMeeting,
-    updateNotes,
     renameMeeting,
     getLlmConfig,
     listTemplates,
     enhanceMeeting,
-    exportNotesMarkdown,
-    exportTranscriptText,
-    saveNotesExport,
-    saveTranscriptExport,
     updateSegmentText,
     deleteSegment,
     type MeetingDetail,
@@ -39,15 +36,15 @@
   let notes = $state("");
   let showTranscriptFinalizationWarning = $state(false);
   let notesSaveError = $state(false);
-  const notesAutosave = createMeetingNotesAutosave(updateNotes, (status) => {
+  const unsubscribeNotes = notesAutosave.subscribe((status) => {
     notesSaveError = status === "error";
   });
-  const disposeNotesSave = registerPendingSave(() => notesAutosave.flush());
   let enhancementVersion = 0;
   onDestroy(() => {
     enhancementVersion++;
     clearTimeout(renderTimer);
-    disposeNotesSave();
+    unsubscribeNotes();
+    void notesAutosave.flush().catch((error) => console.error("Failed to save notes:", error));
   });
 
   // Inline title editing
@@ -120,7 +117,7 @@
     enhancing = true;
     enhanceError = null;
     try {
-      await notesAutosave.flush();
+      await notesAutosave.flush(id);
       if (version !== enhancementVersion) return;
       enhancedMd = "";
       enhancedHtml = "";
@@ -247,7 +244,6 @@
   }
 
   // Export (SPEC §8): clipboard copy + .md notes / .txt transcript.
-  type ExportAction = "copy-notes" | "copy-transcript" | "save-notes" | "save-transcript";
   let exportStatus = $state<string | null>(null);
   let exportSavedPath = $state<string | null>(null);
   let exportTimer: ReturnType<typeof setTimeout> | undefined;
@@ -262,27 +258,12 @@
     }, 5000);
   }
 
-  async function runExport(action: ExportAction) {
+  async function runExport(action: MeetingExportAction) {
     if (!meeting) return;
     const id = meeting.id;
     try {
-      await notesAutosave.flush();
-      switch (action) {
-        case "copy-notes":
-          await navigator.clipboard.writeText(await exportNotesMarkdown(id));
-          flashExportStatus("Notes copied to clipboard.");
-          break;
-        case "copy-transcript":
-          await navigator.clipboard.writeText(await exportTranscriptText(id));
-          flashExportStatus("Transcript copied to clipboard.");
-          break;
-        case "save-notes":
-          flashExportStatus("Notes saved.", await saveNotesExport(id));
-          break;
-        case "save-transcript":
-          flashExportStatus("Transcript saved.", await saveTranscriptExport(id));
-          break;
-      }
+      const result = await exportMeeting(action, id);
+      flashExportStatus(result.message, result.path ?? null);
     } catch (err) {
       flashExportStatus(`Export failed: ${String(err)}`);
     }
@@ -491,7 +472,7 @@
               class="notes-textarea"
             />
             {#if notesSaveError}
-              <p role="alert">Some edits could not be saved. Retry saving before closing this page.</p>
+              <p role="alert">Some edits could not be saved. Retry saving before quitting Kimi Nola.</p>
               <Button variant="secondary" onclick={() => void notesAutosave.flush().catch((error) => console.error("Failed to save notes:", error))}>
                 Retry saving
               </Button>

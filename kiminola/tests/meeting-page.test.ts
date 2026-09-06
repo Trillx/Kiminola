@@ -33,11 +33,6 @@ function pageController(overrides: Record<string, unknown> = {}) {
     registerPendingSave: () => () => {},
     registerUpdateGuard: () => () => {},
     loadMeetingAfterAutosave,
-    createMeetingNotesAutosave: (save: (id: number, text: string) => Promise<void>, status: (value: string) => void) => {
-      const saver = createMeetingNotesAutosave(save, status, 60_000);
-      savers.push(saver);
-      return saver;
-    },
     updateNotes: async (_id: number, text: string) => { stored = text; },
     enhanceMeeting: async () => { observed.push(stored); },
     onLlmChunk: async () => () => {},
@@ -52,6 +47,14 @@ function pageController(overrides: Record<string, unknown> = {}) {
     clearTimeout,
     ...overrides,
   };
+  const notesAutosave = createMeetingNotesAutosave(adapters.updateNotes, () => {}, 60_000);
+  savers.push(notesAutosave);
+  const exportSource = ts.transpileModule(readFileSync(new URL("../src/lib/meeting-export.ts", import.meta.url), "utf8"), {
+    compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
+  }).outputText.replace(/^import[\s\S]*?from\s+["\x27][^"\x27]+["\x27];\s*/gm, "").replace(/^export /gm, "");
+  const exportAdapters = { ...adapters, meetingNotesAutosave: notesAutosave };
+  const exportMeeting = new Function(...Object.keys(exportAdapters), exportSource + "\nreturn exportMeeting;")(...Object.values(exportAdapters));
+  const pageAdapters = { ...adapters, notesAutosave, exportMeeting };
   // Run the actual page script and handlers with controlled IPC and rune adapters.
   // Scheduling effects explicitly lets the tests reproduce route and load ordering.
   const component = readFileSync(new URL("../src/routes/meeting/[id]/+page.svelte", import.meta.url), "utf8");
@@ -59,11 +62,11 @@ function pageController(overrides: Record<string, unknown> = {}) {
   const source = ts.transpileModule(script, {
     compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
   }).outputText.replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "").replace(/^export \{\};?\s*$/gm, "");
-  const api = new Function(...Object.keys(adapters), `${source}\nreturn {
+  const api = new Function(...Object.keys(pageAdapters), `${source}\nreturn {
     edit(text) { notes = text; onNotesInput(); },
     runExport, runEnhancement,
     state() { return { meeting, notes, notFound, enhancing, enhanceError, exportStatus }; }
-  };`)(...Object.values(adapters));
+  };`)(...Object.values(pageAdapters));
   return {
     ...api, route, observed,
     load: () => effects[0](),
