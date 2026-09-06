@@ -29,3 +29,17 @@ All run from `kiminola/`:
 - Backend: Rust. ASR via sherpa-onnx C API (in-process); audio via windows-rs WASAPI loopback + cpal mic; rubato resampling; Silero VAD via ort; sqlx + SQLite (bundled) with migrations; LLM via a narrow ChatProvider seam (OpenAI-compatible, streaming SSE); keys via `keyring`.
 - MVP scope is fixed in SPEC.md §8 — don't add features outside it without a new decision.
 - No usage analytics ever; crash reporting is opt-in only.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs for this repo live in GitHub Issues and are managed with `gh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default Matt Pocock triage labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo. Read `CONTEXT.md` before exploring domain behavior and record architectural decisions lazily in `docs/adr/`. See `docs/agents/domain.md`.
