@@ -11,6 +11,7 @@ mod recording;
 mod recording_session;
 mod resampler;
 mod shortcuts;
+mod startup_coordination;
 mod window_layout;
 // Parked for now: sherpa-onnx endpointing drives the transcript, so nothing
 // consumes VAD output yet. Kept compiled for reuse (e.g. a speaking indicator).
@@ -19,59 +20,47 @@ mod vad;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use startup_coordination::{
+    coordinate_startup, emit_local_diagnostic, StartupCoordination, StartupCoordinationConfig,
+    WindowsStartupMutex,
+};
 use tauri::{Emitter, Manager};
 
-#[cfg(target_os = "windows")]
-struct StartupLock(isize);
+// The real-process harness opts into this PID file so it can wait for `.setup()`
+// deterministically before sending native window messages.
+fn signal_startup_test_ready() {
+    let Some(path) = std::env::var_os("KIMINOLA_STARTUP_TEST_READY_FILE") else {
+        return;
+    };
+    if let Err(error) = std::fs::write(&path, std::process::id().to_string()) {
+        eprintln!(
+            "[startup-test] could not write setup readiness signal to {}: {error}",
+            std::path::Path::new(&path).display()
+        );
+    }
+}
 
-#[cfg(target_os = "windows")]
-impl StartupLock {
-    fn acquire() -> Result<Self, String> {
-        use windows::core::w;
-        use windows::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
-        use windows::Win32::System::Threading::{
-            CreateMutexW, WaitForSingleObject, INFINITE,
-        };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationIntent {
+    Ordinary,
+    Background,
+}
 
-        let handle = unsafe {
-            CreateMutexW(
-                None,
-                false,
-                w!("Local\\com.kiminola.app-startup-lock"),
-            )
-        }
-        .map_err(|error| format!("could not create startup lock: {error}"))?;
-
-        let wait_result = unsafe { WaitForSingleObject(handle, INFINITE) };
-        if wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED {
-            Ok(Self(handle.0 as isize))
+impl ActivationIntent {
+    fn from_args(args: &[String]) -> Self {
+        if args.iter().any(|arg| arg == "--background") {
+            Self::Background
         } else {
-            let _ = unsafe { CloseHandle(handle) };
-            Err(format!("could not acquire startup lock: {wait_result:?}"))
+            Self::Ordinary
         }
     }
 }
 
-#[cfg(target_os = "windows")]
-impl Drop for StartupLock {
-    fn drop(&mut self) {
-        use windows::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows::Win32::System::Threading::ReleaseMutex;
-
-        let handle = HANDLE(self.0 as _);
-        let _ = unsafe { ReleaseMutex(handle) };
-        let _ = unsafe { CloseHandle(handle) };
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-struct StartupLock;
-
-#[cfg(not(target_os = "windows"))]
-impl StartupLock {
-    fn acquire() -> Result<Self, String> {
-        Ok(Self)
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationDecision {
+    ShowNow,
+    Queued,
+    Ignored,
 }
 
 #[derive(Default)]
@@ -81,38 +70,44 @@ struct ActivationState {
 }
 
 impl ActivationState {
-    fn request(&self) -> bool {
+    fn request(&self, intent: ActivationIntent) -> ActivationDecision {
+        if intent == ActivationIntent::Background {
+            return ActivationDecision::Ignored;
+        }
+
         self.requested.store(true, Ordering::SeqCst);
-        self.setup_complete.load(Ordering::SeqCst)
+        let setup_complete = self.setup_complete.load(Ordering::SeqCst);
+        if setup_complete && self.requested.swap(false, Ordering::SeqCst) {
+            ActivationDecision::ShowNow
+        } else {
+            ActivationDecision::Queued
+        }
     }
 
     fn finish_setup(&self) -> bool {
         self.setup_complete.store(true, Ordering::SeqCst);
         self.requested.swap(false, Ordering::SeqCst)
     }
-
-    fn mark_handled(&self) {
-        self.requested.store(false, Ordering::SeqCst);
-    }
-}
-
-fn should_activate_existing_instance(args: &[String]) -> bool {
-    !args.iter().any(|arg| arg == "--background")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let startup_lock = StartupLock::acquire().expect("could not coordinate application startup");
+    let startup_mutex = WindowsStartupMutex;
+    let startup_config = StartupCoordinationConfig::default();
+    let startup_coordination = coordinate_startup(&startup_mutex, &startup_config);
+    match &startup_coordination {
+        StartupCoordination::Coordinated(_lease) => {}
+        StartupCoordination::Degraded(diagnostic) => emit_local_diagnostic(diagnostic),
+    }
 
     let app = tauri::Builder::default()
         .manage(ActivationState::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            if should_activate_existing_instance(&args) {
-                let state = app.state::<ActivationState>();
-                if state.request() {
-                    meeting_presence::show_main_window(app);
-                    state.mark_handled();
-                }
+            let intent = ActivationIntent::from_args(&args);
+            let state = app.state::<ActivationState>();
+            let decision = state.request(intent);
+            if decision == ActivationDecision::ShowNow {
+                meeting_presence::show_main_window(app);
             }
         }))
         .manage(shortcuts::ShortcutState::new())
@@ -157,6 +152,7 @@ pub fn run() {
             if app.state::<ActivationState>().finish_setup() {
                 meeting_presence::show_main_window(app.handle());
             }
+            signal_startup_test_ready();
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -248,7 +244,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    drop(startup_lock);
+    drop(startup_coordination);
     app.run(|_, _| {});
 }
 
@@ -291,52 +287,54 @@ mod windows_test_runtime {
 
 #[cfg(test)]
 mod startup_wiring_tests {
-    use super::{should_activate_existing_instance, ActivationState};
+    use super::{ActivationDecision, ActivationIntent, ActivationState};
 
     #[test]
-    fn activation_before_setup_is_replayed_after_setup() {
+    fn ordinary_activation_before_setup_is_replayed_after_setup() {
         let state = ActivationState::default();
 
-        assert!(!state.request());
+        assert_eq!(
+            state.request(ActivationIntent::Ordinary),
+            ActivationDecision::Queued
+        );
         assert!(state.finish_setup());
     }
 
     #[test]
-    fn ordinary_second_launch_activates_existing_instance() {
-        let args = vec!["kiminola.exe".to_string()];
+    fn ordinary_activation_after_setup_shows_immediately() {
+        let state = ActivationState::default();
+        assert!(!state.finish_setup());
 
-        assert!(should_activate_existing_instance(&args));
-    }
-
-    #[test]
-    fn background_second_launch_keeps_existing_instance_hidden() {
-        let args = vec!["kiminola.exe".to_string(), "--background".to_string()];
-
-        assert!(!should_activate_existing_instance(&args));
-    }
-
-    #[test]
-    fn bootstrap_registers_single_instance_first() {
-        let manifest = include_str!("../Cargo.toml");
-        let source = include_str!("lib.rs");
-        let dependency = ["tauri-plugin-single-", "instance"].concat();
-        let registration = [".plugin(tauri_plugin_single_", "instance::init"].concat();
-        let plugin_prefix = [".plu", "gin("].concat();
-
-        assert!(
-            manifest.contains(&dependency),
-            "the single-instance plugin must be a runtime dependency"
-        );
-
-        let registration_index = source
-            .find(&registration)
-            .expect("the app builder must register the single-instance plugin");
-        let first_plugin_index = source
-            .find(&plugin_prefix)
-            .expect("the app builder must register at least one plugin");
         assert_eq!(
-            registration_index, first_plugin_index,
-            "the single-instance plugin must be registered first"
+            state.request(ActivationIntent::Ordinary),
+            ActivationDecision::ShowNow
+        );
+    }
+
+    #[test]
+    fn background_activation_is_ignored_before_and_after_setup() {
+        let state = ActivationState::default();
+
+        assert_eq!(
+            state.request(ActivationIntent::Background),
+            ActivationDecision::Ignored
+        );
+        assert!(!state.finish_setup());
+        assert_eq!(
+            state.request(ActivationIntent::Background),
+            ActivationDecision::Ignored
+        );
+    }
+
+    #[test]
+    fn activation_intent_is_derived_from_relaunch_arguments() {
+        assert_eq!(
+            ActivationIntent::from_args(&["kiminola.exe".to_string()]),
+            ActivationIntent::Ordinary
+        );
+        assert_eq!(
+            ActivationIntent::from_args(&["kiminola.exe".to_string(), "--background".to_string(),]),
+            ActivationIntent::Background
         );
     }
 }

@@ -82,6 +82,19 @@ jobs:
           cargo test --lib --target '${{ matrix.target }}' db
           if ($LASTEXITCODE -ne 0) { throw 'Database safety tests failed.' }
 
+      # Hosted windows-latest is x64, so execute the native process tests there.
+      # The ARM64 matrix still compiles the same code in the installer build below;
+      # runtime evidence for ARM64 must come from a native ARM64 runner.
+      - name: Test startup coordination and activation
+        if: matrix.arch == 'x64'
+        working-directory: kiminola/src-tauri
+        run: |
+          $env:PATH = "$env:SHERPA_ONNX_LIB_DIR;$env:PATH"
+          cargo test --target '${{ matrix.target }}' --lib startup_coordination
+          if ($LASTEXITCODE -ne 0) { throw 'Startup coordination tests failed.' }
+          cargo test --target '${{ matrix.target }}' --lib startup_wiring_tests
+          if ($LASTEXITCODE -ne 0) { throw 'Startup activation tests failed.' }
+
       - name: Build unsigned CI installer
         working-directory: kiminola
         run: |
@@ -90,3 +103,9 @@ jobs:
           npm.cmd run tauri build -- `
             --target '${{ matrix.target }}' `
             --config src-tauri/tauri.ci.conf.json
+
+      - name: Test startup PID and window behavior
+        if: matrix.arch == 'x64'
+        working-directory: kiminola
+        shell: pwsh
+        run: ./scripts/startup-behavior.test.ps1 -Executable 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe' -TimeoutSeconds 30
