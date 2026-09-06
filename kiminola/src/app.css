@@ -71,8 +71,9 @@
 
   --max-width: 760px;
 
-  /* Runtime-updated from the layout ($effect) when the sidebar collapses */
+  /* CSS owns both the persisted preference and compact viewport geometry. */
   --sidebar-width: 240px;
+  --shell-motion: 0ms;
 
   /* shadcn-svelte theme mapping — source of truth stays with Oatwave tokens above */
   --background: var(--canvas);
@@ -321,7 +322,7 @@ h1, h2, h3 {
   bottom: 0;
   left: 0;
   z-index: 100;
-  transition: width 200ms ease, padding 200ms ease;
+  transition: width var(--shell-motion) ease, padding var(--shell-motion) ease;
   overflow: hidden;
 }
 
@@ -334,20 +335,18 @@ h1, h2, h3 {
   display: none;
 }
 
-/* Automatic compact shell for a narrow companion window. This is driven by
-   the viewport, while the user's persisted sidebar preference remains intact. */
-html[data-compact-window="true"] .sidebar {
-  width: 0;
-  padding: 20px 0 16px;
-  border-right: none;
+html[data-sidebar-collapsed="true"] {
+  --sidebar-width: 0px;
 }
 
-html[data-compact-window="true"] .sidebar > *:not(.sidebar-collapse-btn) {
-  display: none;
+html[data-sidebar-motion="true"] {
+  --shell-motion: 200ms;
 }
 
-html[data-compact-window="true"] .sidebar-collapse-btn {
-  left: 16px;
+@media (prefers-reduced-motion: reduce) {
+  html[data-sidebar-motion="true"] {
+    --shell-motion: 0ms;
+  }
 }
 
 /* Floating edge collapse button (stays visible when collapsed) */
@@ -368,7 +367,7 @@ html[data-compact-window="true"] .sidebar-collapse-btn {
   justify-content: center;
   font-size: 14px;
   box-shadow: 0 2px 8px var(--shadow-ambient);
-  transition: left 200ms ease, background 180ms ease, border-color 180ms ease;
+  transition: left var(--shell-motion) ease, background 180ms ease, border-color 180ms ease;
 }
 
 .app.sidebar-collapsed .sidebar-collapse-btn {
@@ -616,7 +615,7 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  transition: margin-left 200ms ease;
+  transition: margin-left var(--shell-motion) ease;
 }
 
 .main-content {
@@ -948,7 +947,7 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
   color: var(--text-muted);
   cursor: pointer;
   box-shadow: 0 4px 16px var(--shadow-paper);
-  transition: background 180ms ease, border-color 180ms ease, left 200ms ease;
+  transition: background 180ms ease, border-color 180ms ease, left var(--shell-motion) ease;
   font-family: inherit;
 }
 
@@ -983,7 +982,7 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
   cursor: pointer;
   box-shadow: 0 6px 24px var(--shadow-paper);
   font-family: inherit;
-  transition: left 200ms ease, background 180ms ease, border-color 180ms ease;
+  transition: left var(--shell-motion) ease, background 180ms ease, border-color 180ms ease;
   animation: stripIn 200ms ease-out;
 }
 
@@ -1053,7 +1052,7 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
   flex-direction: column;
   overflow: hidden;
   animation: sheetIn 200ms ease-out;
-  transition: left 200ms ease;
+  transition: left var(--shell-motion) ease;
 }
 
 @keyframes sheetIn {
@@ -1817,7 +1816,7 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
   gap: 10px;
   box-shadow: 0 4px 20px var(--shadow-paper);
   z-index: 900;
-  transition: left 200ms ease;
+  transition: left var(--shell-motion) ease, width var(--shell-motion) ease;
 }
 
 .bottom-bar .mic-btn {
@@ -1871,11 +1870,31 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
   font-size: 11px;
   color: var(--soft);
   z-index: 899;
-  transition: left 200ms ease;
+  transition: left var(--shell-motion) ease;
 }
 
 /* === Narrow companion window === */
 @media (max-width: 760px) {
+  :root,
+  html[data-sidebar-collapsed],
+  html[data-sidebar-motion="true"] {
+    --sidebar-width: 0px;
+    --shell-motion: 0ms;
+  }
+
+  .sidebar {
+    padding: 20px 0 16px;
+    border-right: none;
+  }
+
+  .sidebar > *:not(.sidebar-collapse-btn) {
+    display: none;
+  }
+
+  .sidebar-collapse-btn {
+    left: 16px;
+  }
+
   .main-content {
     padding: 24px 20px 100px;
   }

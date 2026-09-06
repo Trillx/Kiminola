@@ -468,6 +468,8 @@
               <strong>Update ready to install.</strong>
               <span>Kimi Nola will close and restart after installation.</span>
             </div>
+          {:else if updateState.status === "preparing"}
+            <div class="model-status" aria-live="polite">Saving your changes before updating…</div>
           {:else if updateState.status === "installing"}
             <div class="model-status" aria-live="polite">
               Installing the update. Kimi Nola will restart automatically.
@@ -488,13 +490,16 @@
             </div>
           {/if}
 
+          {#if updateState.error && updateState.status !== "error"}
+            <p class="model-status error" role="alert">{updateState.error}</p>
+          {/if}
           <div class="config-actions">
             {#if updateState.status === "available"}
               <Button onclick={() => void installAppUpdate()}>Install update</Button>
               <Button variant="outline" onclick={() => void checkForUpdates()}>Check again</Button>
             {:else if updateState.status === "ready"}
               <Button onclick={() => void installAppUpdate()}>Restart and update</Button>
-            {:else if updateState.status !== "downloading" && updateState.status !== "installing"}
+            {:else if updateState.status !== "downloading" && updateState.status !== "preparing" && updateState.status !== "installing"}
               <Button variant="outline" onclick={() => void checkForUpdates()}>
                 {updateState.status === "error" ? "Try again" : "Check for updates"}
               </Button>

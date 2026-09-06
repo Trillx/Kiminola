@@ -5,3 +5,7 @@ build/
 *.log
 .DS_Store
 .scratch/kiminola/spike/models/nemotron/*.onnx
+
+# Local worktrees and database validation copies must stay on this machine.
+.worktrees/
+.scratch/bugfix-validation/

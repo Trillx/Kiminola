@@ -3,18 +3,21 @@
 //! `%LOCALAPPDATA%\Kiminola\data\kiminola.db`, migrated on first use.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(test)]
+use crate::db_safety::init_pool;
+use crate::db_safety::{Database, DatabaseStatus};
+#[cfg(test)]
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use tauri::{Manager, State};
-use tokio::sync::OnceCell;
 
-/// Pool behind a `OnceCell` so app setup never blocks on file IO; the first
-/// command (or the launch-time warm-up in `setup`) opens and migrates the DB.
+/// Shared startup and recovery boundary. Failed initialization stays blocked
+/// until the user retries or restores through the recovery screen.
 pub struct DbState {
-    pub(crate) pool: Arc<OnceCell<SqlitePool>>,
+    pub(crate) pool: Arc<Database>,
 }
 
 /// `%LOCALAPPDATA%\Kiminola\data\kiminola.db`, falling back to a `data/`
@@ -33,36 +36,38 @@ fn db_path() -> Result<PathBuf, String> {
     Ok(dir.join("data").join("kiminola.db"))
 }
 
-async fn init_pool(path: &Path) -> Result<SqlitePool, String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create data dir: {e}"))?;
-    }
-    // One connection: a single writer is all this app has, and it sidesteps
-    // SQLite "database is locked" errors on Windows.
-    let options = SqliteConnectOptions::new()
-        .filename(path)
-        .create_if_missing(true);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-        .map_err(|e| format!("failed to open database: {e}"))?;
-    if let Err(error) = crate::migrations::run(&pool).await {
-        pool.close().await;
-        return Err(format!("migration failed: {error}"));
-    }
-    Ok(pool)
+pub(crate) async fn ensure_pool(database: &Database) -> Result<SqlitePool, String> {
+    database.pool().await
 }
 
-pub(crate) async fn ensure_pool(cell: &OnceCell<SqlitePool>) -> Result<SqlitePool, String> {
-    cell.get_or_try_init(|| async {
-        let path = db_path()?;
-        let pool = init_pool(&path).await?;
-        eprintln!("[db] opened {}", path.display());
-        Ok(pool)
-    })
-    .await
-    .cloned()
+#[tauri::command]
+pub async fn database_status(state: State<'_, DbState>) -> Result<DatabaseStatus, String> {
+    Ok(state.pool.status().await)
+}
+
+#[tauri::command]
+pub async fn retry_database(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+) -> Result<DatabaseStatus, String> {
+    state.pool.retry().await?;
+    let status = state.pool.status().await;
+    if status.ready {
+        state.pool.prepare_restart().await?;
+        app.restart();
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn restore_database_backup(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    backup: String,
+) -> Result<(), String> {
+    state.pool.restore(&backup).await?;
+    state.pool.prepare_restart().await?;
+    app.restart();
 }
 
 fn now_iso() -> String {
@@ -269,12 +274,11 @@ pub async fn set_onboarding_complete(
 /* ---------- core logic (testable without Tauri state) ---------- */
 
 async fn default_space_id_impl(pool: &SqlitePool) -> Result<i64, String> {
-    if let Some(value) = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM settings WHERE key = 'default_space_id'",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?
+    if let Some(value) =
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = 'default_space_id'")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?
     {
         if let Ok(id) = value.parse::<i64>() {
             if sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
@@ -390,14 +394,13 @@ pub(crate) async fn save_meeting_with_location_impl(
     location: Option<LibraryLocation>,
 ) -> Result<i64, String> {
     if let Some(draft_id) = note_draft_id {
-        let attached_meeting = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT meeting_id FROM note_drafts WHERE id = ?",
-        )
-        .bind(draft_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "note draft not found".to_string())?;
+        let attached_meeting =
+            sqlx::query_scalar::<_, Option<i64>>("SELECT meeting_id FROM note_drafts WHERE id = ?")
+                .bind(draft_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "note draft not found".to_string())?;
         if let Some(meeting_id) = attached_meeting {
             // The previous save committed but its IPC response may have been
             // lost. Treat the attached draft as the idempotency key so a UI
@@ -807,8 +810,8 @@ pub(crate) async fn update_note_draft_recovery_impl(
     transcript: &[NewSegment],
     location: Option<&LibraryLocation>,
 ) -> Result<(), String> {
-    let transcript_json =
-        serde_json::to_string(transcript).map_err(|e| format!("encode recovery transcript: {e}"))?;
+    let transcript_json = serde_json::to_string(transcript)
+        .map_err(|e| format!("encode recovery transcript: {e}"))?;
     let location_json = encode_library_location(location)?;
     let rows = sqlx::query(
         "UPDATE note_drafts SET raw_markdown = ?, recovery_duration_seconds = ?,
@@ -971,9 +974,7 @@ async fn list_library_tree_impl(pool: &SqlitePool) -> Result<Vec<LibraryNode>, S
         child_spaces.entry(parent_id).or_default().push(row.id);
     }
 
-    let root_space_id = child_spaces
-        .get(&None)
-        .and_then(|ids| ids.first().copied());
+    let root_space_id = child_spaces.get(&None).and_then(|ids| ids.first().copied());
     let mut meetings_by_space: HashMap<i64, Vec<i64>> = HashMap::new();
     let mut meetings_by_parent: HashMap<i64, Vec<i64>> = HashMap::new();
     for row in &meeting_rows {
@@ -990,10 +991,16 @@ async fn list_library_tree_impl(pool: &SqlitePool) -> Result<Vec<LibraryNode>, S
                     row.id, parent_id
                 ));
             }
-            meetings_by_parent.entry(parent_id).or_default().push(row.id);
+            meetings_by_parent
+                .entry(parent_id)
+                .or_default()
+                .push(row.id);
         } else if let Some(space_id) = row.space_id.or(root_space_id) {
             if !spaces.contains_key(&space_id) {
-                return Err(format!("Meeting {} references missing Space {}", row.id, space_id));
+                return Err(format!(
+                    "Meeting {} references missing Space {}",
+                    row.id, space_id
+                ));
             }
             meetings_by_space.entry(space_id).or_default().push(row.id);
         } else {
@@ -1057,10 +1064,7 @@ async fn move_library_node_impl(
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        (
-            LibraryLocation::Space { id },
-            Some(LibraryLocation::Space { id: destination_id }),
-        ) => {
+        (LibraryLocation::Space { id }, Some(LibraryLocation::Space { id: destination_id })) => {
             let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM spaces WHERE id = ?")
                 .bind(id)
                 .fetch_optional(&mut *tx)
@@ -1108,10 +1112,7 @@ async fn move_library_node_impl(
         (LibraryLocation::Meeting { .. }, None) => {
             return Err("Meetings can only move into Spaces or Meetings".to_string());
         }
-        (
-            LibraryLocation::Meeting { id },
-            Some(LibraryLocation::Space { id: destination_id }),
-        ) => {
+        (LibraryLocation::Meeting { id }, Some(LibraryLocation::Space { id: destination_id })) => {
             let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM meetings WHERE id = ?")
                 .bind(id)
                 .fetch_optional(&mut *tx)
@@ -1626,7 +1627,7 @@ pub async fn search_meetings(
 /// Helper used by `lib.rs` to install DB state and warm the pool at launch.
 pub fn setup(app: &mut tauri::App) {
     let state = DbState {
-        pool: Arc::new(OnceCell::new()),
+        pool: Arc::new(Database::new(db_path())),
     };
     let cell = Arc::clone(&state.pool);
     app.manage(state);
@@ -1640,6 +1641,49 @@ pub fn setup(app: &mut tauri::App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn upgrading_an_existing_database_creates_a_backup() {
+        let path = std::env::temp_dir()
+            .join(format!(
+                "kiminola-upgrade-regression-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            ))
+            .join("kiminola.db");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        let mut baseline = sqlx::migrate!("./migrations");
+        baseline.migrations = std::borrow::Cow::Owned(baseline.migrations[..1].to_vec());
+        baseline.run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO settings(key,value) VALUES('upgrade-fixture','preserve')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let upgraded = init_pool(&path).await.unwrap();
+        upgraded.close().await;
+        assert!(
+            path.parent().unwrap().join("backups").is_dir(),
+            "existing data must be backed up before migration"
+        );
+        let directory = path.parent().unwrap();
+        assert!(directory.starts_with(std::env::temp_dir()));
+        assert!(directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("kiminola-upgrade-regression-"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     async fn test_pool(name: &str) -> (SqlitePool, PathBuf) {
         let path = std::env::temp_dir().join(format!(
@@ -1747,7 +1791,7 @@ mod tests {
         pool.close().await;
         let error = init_pool(&path).await.unwrap_err();
         assert!(
-            error.contains("migration 1 was previously applied but has been modified"),
+            error.contains("Migration 1 history does not match this app"),
             "{error}"
         );
         std::fs::remove_file(path).unwrap();
@@ -1867,9 +1911,14 @@ mod tests {
         .bind(now_iso())
         .execute(&pool)
         .await;
-        assert!(invalid_raw_insert.is_err(), "database must enforce one location");
+        assert!(
+            invalid_raw_insert.is_err(),
+            "database must enforce one location"
+        );
 
-        let parent = get_meeting_impl(&pool, parent_id).await.expect("get parent");
+        let parent = get_meeting_impl(&pool, parent_id)
+            .await
+            .expect("get parent");
         assert_eq!(parent.space_name.as_deref(), Some("Work"));
         assert_eq!(parent.location_path.as_deref(), Some("Work"));
         assert_eq!(parent.notepad, "parent notes");
@@ -1880,7 +1929,10 @@ mod tests {
         let grandchild = get_meeting_impl(&pool, grandchild_id)
             .await
             .expect("get grandchild");
-        assert_eq!(grandchild.location_path.as_deref(), Some("Work / Planning / Follow-up"));
+        assert_eq!(
+            grandchild.location_path.as_deref(),
+            Some("Work / Planning / Follow-up")
+        );
 
         let tree = list_library_tree_impl(&pool).await.expect("list tree");
         let tree_json = serde_json::to_string(&tree).expect("serialize tree");
@@ -1898,13 +1950,18 @@ mod tests {
         )
         .await
         .expect("move child to Space");
-        let child = get_meeting_impl(&pool, child_id).await.expect("get moved child");
+        let child = get_meeting_impl(&pool, child_id)
+            .await
+            .expect("get moved child");
         assert_eq!(child.space_name.as_deref(), Some("Engineering"));
         assert_eq!(child.location_path.as_deref(), Some("Work / Engineering"));
         let grandchild = get_meeting_impl(&pool, grandchild_id)
             .await
             .expect("get moved grandchild");
-        assert_eq!(grandchild.location_path.as_deref(), Some("Work / Engineering / Follow-up"));
+        assert_eq!(
+            grandchild.location_path.as_deref(),
+            Some("Work / Engineering / Follow-up")
+        );
 
         // Space reparenting changes the computed path without changing the
         // direct Meeting container.
@@ -1918,7 +1975,10 @@ mod tests {
         let child = get_meeting_impl(&pool, child_id)
             .await
             .expect("get reparented child");
-        assert_eq!(child.location_path.as_deref(), Some("Personal / Engineering"));
+        assert_eq!(
+            child.location_path.as_deref(),
+            Some("Personal / Engineering")
+        );
 
         move_library_node_impl(&pool, LibraryLocation::Space { id: engineering_id }, None)
             .await
@@ -1943,7 +2003,9 @@ mod tests {
         )
         .await
         .expect("move child under parent Meeting");
-        let child = get_meeting_impl(&pool, child_id).await.expect("get nested child");
+        let child = get_meeting_impl(&pool, child_id)
+            .await
+            .expect("get nested child");
         assert_eq!(child.parent_meeting_id, Some(parent_id));
         assert_eq!(child.location_path.as_deref(), Some("Work / Planning"));
 
@@ -2027,7 +2089,13 @@ mod tests {
             .await
             .expect("list drafts")
             .is_empty());
-        assert_eq!(list_meetings_impl(&pool).await.expect("list meetings").len(), 1);
+        assert_eq!(
+            list_meetings_impl(&pool)
+                .await
+                .expect("list meetings")
+                .len(),
+            1
+        );
         assert_eq!(
             get_note_draft_impl(&pool, draft_id)
                 .await
@@ -2076,7 +2144,10 @@ mod tests {
         rename_space_impl(&pool, default_id, "Home")
             .await
             .expect("rename default Space");
-        assert_eq!(default_space_id_impl(&pool).await.expect("default Space"), default_id);
+        assert_eq!(
+            default_space_id_impl(&pool).await.expect("default Space"),
+            default_id
+        );
 
         drop(pool);
         let _ = std::fs::remove_file(path);

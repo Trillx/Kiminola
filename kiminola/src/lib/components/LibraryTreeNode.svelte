@@ -1,10 +1,14 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { slide } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import { ContextMenu } from "bits-ui";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import EllipsisVertical from "@lucide/svelte/icons/ellipsis-vertical";
   import FileText from "@lucide/svelte/icons/file-text";
   import Folder from "@lucide/svelte/icons/folder";
+  import FolderOpen from "@lucide/svelte/icons/folder-open";
   import FolderPlus from "@lucide/svelte/icons/folder-plus";
   import Move from "@lucide/svelte/icons/move";
   import Pencil from "@lucide/svelte/icons/pencil";
@@ -56,6 +60,16 @@
   let location = $derived(nodeRef(node));
   let key = $derived(nodeKey(location));
   let isCollapsed = $derived(!!collapsed[key]);
+  let hasChildren = $derived(node.children.length > 0);
+  let label = $derived(node.kind === "space" ? node.name : node.title);
+  let reducedMotion = $state(false);
+  onMount(() => {
+    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => { reducedMotion = preference.matches; };
+    update();
+    preference.addEventListener("change", update);
+    return () => preference.removeEventListener("change", update);
+  });
   let isDropTarget = $derived(
     !!draggingNode && dropTarget?.kind === location.kind && dropTarget.id === location.id,
   );
@@ -86,18 +100,30 @@
   }
 
   function handleTriggerKeydown(event: KeyboardEvent) {
-    if (event.key === "Enter" && node.kind === "space") {
+    // Buttons own Enter/Space. Never handle a descendant's key a second time.
+    if (!(event.target instanceof Element) || event.target.closest(".library-node-actions")) return;
+    if (event.key === "ArrowRight" && (hasChildren || node.kind === "space")) {
       event.preventDefault();
-      onToggle(location);
+      event.stopPropagation();
+      if (isCollapsed) onToggle(location);
+      else document.getElementById(`library-children-${node.kind}-${node.id}`)
+        ?.querySelector<HTMLElement>(".library-node-main")?.focus();
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      event.stopPropagation();
+      if ((hasChildren || node.kind === "space") && !isCollapsed) onToggle(location);
+      else event.target.closest(".library-node")
+        ?.parentElement?.closest(".library-node")?.querySelector<HTMLElement>(".library-node-main")?.focus();
     }
   }
 </script>
 
+<div class="library-node" class:nested={depth > 0} role="listitem" style={`--tree-depth: ${depth}`}>
 <ContextMenu.Root>
   <ContextMenu.Trigger
     class="library-node-trigger"
-    role="treeitem"
-    tabindex={0}
+    role="group"
+    tabindex={-1}
     aria-label={node.kind === "space" ? `Space: ${node.name}` : `Meeting: ${node.title}`}
     onkeydown={handleTriggerKeydown}
   >
@@ -109,7 +135,6 @@
       class:drop-invalid={!!draggingNode && !isValidDropTarget}
       role="presentation"
       draggable="true"
-      style={`--tree-depth: ${depth}`}
       ondragstart={handleDragStart}
       ondragover={handleDragOver}
       ondrop={handleDrop}
@@ -118,18 +143,34 @@
       {#if node.kind === "space"}
         <button
           class="library-node-main"
-          class:collapsed={isCollapsed}
           type="button"
           aria-expanded={!isCollapsed}
+          aria-controls={`library-children-${node.kind}-${node.id}`}
+          title={label}
           onclick={() => onToggle(location)}
         >
-          <ChevronRight class="library-node-chevron" size={13} strokeWidth={1.8} />
-          <Folder class="library-node-icon space-icon" size={15} strokeWidth={1.7} />
+          <span class="library-disclosure" class:expanded={!isCollapsed}>
+            <ChevronRight size={13} strokeWidth={1.8} />
+          </span>
+          <span class="library-node-icon space-icon">
+            {#if isCollapsed}<Folder size={15} strokeWidth={1.7} />{:else}<FolderOpen size={15} strokeWidth={1.7} />{/if}
+          </span>
           <span class="library-node-label">{node.name}</span>
         </button>
       {:else}
-        <a class="library-node-main" href={`/meeting/${node.id}`} onclick={() => onOpenMeeting(node.id)}>
-          <FileText class="library-node-icon" size={15} strokeWidth={1.7} />
+        {#if hasChildren}
+          <button class="library-disclosure meeting-disclosure" class:expanded={!isCollapsed}
+            type="button" aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${label}`}
+            aria-expanded={!isCollapsed} aria-controls={`library-children-${node.kind}-${node.id}`}
+            onclick={() => onToggle(location)}>
+            <ChevronRight size={13} strokeWidth={1.8} />
+          </button>
+        {:else}
+          <span class="library-disclosure" aria-hidden="true"></span>
+        {/if}
+        <a class="library-node-main meeting-main" href={`/meeting/${node.id}`} title={label}
+          aria-current={pathname === `/meeting/${node.id}` ? "page" : undefined}>
+          <span class="library-node-icon"><FileText size={15} strokeWidth={1.7} /></span>
           <span class="library-node-label">{node.title}</span>
         </a>
       {/if}
@@ -181,8 +222,13 @@
       </DropdownMenu.Root>
     </div>
 
-    {#if !isCollapsed}
-      <div class="library-node-children">
+  </ContextMenu.Trigger>
+
+  <div id={`library-children-${node.kind}-${node.id}`}>
+    {#if !isCollapsed && (hasChildren || node.kind === "space")}
+      <div class="library-node-children" role="list" aria-label={`Contents of ${label}`}
+        inert={isCollapsed} aria-hidden={isCollapsed}
+        transition:slide={{ duration: reducedMotion ? 0 : 180, easing: cubicOut }}>
         {#each node.children as child (nodeKey(nodeRef(child)))}
           <LibraryTreeNode
             node={child}
@@ -204,9 +250,12 @@
             {onDragEnd}
           />
         {/each}
+        {#if !hasChildren}
+          <div class="library-node-empty" role="listitem">Empty Space</div>
+        {/if}
       </div>
     {/if}
-  </ContextMenu.Trigger>
+  </div>
 
   <ContextMenu.Portal>
     <ContextMenu.Content class="library-context-menu">
@@ -242,24 +291,55 @@
     </ContextMenu.Content>
   </ContextMenu.Portal>
 </ContextMenu.Root>
+</div>
 
 <style>
-  .library-node-trigger {
+  .library-node {
+    position: relative;
+    min-width: 0;
+  }
+
+  .library-node.nested::before,
+  .library-node.nested:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    left: calc(16px + (var(--tree-depth) - 1) * 18px);
+    pointer-events: none;
+    border-left: 1px solid var(--hairline);
+  }
+
+  .library-node.nested::before {
+    top: 0;
+    width: 6px;
+    height: 17px;
+    border-bottom: 1px solid var(--hairline);
+    border-bottom-left-radius: 4px;
+  }
+
+  .library-node.nested:not(:last-child)::after {
+    top: 0;
+    bottom: 0;
+  }
+
+  :global(.library-node-trigger) {
     display: block;
     border-radius: 8px;
     outline: none;
   }
 
-  .library-node-trigger:focus-visible {
-    box-shadow: 0 0 0 2px var(--brand);
+  .library-node-main:focus-visible,
+  .meeting-disclosure:focus-visible,
+  .library-node-actions:focus-visible {
+    outline: 2px solid var(--text-muted);
+    outline-offset: -2px;
   }
 
   .library-node-row {
     display: flex;
     align-items: center;
     min-width: 0;
-    min-height: 32px;
-    padding: 2px 2px 2px calc(4px + var(--tree-depth) * 14px);
+    min-height: 34px;
+    padding: 2px 2px 2px calc(4px + var(--tree-depth) * 18px);
     border-radius: 8px;
     transition: background 150ms ease, box-shadow 150ms ease, opacity 150ms ease;
   }
@@ -292,8 +372,8 @@
     align-items: center;
     min-width: 0;
     flex: 1;
-    gap: 7px;
-    padding: 5px 4px;
+    gap: 6px;
+    padding: 4px 0;
     border: 0;
     border-radius: 6px;
     background: transparent;
@@ -306,26 +386,49 @@
   }
 
   .library-node-main:hover {
-    color: var(--brand-deep);
+    color: var(--ink);
   }
 
-  .library-node-chevron {
-    flex: 0 0 13px;
+  .library-disclosure {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 24px;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
     color: var(--text-muted);
-    transition: transform 150ms ease;
   }
 
-  :global(.library-node-main.collapsed) .library-node-chevron {
-    transform: rotate(-90deg);
+  .library-disclosure :global(svg) {
+    transition: transform 180ms cubic-bezier(0.215, 0.61, 0.355, 1);
+  }
+
+  .library-disclosure.expanded :global(svg) {
+    transform: rotate(90deg);
+  }
+
+  .meeting-disclosure { cursor: pointer; }
+  .meeting-disclosure:hover { background: var(--surface-elev); }
+  .meeting-main { margin-left: 6px; }
+
+  .library-node-empty {
+    padding: 5px 6px 7px calc(34px + (var(--tree-depth) + 1) * 18px);
+    color: var(--text-muted);
+    font-size: 11px;
   }
 
   .library-node-icon {
+    display: inline-flex;
     flex: 0 0 15px;
     color: var(--text-muted);
   }
 
   .library-node-icon.space-icon {
-    color: var(--brand-deep);
+    color: var(--text-muted);
   }
 
   .library-node-label {
@@ -354,7 +457,7 @@
 
   .library-node-row:hover .library-node-actions,
   .library-node-row:focus-within .library-node-actions,
-  :global(.library-node-trigger:focus) .library-node-actions,
+  .library-node-actions[data-state="open"],
   .library-node-actions:focus-visible {
     opacity: 1;
   }
@@ -366,6 +469,12 @@
 
   .library-node-children {
     display: block;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .library-node-row,
+    .library-node-actions,
+    .library-disclosure :global(svg) { transition: none; }
   }
 
   :global(.library-menu),

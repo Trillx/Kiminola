@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from "$app/state";
+  import { noteSaver } from "$lib/note-saves";
   import { goto } from "$app/navigation";
   import {
     deleteNoteDraft,
@@ -13,9 +14,7 @@
   let draft = $state<NoteDraftDetail | null>(null);
   let notes = $state("");
   let loaded = $state(false);
-  let saving = $state(false);
   let status = $state("");
-  let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
   function durationLabel(seconds: number): string {
     const minutes = Math.floor(seconds / 60);
@@ -40,34 +39,24 @@
 
   function onNotesInput() {
     if (!draft || draft.meeting_id !== null) return;
+    const id = draft.id;
     status = "Saving…";
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(async () => {
-      try {
-        saving = true;
-        await updateNoteDraft(draft!.id, notes);
-        status = "Saved";
-      } catch (err) {
-        status = "Could not save";
-        console.error("Failed to save note draft:", err);
-      } finally {
-        saving = false;
-      }
-    }, 500);
+    noteSaver(`draft:${id}`, (text) => updateNoteDraft(id, text), (next) => {
+      status = next === "saved" ? "Saved" : next === "error" ? "Could not save" : "Saving…";
+    }).schedule(notes);
   }
 
   async function startRecording() {
     if (!draft) return;
-    clearTimeout(saveTimer);
-    if (notes !== draft.raw_markdown) {
-      await updateNoteDraft(draft.id, notes);
-    }
+    const id = draft.id;
+    await noteSaver(`draft:${id}`, (text) => updateNoteDraft(id, text)).flush(notes);
     await goto(`/record?draft=${draft.id}`);
   }
 
   async function removeDraft() {
     if (!draft || !window.confirm("Delete this note draft?")) return;
-    clearTimeout(saveTimer);
+    const id = draft.id;
+    await noteSaver(`draft:${id}`, (text) => updateNoteDraft(id, text)).flushPending();
     await deleteNoteDraft(draft.id);
     await goto("/");
   }
@@ -112,7 +101,7 @@
       <div class="my-notes-card draft-card">
         <div class="notepad-header">
           <span class="notepad-label">My notes</span>
-          <span class="save-status">{saving ? "Saving…" : status}</span>
+          <span class="save-status">{status}</span>
         </div>
         <Textarea
           bind:value={notes}

@@ -154,6 +154,15 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: .\scripts\prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
 
+      - name: Test database upgrade and recovery
+        if: matrix.arch == 'x64'
+        working-directory: kiminola/src-tauri
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:SHERPA_ONNX_LIB_DIR;$env:PATH"
+          cargo test --lib --target '${{ matrix.target }}' db
+          if ($LASTEXITCODE -ne 0) { throw 'Database safety tests failed.' }
+
       - name: Build and upload draft release assets
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:

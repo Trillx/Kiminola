@@ -1,7 +1,9 @@
 import { browser } from "$app/environment";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { updateProgress } from "$lib/update-policy";
+import { flushPendingWork } from "$lib/pending-work";
+import { installWhenSaved } from "$lib/update-safety";
 
 export type UpdateStatus =
   | "idle"
@@ -9,6 +11,7 @@ export type UpdateStatus =
   | "available"
   | "downloading"
   | "ready"
+  | "preparing"
   | "installing"
   | "up_to_date"
   | "error";
@@ -40,6 +43,7 @@ export const updateState = $state<UpdateState>({
 let candidate: Update | null = null;
 let automaticCheckStarted = false;
 let currentOperation: Promise<unknown> | null = null;
+let installation: Promise<boolean> | null = null;
 
 const AUTOMATIC_CHECK_DELAY_MS = 2_000;
 
@@ -98,6 +102,7 @@ export function startAutomaticUpdateCheck() {
 
 export async function checkForUpdates(): Promise<void> {
   if (!updaterRuntimeAvailable()) return;
+  if (installation) return;
   if (currentOperation) {
     await currentOperation;
     return;
@@ -163,10 +168,15 @@ export async function downloadUpdate(): Promise<boolean> {
 }
 
 /** Download explicitly, then install only if the caller still allows shutdown. */
-export async function installUpdate(canInstall: () => boolean): Promise<boolean> {
+export function installUpdate(canInstall: () => boolean): Promise<boolean> {
+  if (installation) return installation;
+  installation = runInstallation(canInstall).finally(() => { installation = null; });
+  return installation;
+}
+
+async function runInstallation(canInstall: () => boolean): Promise<boolean> {
   if (!updaterRuntimeAvailable() || !candidate) return false;
   if (!canInstall()) {
-    updateState.status = "ready";
     updateState.error = "Finish and save the current meeting before installing the update.";
     return false;
   }
@@ -178,13 +188,25 @@ export async function installUpdate(canInstall: () => boolean): Promise<boolean>
     return false;
   }
 
-  updateState.status = "installing";
+  const downloaded = candidate;
+  updateState.status = "preparing";
   updateState.error = null;
   try {
-    await candidate.install();
+    await installWhenSaved({
+      flush: flushPendingWork,
+      prepare: async () => {
+        if (!canInstall()) throw new Error("Finish and save the current meeting before updating.");
+        await invoke("prepare_app_update");
+      },
+      install: async () => {
+        updateState.status = "installing";
+        await downloaded.install();
+      },
+      cancel: () => invoke("cancel_app_update"),
+    });
     return true;
   } catch (error) {
-    updateState.status = "error";
+    updateState.status = "ready";
     updateState.error = errorMessage(error);
     return false;
   }

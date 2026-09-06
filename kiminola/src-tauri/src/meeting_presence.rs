@@ -83,7 +83,9 @@ pub struct MeetingPresenceSnapshot {
 #[derive(Debug, Clone)]
 struct PendingPrompt {
     id: String,
+    // Stable app-family root for episode suppression and process-loopback capture.
     process_id: u32,
+    window_process_id: Option<u32>,
     app_label: String,
     confidence: MeetingPresenceConfidence,
     evidence: Vec<MeetingPresenceEvidence>,
@@ -100,6 +102,8 @@ struct DetectionSession {
 
 #[derive(Default)]
 struct PresenceData {
+    recording_active: bool,
+    last_notified_prompt: Option<String>,
     hint: Option<Detection>,
     prompt: Option<PendingPrompt>,
     sessions: HashMap<u32, DetectionSession>,
@@ -108,6 +112,7 @@ struct PresenceData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Detection {
     process_id: u32,
+    window_process_id: Option<u32>,
     app_label: String,
     confidence: MeetingPresenceConfidence,
     evidence: Vec<MeetingPresenceEvidence>,
@@ -118,6 +123,12 @@ struct DetectionSnapshot {
     detections: Vec<Detection>,
     possible_hints: Vec<Detection>,
     live_process_ids: HashSet<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessInfo {
+    name: String,
+    parent_id: u32,
 }
 
 pub struct MeetingPresenceState {
@@ -239,6 +250,19 @@ impl MeetingPresenceState {
         data.sessions.clear();
     }
 
+    fn set_recording_active(&self, active: bool) {
+        let mut data = self.inner.data.lock().unwrap();
+        data.recording_active = active;
+        if active {
+            data.prompt = None;
+            data.hint = None;
+            for session in data.sessions.values_mut() {
+                session.prompted = true;
+                session.suppressed = true;
+            }
+        }
+    }
+
     fn claim_prompt(&self, prompt_id: &str) -> Result<PendingPrompt, String> {
         let mut data = self.inner.data.lock().unwrap();
         let prompt = data
@@ -259,7 +283,8 @@ impl MeetingPresenceState {
 
     fn restore_prompt(&self, prompt: PendingPrompt) {
         let mut data = self.inner.data.lock().unwrap();
-        if data.prompt.is_none()
+        if !data.recording_active
+            && data.prompt.is_none()
             && data.sessions.contains_key(&prompt.process_id)
             && self.inner.enabled.load(Ordering::Relaxed)
             && !self.inner.paused.load(Ordering::Relaxed)
@@ -275,7 +300,11 @@ impl MeetingPresenceState {
         #[cfg(desktop)]
         {
             let snapshot = self.snapshot();
+            let recording_active = self.inner.data.lock().unwrap().recording_active;
             let status = match snapshot.mode {
+                MeetingPresenceMode::Detecting if recording_active => {
+                    "Detecting locally · recording"
+                }
                 MeetingPresenceMode::Detecting => "Detecting locally · not recording",
                 MeetingPresenceMode::Paused => "Paused",
                 MeetingPresenceMode::Off => "Off",
@@ -292,6 +321,18 @@ impl MeetingPresenceState {
                 let _ = item.set_enabled(snapshot.enabled);
             }
         }
+    }
+}
+
+/// Called before capture startup and after startup failure or finalization.
+/// Share the detector's lock so an in-flight poll cannot recreate a cleared prompt.
+pub(crate) fn recording_activity_changed(app: &tauri::AppHandle, active: bool) {
+    if let Some(state) = app.try_state::<MeetingPresenceState>() {
+        state.set_recording_active(active);
+        state.update_tray();
+        emit_state(app, &state);
+        #[cfg(desktop)]
+        sync_prompt_overlay(app, &state);
     }
 }
 
@@ -380,11 +421,13 @@ fn start_recording_from_prompt(
     crate::recording::queue_process_loopback_target(app, prompt.process_id);
     #[cfg(desktop)]
     {
-        show_main_window(app);
-        if let Err(error) = crate::window_layout::apply(app, prompt.process_id) {
+        if let Err(error) =
+            crate::window_layout::apply(app, prompt.window_process_id.unwrap_or(prompt.process_id))
+        {
             // Window arrangement is a convenience around the explicit start
             // action; a platform window quirk must never block recording.
             eprintln!("[window-layout] companion layout unavailable: {error}");
+            show_main_window(app);
         }
     }
     emit_state(app, state);
@@ -415,11 +458,7 @@ async fn persist_bool(pool: &sqlx::SqlitePool, key: &str, value: bool) -> Result
     Ok(())
 }
 
-async fn read_bool(
-    pool: &sqlx::SqlitePool,
-    key: &str,
-    default: bool,
-) -> Result<bool, String> {
+async fn read_bool(pool: &sqlx::SqlitePool, key: &str, default: bool) -> Result<bool, String> {
     let value: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
         .bind(key)
         .fetch_optional(pool)
@@ -434,7 +473,18 @@ fn emit_state(app: &tauri::AppHandle, state: &MeetingPresenceState) {
     let _ = app.emit(EVENT_STATE, state.snapshot());
 }
 
-fn emit_prompt(app: &tauri::AppHandle, prompt: &PendingPrompt) {
+fn emit_prompt(app: &tauri::AppHandle, state: &MeetingPresenceState, prompt: &PendingPrompt) {
+    let data = state.inner.data.lock().unwrap();
+    if data.recording_active
+        || recording::is_recording_active(app)
+        || !data
+            .prompt
+            .as_ref()
+            .is_some_and(|current| current.id == prompt.id)
+    {
+        return;
+    }
+    // Keep the lock through emission so recording startup clears this event next.
     let _ = app.emit(
         EVENT_PROMPT,
         MeetingPrompt {
@@ -449,7 +499,11 @@ fn emit_prompt(app: &tauri::AppHandle, prompt: &PendingPrompt) {
 }
 
 #[cfg(desktop)]
-fn should_show_background_prompt(main_visible: bool, main_minimized: bool, main_focused: bool) -> bool {
+fn should_show_background_prompt(
+    main_visible: bool,
+    main_minimized: bool,
+    main_focused: bool,
+) -> bool {
     !main_visible || main_minimized || !main_focused
 }
 
@@ -473,7 +527,11 @@ pub(crate) fn sync_prompt_overlay(app: &tauri::AppHandle, state: &MeetingPresenc
         return;
     };
 
-    if state.snapshot().prompt.is_none() || !main_needs_background_prompt(app) {
+    if recording::is_recording_active(app)
+        || state.snapshot().prompt.is_none()
+        || !main_needs_background_prompt(app)
+        || prompt_is_deferred()
+    {
         let _ = window.hide();
         return;
     }
@@ -483,7 +541,9 @@ pub(crate) fn sync_prompt_overlay(app: &tauri::AppHandle, state: &MeetingPresenc
         let margin = 20;
         let x = work_area.position.x + work_area.size.width as i32 - size.width as i32 - margin;
         let y = work_area.position.y + work_area.size.height as i32 - size.height as i32 - margin;
-        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)));
+        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            x, y,
+        )));
     }
 
     let _ = window.show();
@@ -492,7 +552,10 @@ pub(crate) fn sync_prompt_overlay(app: &tauri::AppHandle, state: &MeetingPresenc
 #[cfg(desktop)]
 pub(crate) fn notify_background_prompt(app: &tauri::AppHandle, state: &MeetingPresenceState) {
     sync_prompt_overlay(app, state);
-    if !main_needs_background_prompt(app) {
+    if recording::is_recording_active(app)
+        || !main_needs_background_prompt(app)
+        || prompt_is_deferred()
+    {
         return;
     }
 
@@ -539,12 +602,30 @@ fn apply_detections(
     state: &MeetingPresenceState,
     snapshot: DetectionSnapshot,
 ) {
-    if !state.inner.enabled.load(Ordering::Relaxed)
-        || state.inner.paused.load(Ordering::Relaxed)
-    {
+    if !state.inner.enabled.load(Ordering::Relaxed) || state.inner.paused.load(Ordering::Relaxed) {
         return;
     }
 
+    let (changed, prompt_to_emit) = update_detections(state, snapshot, !prompt_is_deferred());
+    if changed {
+        state.update_tray();
+        emit_state(app, state);
+    }
+    // Foreground/full-screen state can change without changing audio activity.
+    #[cfg(desktop)]
+    sync_prompt_overlay(app, state);
+    if let Some(prompt) = prompt_to_emit {
+        emit_prompt(app, state, &prompt);
+        #[cfg(desktop)]
+        notify_background_prompt(app, state);
+    }
+}
+
+fn update_detections(
+    state: &MeetingPresenceState,
+    snapshot: DetectionSnapshot,
+    allow_prompt: bool,
+) -> (bool, Option<PendingPrompt>) {
     let DetectionSnapshot {
         detections,
         possible_hints,
@@ -568,9 +649,24 @@ fn apply_detections(
         }
 
         if let Some(prompt) = data.prompt.as_ref() {
-            if !active_process_ids.contains(&prompt.process_id) {
+            // Keep an unanswered prompt through one transient audio gap. The
+            // episode resets after two inactive polls, or immediately on exit.
+            if data
+                .sessions
+                .get(&prompt.process_id)
+                .is_none_or(|session| !session.prompted)
+            {
                 data.prompt = None;
                 changed = true;
+            }
+        }
+        if let Some(prompt) = data.prompt.as_mut() {
+            if let Some(detection) = detections
+                .iter()
+                .find(|d| d.process_id == prompt.process_id)
+            {
+                // A meeting window may appear after its background audio session.
+                prompt.window_process_id = detection.window_process_id;
             }
         }
 
@@ -580,14 +676,30 @@ fn apply_detections(
                 .is_none_or(|session| !session.prompted && !session.suppressed)
         });
         for detection in possible_hints.iter().chain(detections.iter()) {
-            data.sessions.entry(detection.process_id).or_insert_with(|| {
-                changed = true;
-                DetectionSession {
-                    prompted: false,
-                    suppressed: false,
-                    inactive_polls: 0,
+            data.sessions
+                .entry(detection.process_id)
+                .or_insert_with(|| {
+                    changed = true;
+                    DetectionSession {
+                        prompted: false,
+                        suppressed: false,
+                        inactive_polls: 0,
+                    }
+                });
+        }
+
+        if data.recording_active {
+            changed |= data.prompt.take().is_some();
+            changed |= data.hint.take().is_some();
+            // Track audio gaps normally, but consume every active episode seen
+            // during capture so stopping does not immediately prompt again.
+            for process_id in &active_process_ids {
+                if let Some(session) = data.sessions.get_mut(process_id) {
+                    session.prompted = true;
+                    session.suppressed = true;
                 }
-            });
+            }
+            return (changed, None);
         }
 
         let next_hint = next_hint.cloned();
@@ -595,7 +707,7 @@ fn apply_detections(
             data.hint = next_hint;
             changed = true;
         }
-        if data.prompt.is_none() {
+        if data.prompt.is_none() && allow_prompt {
             let next_detection = detections.iter().find(|detection| {
                 data.sessions
                     .get(&detection.process_id)
@@ -612,6 +724,7 @@ fn apply_detections(
                         state.inner.next_prompt_id.fetch_add(1, Ordering::Relaxed)
                     ),
                     process_id: detection.process_id,
+                    window_process_id: detection.window_process_id,
                     app_label: detection.app_label.clone(),
                     confidence: detection.confidence,
                     evidence: detection.evidence.clone(),
@@ -620,24 +733,14 @@ fn apply_detections(
                 prompt_to_emit = Some(prompt);
                 changed = true;
             }
-        } else {
+        } else if data.prompt.is_some() {
             if data.hint.take().is_some() {
                 changed = true;
             }
         }
     }
 
-    if changed {
-        state.update_tray();
-        emit_state(app, state);
-        #[cfg(desktop)]
-        sync_prompt_overlay(app, state);
-    }
-    if let Some(prompt) = prompt_to_emit {
-        emit_prompt(app, &prompt);
-        #[cfg(desktop)]
-        notify_background_prompt(app, state);
-    }
+    (changed, prompt_to_emit)
 }
 
 fn start_detector(app: tauri::AppHandle, state: MeetingPresenceState) {
@@ -650,10 +753,7 @@ fn start_detector(app: tauri::AppHandle, state: MeetingPresenceState) {
                 && !state.inner.paused.load(Ordering::Relaxed)
             {
                 match tauri::async_runtime::spawn_blocking(detect_windows).await {
-                    Ok(Ok(snapshot)) if !prompt_is_deferred() => {
-                        apply_detections(&app, &state, snapshot)
-                    }
-                    Ok(Ok(_)) => {}
+                    Ok(Ok(snapshot)) => apply_detections(&app, &state, snapshot),
                     Ok(Err(error)) => eprintln!("[meeting-presence] detection failed: {error}"),
                     Err(error) => eprintln!("[meeting-presence] detection task failed: {error}"),
                 }
@@ -775,7 +875,11 @@ fn tray_icon() -> Result<tauri::image::Image<'static>, Box<dyn std::error::Error
         return Err("approved tray asset must decode as 8-bit RGBA".into());
     }
     rgba.truncate(info.buffer_size());
-    Ok(tauri::image::Image::new_owned(rgba, info.width, info.height))
+    Ok(tauri::image::Image::new_owned(
+        rgba,
+        info.width,
+        info.height,
+    ))
 }
 
 #[cfg(target_os = "windows")]
@@ -789,8 +893,8 @@ fn ensure_toast_shortcut() -> Result<(), String> {
         CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
     };
-    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
     use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
     fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
         value.encode_wide().chain(std::iter::once(0)).collect()
@@ -802,8 +906,8 @@ fn ensure_toast_shortcut() -> Result<(), String> {
     }
 
     let result = (|| {
-        let appdata = std::env::var_os("APPDATA")
-            .ok_or_else(|| "APPDATA is unavailable".to_string())?;
+        let appdata =
+            std::env::var_os("APPDATA").ok_or_else(|| "APPDATA is unavailable".to_string())?;
         let shortcut_dir = std::path::PathBuf::from(appdata)
             .join("Microsoft")
             .join("Windows")
@@ -817,10 +921,9 @@ fn ensure_toast_shortcut() -> Result<(), String> {
         let shortcut_wide = wide(shortcut.as_os_str());
         let description_wide = wide(std::ffi::OsStr::new("Local meeting notes"));
 
-        let shell_link: IShellLinkW = unsafe {
-            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
-        }
-        .map_err(|error| error.to_string())?;
+        let shell_link: IShellLinkW =
+            unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER) }
+                .map_err(|error| error.to_string())?;
         unsafe {
             shell_link
                 .SetPath(PCWSTR(executable_wide.as_ptr()))
@@ -830,7 +933,8 @@ fn ensure_toast_shortcut() -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
         }
 
-        let property_store: IPropertyStore = shell_link.cast().map_err(|error| error.to_string())?;
+        let property_store: IPropertyStore =
+            shell_link.cast().map_err(|error| error.to_string())?;
         let app_id: PROPVARIANT = TOAST_APPLICATION_ID.into();
         unsafe {
             property_store
@@ -871,7 +975,20 @@ fn show_native_prompt(app: &tauri::AppHandle, prompt: &PendingPrompt) {
 
 #[cfg(not(target_os = "windows"))]
 fn show_native_prompt(_app: &tauri::AppHandle, prompt: &PendingPrompt) {
-    eprintln!("[meeting-presence] prompt={} app={}", prompt.id, prompt.app_label);
+    eprintln!(
+        "[meeting-presence] prompt={} app={}",
+        prompt.id, prompt.app_label
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn should_submit_native_prompt(data: &PresenceData, prompt_id: &str) -> bool {
+    !data.recording_active
+        && data
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.id == prompt_id)
+        && data.last_notified_prompt.as_deref() != Some(prompt_id)
 }
 
 #[cfg(target_os = "windows")]
@@ -879,13 +996,13 @@ fn show_native_prompt_inner(
     app: &tauri::AppHandle,
     prompt: &PendingPrompt,
 ) -> windows::core::Result<()> {
-    use windows::core::{HSTRING, IInspectable, Interface};
+    use windows::core::{IInspectable, Interface, HSTRING};
     use windows::Foundation::TypedEventHandler;
+    use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
     use windows::UI::Notifications::{
         ToastActivatedEventArgs, ToastFailedEventArgs, ToastNotification, ToastNotificationManager,
     };
-    use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
-    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
     unsafe { RoInitialize(RO_INIT_MULTITHREADED)? };
     let result = (|| {
@@ -901,9 +1018,7 @@ fn show_native_prompt_inner(
         let notification = ToastNotification::CreateToastNotification(&document)?;
         notification.SetTag(&HSTRING::from(prompt.id.as_str()))?;
 
-        let notifier = match ToastNotificationManager::CreateToastNotifierWithId(
-            &application_id,
-        ) {
+        let notifier = match ToastNotificationManager::CreateToastNotifierWithId(&application_id) {
             Ok(notifier) => notifier,
             Err(identity_error) => {
                 eprintln!(
@@ -954,17 +1069,39 @@ fn show_native_prompt_inner(
                 },
             );
         notification.Failed(&failed_handler)?;
-        eprintln!(
-            "[meeting-presence] native toast submitted prompt={} setting={:?}",
-            prompt.id,
-            notifier.Setting().ok()
-        );
-        notifier.Show(&notification)?;
+        {
+            let state = app.state::<MeetingPresenceState>();
+            let mut data = state.inner.data.lock().unwrap();
+            if recording::is_recording_active(app)
+                || !should_submit_native_prompt(&data, &prompt.id)
+            {
+                return Ok(());
+            }
+            notifier.Show(&notification)?;
+            data.last_notified_prompt = Some(prompt.id.clone());
+            eprintln!(
+                "[meeting-presence] native toast submitted prompt={}",
+                prompt.id
+            );
+        }
 
-        // Keep the WinRT notification and handler alive long enough for a
-        // normal toast click. Prompt validity is still checked against the
-        // in-memory state before any action is applied.
-        std::thread::sleep(Duration::from_secs(120));
+        // Retain the handlers while actionable. Retract an obsolete toast on
+        // this WinRT thread, including when recording starts from another UI.
+        for _ in 0..1200 {
+            std::thread::sleep(Duration::from_millis(100));
+            let state = app.state::<MeetingPresenceState>();
+            if recording::is_recording_active(app) || !prompt_is_current(&state, &prompt.id) {
+                let _ = notifier.Hide(&notification);
+                if let Ok(history) = ToastNotificationManager::History() {
+                    let _ = history.RemoveGroupedTagWithId(
+                        &HSTRING::from(prompt.id.as_str()),
+                        &HSTRING::new(),
+                        &application_id,
+                    );
+                }
+                break;
+            }
+        }
         Ok::<(), windows::core::Error>(())
     })();
     unsafe { RoUninitialize() };
@@ -1092,60 +1229,173 @@ fn detect_windows() -> Result<DetectionSnapshot, String> {
     let processes = enumerate_processes()?;
     let windows = enumerate_visible_windows()?;
     let active_audio = enumerate_active_audio_processes()?;
-    let current_pid = std::process::id();
+    Ok(classify_windows(
+        processes,
+        windows,
+        active_audio,
+        std::process::id(),
+    ))
+}
+
+fn classify_windows(
+    processes: HashMap<u32, ProcessInfo>,
+    windows: HashMap<u32, Vec<String>>,
+    active_audio: HashSet<u32>,
+    current_pid: u32,
+) -> DetectionSnapshot {
     let mut detections = Vec::new();
     let mut possible_hints = Vec::new();
     let mut possible_seen = HashSet::new();
-    let mut seen = HashSet::new();
 
-    for (&pid, process_name) in &processes {
-        if pid == current_pid || is_kiminola_process(process_name) {
+    for (&pid, process) in &processes {
+        // Only named apps contribute quiet hints. Audio candidates additionally
+        // allow the spec's visible-window "another app" fallback.
+        if !is_known_meeting_process(&process.name) && !is_browser_process(&process.name) {
             continue;
         }
-        let titles = windows.get(&pid).cloned().unwrap_or_default();
-        let label = friendly_app_label(process_name, &titles).to_string();
-        if label != "another app" && possible_seen.insert(pid) {
-            possible_hints.push(Detection {
-                process_id: pid,
-                app_label: label,
-                confidence: MeetingPresenceConfidence::Possible,
-                evidence: vec![MeetingPresenceEvidence::AppOrVisibleWindow],
-            });
+        if let Some(mut detection) = resolve_app(pid, &processes, &windows, current_pid) {
+            if detection.app_label != "another app" && possible_seen.insert(detection.process_id) {
+                detection.confidence = MeetingPresenceConfidence::Possible;
+                detection.evidence = vec![MeetingPresenceEvidence::AppOrVisibleWindow];
+                possible_hints.push(detection);
+            }
         }
     }
 
     for pid in active_audio {
-        if pid == current_pid {
-            continue;
-        }
-        let Some(process_name) = processes.get(&pid) else {
-            continue;
-        };
-        let titles = windows.get(&pid).cloned().unwrap_or_default();
-        if titles.is_empty() && !is_known_meeting_process(process_name) {
-            continue;
-        }
-        if is_kiminola_process(process_name) {
-            continue;
-        }
-        let label = friendly_app_label(process_name, &titles).to_string();
-        if seen.insert(pid) {
-            detections.push(Detection {
-                process_id: pid,
-                app_label: label,
-                confidence: MeetingPresenceConfidence::Likely,
-                evidence: vec![
-                    MeetingPresenceEvidence::AppOrVisibleWindow,
-                    MeetingPresenceEvidence::ActiveCoreAudio,
-                ],
-            });
+        if let Some(detection) = resolve_app(pid, &processes, &windows, current_pid) {
+            detections.push(detection);
         }
     }
-    Ok(DetectionSnapshot {
+    // A call window on an active helper's branch is more specific than the
+    // app's home window. Resolve competing audio sessions deterministically.
+    detections.sort_by_key(|d| {
+        (
+            d.process_id,
+            d.app_label == "another app",
+            d.window_process_id.is_none(),
+            d.window_process_id == Some(d.process_id),
+            d.window_process_id.unwrap_or(u32::MAX),
+        )
+    });
+    detections.dedup_by_key(|d| d.process_id);
+    // Hash-map iteration must not randomly change which app gets the prompt.
+    detections.sort_by_key(|d| (d.app_label == "another app", d.process_id));
+    possible_hints.sort_by_key(|d| d.process_id);
+    DetectionSnapshot {
         detections,
         possible_hints,
         live_process_ids: processes.keys().copied().collect(),
+    }
+}
+
+fn process_lineage(pid: u32, processes: &HashMap<u32, ProcessInfo>) -> Vec<u32> {
+    let mut lineage = Vec::new();
+    let mut next = pid;
+    while next != 0 && lineage.len() < 64 && !lineage.contains(&next) {
+        let Some(process) = processes.get(&next) else {
+            break;
+        };
+        lineage.push(next);
+        next = process.parent_id;
+    }
+    if next != 0 && processes.contains_key(&next) {
+        // A cyclic or unreasonably deep snapshot cannot establish ownership.
+        return Vec::new();
+    }
+    lineage
+}
+
+fn resolve_app(
+    pid: u32,
+    processes: &HashMap<u32, ProcessInfo>,
+    windows: &HashMap<u32, Vec<String>>,
+    current_pid: u32,
+) -> Option<Detection> {
+    let lineage = process_lineage(pid, processes);
+    if lineage.is_empty() {
+        return None;
+    }
+    if lineage
+        .iter()
+        .any(|id| *id == current_pid || is_kiminola_process(&processes[id].name))
+    {
+        return None;
+    }
+    let has_window = |id: &u32| windows.get(id).is_some_and(|titles| !titles.is_empty());
+    // Embedded WebView helpers inherit their meeting app. A standalone browser
+    // is its own boundary, even if a meeting app launched it to open a link.
+    let owner = lineage.iter().find(|id| {
+        is_known_meeting_process(&processes[id].name) || is_browser_process(&processes[id].name)
+    });
+    let (root, window_pid) = if let Some(&owner) = owner {
+        let name = &processes[&owner].name;
+        let same_family = |id: &u32| {
+            let candidate = &processes[id].name;
+            if is_known_meeting_process(name) {
+                is_known_meeting_process(candidate)
+                    && friendly_app_label(candidate, &[]) == friendly_app_label(name, &[])
+            } else {
+                normalized_process_name(candidate) == normalized_process_name(name)
+            }
+        };
+        let root = lineage.iter().rev().find(|id| same_family(id)).copied()?;
+        let window_pid =
+            if let Some(window_pid) = lineage.iter().find(|id| has_window(id) && same_family(id)) {
+                Some(*window_pid)
+            } else {
+                windows
+                    .keys()
+                    .filter(|id| {
+                        processes.contains_key(id)
+                            && has_window(id)
+                            && same_family(id)
+                            && process_lineage(**id, processes).contains(&root)
+                    })
+                    .copied()
+                    .min()
+            };
+        if window_pid.is_none() && !is_known_meeting_process(name) {
+            return None;
+        }
+        (root, window_pid)
+    } else {
+        // Preserve the generic fallback only for the actual audio process's
+        // window, never an arbitrary parent such as Explorer.
+        if !has_window(&pid) {
+            return None;
+        }
+        (pid, Some(pid))
+    };
+    let label_pid = window_pid.unwrap_or(root);
+    let titles = windows.get(&label_pid).map(Vec::as_slice).unwrap_or(&[]);
+    Some(Detection {
+        process_id: root,
+        window_process_id: window_pid,
+        app_label: friendly_app_label(&processes[&label_pid].name, titles).into(),
+        confidence: MeetingPresenceConfidence::Likely,
+        evidence: vec![
+            MeetingPresenceEvidence::AppOrVisibleWindow,
+            MeetingPresenceEvidence::ActiveCoreAudio,
+        ],
     })
+}
+
+fn normalized_process_name(process_name: &str) -> String {
+    process_name
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(process_name)
+        .to_ascii_lowercase()
+        .trim_end_matches(".exe")
+        .to_string()
+}
+
+fn is_browser_process(process_name: &str) -> bool {
+    matches!(
+        normalized_process_name(process_name).as_str(),
+        "chrome" | "msedge" | "firefox" | "brave"
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -1222,17 +1472,11 @@ fn prompt_is_deferred() -> bool {
 }
 
 fn is_kiminola_process(process_name: &str) -> bool {
-    let name = process_name.to_ascii_lowercase();
-    name == "kiminola" || name == "kiminola.exe" || name.contains("kiminola")
+    normalized_process_name(process_name).contains("kiminola")
 }
 
 fn is_known_meeting_process(process_name: &str) -> bool {
-    let name = process_name
-        .rsplit_once('\\')
-        .map(|(_, name)| name)
-        .unwrap_or(process_name)
-        .trim_end_matches(".exe")
-        .to_ascii_lowercase();
+    let name = normalized_process_name(process_name);
     matches!(
         name.as_str(),
         "granola"
@@ -1248,12 +1492,7 @@ fn is_known_meeting_process(process_name: &str) -> bool {
 }
 
 fn friendly_app_label(process_name: &str, window_titles: &[String]) -> &'static str {
-    let name = process_name
-        .rsplit_once('\\')
-        .map(|(_, name)| name)
-        .unwrap_or(process_name)
-        .trim_end_matches(".exe")
-        .to_ascii_lowercase();
+    let name = normalized_process_name(process_name);
     match name.as_str() {
         "granola" => "Granola",
         "zoom" | "zoomphone" => "Zoom",
@@ -1274,7 +1513,7 @@ fn friendly_app_label(process_name: &str, window_titles: &[String]) -> &'static 
 }
 
 #[cfg(target_os = "windows")]
-fn enumerate_processes() -> Result<HashMap<u32, String>, String> {
+fn enumerate_processes() -> Result<HashMap<u32, ProcessInfo>, String> {
     use std::mem::size_of;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -1298,7 +1537,10 @@ fn enumerate_processes() -> Result<HashMap<u32, String>, String> {
                     .unwrap_or(entry.szExeFile.len());
                 processes.insert(
                     entry.th32ProcessID,
-                    String::from_utf16_lossy(&entry.szExeFile[..end]),
+                    ProcessInfo {
+                        name: String::from_utf16_lossy(&entry.szExeFile[..end]),
+                        parent_id: entry.th32ParentProcessID,
+                    },
                 );
                 if Process32NextW(snapshot, &mut entry).is_err() {
                     break;
@@ -1346,11 +1588,8 @@ fn enumerate_visible_windows() -> Result<HashMap<u32, Vec<String>>, String> {
 
     let mut windows = HashMap::new();
     unsafe {
-        EnumWindows(
-            Some(callback),
-            LPARAM(&mut windows as *mut _ as isize),
-        )
-        .map_err(|e| format!("window enumeration failed: {e}"))?;
+        EnumWindows(Some(callback), LPARAM(&mut windows as *mut _ as isize))
+            .map_err(|e| format!("window enumeration failed: {e}"))?;
     }
     Ok(windows)
 }
@@ -1359,8 +1598,8 @@ fn enumerate_visible_windows() -> Result<HashMap<u32, Vec<String>>, String> {
 fn enumerate_active_audio_processes() -> Result<HashSet<u32>, String> {
     use windows::core::Interface;
     use windows::Win32::Media::Audio::{
-        eCapture, eCommunications, eConsole, eRender, AudioSessionStateActive,
-        IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator,
+        eAll, AudioSessionStateActive, IAudioSessionManager2, IMMDeviceEnumerator,
+        MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
     };
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
@@ -1375,8 +1614,17 @@ fn enumerate_active_audio_processes() -> Result<HashSet<u32>, String> {
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
                     .map_err(|e| format!("audio enumerator failed: {e}"))?;
             let mut pids = HashSet::new();
-            for (flow, role) in [(eRender, eConsole), (eCapture, eCommunications)] {
-                let Ok(device) = enumerator.GetDefaultAudioEndpoint(flow, role) else {
+            // Calls can use an explicitly selected headset/communications device
+            // instead of either Windows default. Inspect render and capture on
+            // every active endpoint, deduplicating sessions by process ID.
+            let devices = enumerator
+                .EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE)
+                .map_err(|e| format!("audio endpoint enumeration failed: {e}"))?;
+            let device_count = devices
+                .GetCount()
+                .map_err(|e| format!("audio endpoint count failed: {e}"))?;
+            for device_index in 0..device_count {
+                let Ok(device) = devices.Item(device_index) else {
                     continue;
                 };
                 let Ok(manager): Result<IAudioSessionManager2, _> =
@@ -1394,7 +1642,8 @@ fn enumerate_active_audio_processes() -> Result<HashSet<u32>, String> {
                     let Ok(control) = sessions.GetSession(index) else {
                         continue;
                     };
-                    let Ok(control2) = control.cast::<windows::Win32::Media::Audio::IAudioSessionControl2>()
+                    let Ok(control2) =
+                        control.cast::<windows::Win32::Media::Audio::IAudioSessionControl2>()
                     else {
                         continue;
                     };
@@ -1434,7 +1683,9 @@ fn set_start_with_windows_windows(enabled: bool) -> Result<(), String> {
             &mut key,
         );
         if opened.0 != 0 {
-            return Err(format!("could not open Windows startup settings: {opened:?}"));
+            return Err(format!(
+                "could not open Windows startup settings: {opened:?}"
+            ));
         }
 
         let result = if enabled {
@@ -1453,7 +1704,9 @@ fn set_start_with_windows_windows(enabled: bool) -> Result<(), String> {
             return Ok(());
         }
         if result.0 != 0 {
-            return Err(format!("could not update Windows startup settings: {result:?}"));
+            return Err(format!(
+                "could not update Windows startup settings: {result:?}"
+            ));
         }
     }
     Ok(())
@@ -1466,12 +1719,412 @@ fn set_start_with_windows_windows(_enabled: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{classify_windows, DetectionSnapshot, ProcessInfo};
+
+    fn detect_fixture(
+        processes: &[(u32, u32, &str)],
+        windows: &[(u32, &str)],
+        audio: &[u32],
+    ) -> DetectionSnapshot {
+        classify_windows(
+            processes
+                .iter()
+                .map(|&(pid, parent_id, name)| {
+                    (
+                        pid,
+                        ProcessInfo {
+                            name: name.into(),
+                            parent_id,
+                        },
+                    )
+                })
+                .collect(),
+            windows
+                .iter()
+                .map(|&(pid, title)| (pid, vec![title.into()]))
+                .collect(),
+            audio.iter().copied().collect(),
+            999,
+        )
+    }
+
+    #[test]
+    fn teams_helper_audio_targets_the_visible_meeting_app() {
+        let result = detect_fixture(
+            &[(10, 0, "ms-teams.exe"), (11, 10, "msedgewebview2.exe")],
+            &[(10, "Microsoft Teams")],
+            &[11],
+        );
+        assert_eq!(result.detections.len(), 1);
+        assert_eq!(result.detections[0].process_id, 10);
+        assert_eq!(result.detections[0].window_process_id, Some(10));
+        assert_eq!(result.detections[0].app_label, "Microsoft Teams");
+    }
+
+    #[test]
+    fn zoom_sibling_window_and_audio_share_one_capture_root() {
+        let result = detect_fixture(
+            &[
+                (10, 0, "Zoom.exe"),
+                (11, 10, "Zoom.exe"),
+                (12, 10, "Zoom.exe"),
+            ],
+            &[(11, "Zoom Meeting")],
+            &[10, 12],
+        );
+        assert_eq!(result.detections.len(), 1);
+        assert_eq!(result.detections[0].process_id, 10);
+        assert_eq!(result.detections[0].window_process_id, Some(11));
+        assert_eq!(result.detections[0].app_label, "Zoom");
+    }
+
+    #[test]
+    fn call_window_on_the_audio_branch_wins_over_the_app_home_window() {
+        for _ in 0..16 {
+            let result = detect_fixture(
+                &[
+                    (10, 0, "ms-teams.exe"),
+                    (11, 10, "ms-teams.exe"),
+                    (12, 11, "msedgewebview2.exe"),
+                ],
+                &[(10, "Teams Home"), (11, "Meeting")],
+                &[10, 12],
+            );
+            assert_eq!(result.detections.len(), 1);
+            assert_eq!(result.detections[0].process_id, 10);
+            assert_eq!(result.detections[0].window_process_id, Some(11));
+        }
+    }
+
+    #[test]
+    fn opening_teams_without_audio_only_produces_a_quiet_hint() {
+        let result = detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], &[]);
+        assert!(result.detections.is_empty());
+        assert_eq!(result.possible_hints.len(), 1);
+        assert_eq!(
+            result.possible_hints[0].confidence,
+            MeetingPresenceConfidence::Possible
+        );
+    }
+
+    #[test]
+    fn uppercase_executable_paths_are_recognized() {
+        let result = detect_fixture(&[(10, 0, "C:\\Apps\\MS-TEAMS.EXE")], &[], &[10]);
+        assert_eq!(result.detections.len(), 1);
+        assert_eq!(result.detections[0].app_label, "Microsoft Teams");
+    }
+
+    #[test]
+    fn browser_audio_helper_resolves_to_google_meet_window() {
+        let result = detect_fixture(
+            &[(10, 0, "chrome.exe"), (11, 10, "chrome.exe")],
+            &[(10, "Google Meet - Planning")],
+            &[11],
+        );
+        assert_eq!(result.detections.len(), 1);
+        assert_eq!(result.detections[0].app_label, "Google Meet");
+        assert_eq!(result.detections[0].window_process_id, Some(10));
+    }
+
+    #[test]
+    fn unrelated_webview_audio_cannot_activate_idle_teams() {
+        let result = detect_fixture(
+            &[
+                (1, 0, "explorer.exe"),
+                (10, 1, "ms-teams.exe"),
+                (20, 1, "other.exe"),
+                (21, 20, "msedgewebview2.exe"),
+            ],
+            &[(1, "Desktop"), (10, "Teams"), (20, "Other app")],
+            &[21],
+        );
+        assert!(result.detections.is_empty());
+    }
+
+    #[test]
+    fn browser_launched_from_teams_does_not_turn_browser_audio_into_a_teams_call() {
+        let result = detect_fixture(
+            &[
+                (10, 0, "ms-teams.exe"),
+                (20, 10, "chrome.exe"),
+                (21, 20, "chrome.exe"),
+            ],
+            &[(10, "Teams"), (20, "Video")],
+            &[21],
+        );
+        assert_eq!(result.detections.len(), 1);
+        assert_eq!(result.detections[0].process_id, 20);
+        assert_eq!(result.detections[0].app_label, "another app");
+    }
+
+    #[test]
+    fn separate_zoom_instances_do_not_share_audio_or_windows() {
+        let result = detect_fixture(
+            &[
+                (10, 0, "Zoom.exe"),
+                (20, 0, "Zoom.exe"),
+                (21, 20, "Zoom.exe"),
+            ],
+            &[(10, "Idle Zoom"), (20, "Zoom Meeting")],
+            &[21],
+        );
+        assert_eq!(result.detections.len(), 1);
+        assert_eq!(result.detections[0].process_id, 20);
+        assert_eq!(result.detections[0].window_process_id, Some(20));
+    }
+
+    #[test]
+    fn our_webview_audio_and_stale_audio_pids_are_ignored() {
+        let result = detect_fixture(
+            &[(999, 0, "kiminola.exe"), (11, 999, "msedgewebview2.exe")],
+            &[(999, "Kimi Nola"), (11, "Prompt")],
+            &[999, 11, 404],
+        );
+        assert!(result.detections.is_empty());
+        assert!(result.possible_hints.is_empty());
+    }
+
+    #[test]
+    fn known_meeting_apps_take_priority_over_generic_audio_windows() {
+        let result = detect_fixture(
+            &[(1, 0, "player.exe"), (10, 0, "ms-teams.exe")],
+            &[(1, "Player"), (10, "Teams")],
+            &[1, 10],
+        );
+        assert_eq!(result.detections.len(), 2);
+        assert_eq!(result.detections[0].app_label, "Microsoft Teams");
+        assert_eq!(result.detections[1].app_label, "another app");
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn native_prompt_is_not_resubmitted_or_shown_after_recording_starts() {
+        let state = MeetingPresenceState::new();
+        let snapshot = detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], &[10]);
+        let (_, prompt) = super::update_detections(&state, snapshot, true);
+        let id = prompt.unwrap().id;
+        {
+            let mut data = state.inner.data.lock().unwrap();
+            assert!(super::should_submit_native_prompt(&data, &id));
+            data.last_notified_prompt = Some(id.clone());
+            assert!(!super::should_submit_native_prompt(&data, &id));
+            data.last_notified_prompt = None;
+        }
+        state.set_recording_active(true);
+        assert!(!super::should_submit_native_prompt(
+            &state.inner.data.lock().unwrap(),
+            &id
+        ));
+    }
+
+    #[test]
+    fn recording_suppresses_new_meeting_prompts_and_hints() {
+        let state = MeetingPresenceState::new();
+        state.set_recording_active(true);
+        for audio in [vec![], vec![10]] {
+            let snapshot = detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], &audio);
+            let (_, prompt) = super::update_detections(&state, snapshot, true);
+            assert!(prompt.is_none());
+            assert!(state.snapshot().prompt.is_none());
+            assert!(state.snapshot().hint.is_none());
+        }
+    }
+
+    #[test]
+    fn recording_start_invalidates_pending_prompt_and_prevents_restore() {
+        let state = MeetingPresenceState::new();
+        state.set_enabled_runtime(true);
+        let snapshot = detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], &[10]);
+        let (_, prompt) = super::update_detections(&state, snapshot, true);
+        let prompt = prompt.unwrap();
+        state.set_recording_active(true);
+        assert!(state.snapshot().prompt.is_none());
+        assert!(!prompt_is_current(&state, &prompt.id));
+        assert!(state.claim_prompt(&prompt.id).is_err());
+        state.restore_prompt(prompt);
+        assert!(state.snapshot().prompt.is_none());
+    }
+
+    #[test]
+    fn recording_audio_gaps_do_not_reprompt_and_later_meetings_rearm() {
+        let state = MeetingPresenceState::new();
+        let snapshot =
+            |audio: &[u32]| detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], audio);
+        let (_, first) = super::update_detections(&state, snapshot(&[10]), true);
+        let first = first.unwrap();
+        state.claim_prompt(&first.id).unwrap();
+        state.set_recording_active(true);
+        for audio in [vec![], vec![], vec![10]] {
+            let (_, prompt) = super::update_detections(&state, snapshot(&audio), true);
+            assert!(prompt.is_none());
+        }
+        state.set_recording_active(false);
+        let (_, prompt) = super::update_detections(&state, snapshot(&[10]), true);
+        assert!(
+            prompt.is_none(),
+            "same meeting must remain suppressed after recording"
+        );
+        super::update_detections(&state, snapshot(&[]), true);
+        super::update_detections(&state, snapshot(&[]), true);
+        let (_, prompt) = super::update_detections(&state, snapshot(&[10]), true);
+        assert_ne!(prompt.unwrap().id, first.id);
+    }
+
+    #[test]
+    fn a_single_audio_gap_does_not_discard_an_unanswered_prompt() {
+        let state = MeetingPresenceState::new();
+        let snapshot =
+            |audio: &[u32]| detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], audio);
+        let (_, prompt) = super::update_detections(&state, snapshot(&[10]), true);
+        let prompt_id = prompt.unwrap().id;
+        super::update_detections(&state, snapshot(&[]), true);
+        assert!(prompt_is_current(&state, &prompt_id));
+        let (_, next) = super::update_detections(&state, snapshot(&[10]), true);
+        assert!(next.is_none());
+        assert!(prompt_is_current(&state, &prompt_id));
+    }
+
+    #[test]
+    fn deferred_meetings_prompt_when_allowed_and_rearm_after_leaving() {
+        let state = MeetingPresenceState::new();
+        let snapshot =
+            |audio: &[u32]| detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], audio);
+        let (_, prompt) = super::update_detections(&state, snapshot(&[10]), false);
+        assert!(prompt.is_none());
+        let (_, prompt) = super::update_detections(&state, snapshot(&[10]), true);
+        let first_id = prompt.unwrap().id;
+        state.claim_prompt(&first_id).unwrap();
+        super::update_detections(&state, snapshot(&[]), false);
+        super::update_detections(&state, snapshot(&[]), false);
+        let (_, prompt) = super::update_detections(&state, snapshot(&[10]), true);
+        assert_ne!(prompt.unwrap().id, first_id);
+    }
+
+    #[test]
+    fn audio_helper_restart_does_not_repeat_a_dismissed_prompt() {
+        let state = MeetingPresenceState::new();
+        let snapshot = |helper| {
+            detect_fixture(
+                &[(10, 0, "ms-teams.exe"), (helper, 10, "msedgewebview2.exe")],
+                &[(10, "Teams")],
+                &[helper],
+            )
+        };
+        let (_, prompt) = super::update_detections(&state, snapshot(11), true);
+        state.claim_prompt(&prompt.unwrap().id).unwrap();
+        let (_, prompt) = super::update_detections(&state, snapshot(12), true);
+        assert!(prompt.is_none());
+        assert!(state.snapshot().prompt.is_none());
+    }
+
+    #[test]
+    fn two_audio_gaps_clear_the_prompt_and_allow_a_new_meeting() {
+        let state = MeetingPresenceState::new();
+        let snapshot =
+            |audio: &[u32]| detect_fixture(&[(10, 0, "Zoom.exe")], &[(10, "Zoom")], audio);
+        let (_, prompt) = super::update_detections(&state, snapshot(&[10]), true);
+        let first_id = prompt.unwrap().id;
+        super::update_detections(&state, snapshot(&[]), true);
+        super::update_detections(&state, snapshot(&[]), true);
+        assert!(!prompt_is_current(&state, &first_id));
+        assert!(state.claim_prompt(&first_id).is_err());
+        let (_, prompt) = super::update_detections(&state, snapshot(&[10]), true);
+        assert_ne!(prompt.unwrap().id, first_id);
+    }
+
+    #[test]
+    fn exiting_the_app_immediately_invalidates_its_prompt() {
+        let state = MeetingPresenceState::new();
+        let (_, prompt) = super::update_detections(
+            &state,
+            detect_fixture(&[(10, 0, "Zoom.exe")], &[(10, "Zoom")], &[10]),
+            true,
+        );
+        let prompt_id = prompt.unwrap().id;
+        super::update_detections(&state, detect_fixture(&[], &[], &[]), true);
+        assert!(!prompt_is_current(&state, &prompt_id));
+    }
+
+    #[test]
+    fn malformed_process_trees_and_exited_processes_do_not_prompt() {
+        let result = detect_fixture(
+            &[(10, 11, "Zoom.exe"), (11, 10, "Zoom.exe")],
+            &[(10, "Zoom"), (404, "Exited app")],
+            &[11, 404],
+        );
+        assert!(result.detections.is_empty());
+        assert!(result.possible_hints.is_empty());
+    }
+
+    #[test]
+    fn windows_idle_process_is_a_parent_boundary() {
+        let result = detect_fixture(
+            &[(0, 0, "[System Process]"), (10, 0, "Zoom.exe")],
+            &[(10, "Zoom Meeting")],
+            &[10],
+        );
+        assert_eq!(result.detections.len(), 1);
+        assert_eq!(result.detections[0].process_id, 10);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "read-only live Windows probe; run explicitly while joining/leaving a test call"]
+    fn inspect_live_windows_detection() {
+        let processes = super::enumerate_processes().expect("process enumeration");
+        let windows = super::enumerate_visible_windows().expect("window enumeration");
+        let audio = super::enumerate_active_audio_processes().expect("audio endpoint enumeration");
+        println!(
+            "Local signals: {} processes, {} window owners, {} active audio processes",
+            processes.len(),
+            windows.len(),
+            audio.len()
+        );
+        let result = super::classify_windows(processes, windows, audio, std::process::id());
+        for detection in &result.detections {
+            println!(
+                "Likely: {}; visible window: {}",
+                detection.app_label,
+                detection.window_process_id.is_some()
+            );
+        }
+        for hint in &result.possible_hints {
+            if !result
+                .detections
+                .iter()
+                .any(|d| d.process_id == hint.process_id)
+            {
+                println!("Possible only: {}", hint.app_label);
+            }
+        }
+        println!(
+            "Prompt deferred by full-screen/presentation mode: {}",
+            super::prompt_is_deferred()
+        );
+    }
+
+    #[test]
+    fn a_late_meeting_window_updates_the_existing_prompt_target() {
+        let state = MeetingPresenceState::new();
+        let processes = &[(10, 0, "Zoom.exe"), (11, 10, "Zoom.exe")];
+        let (_, prompt) =
+            super::update_detections(&state, detect_fixture(processes, &[], &[10]), true);
+        let prompt_id = prompt.unwrap().id;
+        super::update_detections(
+            &state,
+            detect_fixture(processes, &[(11, "Zoom Meeting")], &[10]),
+            true,
+        );
+        let prompt = state.claim_prompt(&prompt_id).unwrap();
+        assert_eq!(prompt.process_id, 10);
+        assert_eq!(prompt.window_process_id, Some(11));
+    }
+
     use super::{
-        friendly_app_label, is_known_meeting_process, DetectionSession, MeetingPresenceConfidence,
-        MeetingPresenceEvidence, MeetingPresenceMode, MeetingPresenceState, PendingPrompt,
-        prompt_is_current, should_show_background_prompt, toast_xml, update_session_activity,
-        PROMPT_MESSAGE,
-        PROMPT_NOT_RECORDING_MESSAGE,
+        friendly_app_label, is_known_meeting_process, prompt_is_current,
+        should_show_background_prompt, toast_xml, update_session_activity, DetectionSession,
+        MeetingPresenceConfidence, MeetingPresenceEvidence, MeetingPresenceMode,
+        MeetingPresenceState, PendingPrompt, PROMPT_MESSAGE, PROMPT_NOT_RECORDING_MESSAGE,
     };
 
     #[cfg(desktop)]
@@ -1503,6 +2156,7 @@ mod tests {
         let prompt = PendingPrompt {
             id: "meeting-prompt-1".to_string(),
             process_id: 42,
+            window_process_id: Some(42),
             app_label: "Microsoft Teams".to_string(),
             confidence: MeetingPresenceConfidence::Likely,
             evidence: Vec::new(),
@@ -1528,7 +2182,10 @@ mod tests {
 
     #[test]
     fn unknown_apps_never_expose_process_names() {
-        assert_eq!(friendly_app_label("some-private-app.exe", &["Room".into()]), "another app");
+        assert_eq!(
+            friendly_app_label("some-private-app.exe", &["Room".into()]),
+            "another app"
+        );
         assert!(!is_known_meeting_process("some-private-app.exe"));
     }
 
@@ -1557,6 +2214,7 @@ mod tests {
             data.prompt = Some(PendingPrompt {
                 id: "prompt-current".into(),
                 process_id: 42,
+                window_process_id: Some(42),
                 app_label: "Granola".into(),
                 confidence: MeetingPresenceConfidence::Likely,
                 evidence: vec![

@@ -2,6 +2,7 @@
   import { onDestroy } from "svelte";
   import { createMeetingNotesAutosave, loadMeetingAfterAutosave } from "$lib/meeting-notes";
   import { page } from "$app/state";
+  import { registerUpdateGuard, registerPendingSave } from "$lib/pending-work";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
     getMeeting,
@@ -41,11 +42,12 @@
   const notesAutosave = createMeetingNotesAutosave(updateNotes, (status) => {
     notesSaveError = status === "error";
   });
+  const disposeNotesSave = registerPendingSave(() => notesAutosave.flush());
   let enhancementVersion = 0;
   onDestroy(() => {
     enhancementVersion++;
     clearTimeout(renderTimer);
-    void notesAutosave.close().catch((error) => console.error("Failed to save notes:", error));
+    disposeNotesSave();
   });
 
   // Inline title editing
@@ -86,16 +88,19 @@
     return value === "generate" || value === "enhance";
   }
 
-  async function loadConfig() {
+  async function loadConfig(isCurrent: () => boolean) {
     try {
-      config = await getLlmConfig();
-      templates = await listTemplates();
+      const [nextConfig, nextTemplates] = await Promise.all([getLlmConfig(), listTemplates()]);
+      if (!isCurrent()) return;
+      config = nextConfig;
+      templates = nextTemplates;
       selectedTemplateId = templates[0]?.id;
     } catch (err) {
+      if (!isCurrent()) return;
       console.error("Failed to load LLM config/templates:", err);
       config = null;
     } finally {
-      configLoaded = true;
+      if (isCurrent()) configLoaded = true;
     }
   }
 
@@ -110,17 +115,17 @@
   async function runEnhancement() {
     if (!meeting || enhancing) return;
     const id = meeting.id;
+    const templateId = selectedTemplateId;
     const version = ++enhancementVersion;
     enhancing = true;
     enhanceError = null;
-    enhancedMd = "";
-    enhancedHtml = "";
-    enhancedGenerated = false;
-
     try {
       await notesAutosave.flush();
       if (version !== enhancementVersion) return;
-      await enhanceMeeting(id, selectedTemplateId, (event) => {
+      enhancedMd = "";
+      enhancedHtml = "";
+      enhancedGenerated = false;
+      await enhanceMeeting(id, templateId, (event) => {
         if (version !== enhancementVersion) return;
         if (event.event === "chunk") {
           enhancedMd += event.data;
@@ -145,10 +150,10 @@
 
   // (Re)load whenever the route param changes.
   $effect(() => {
+    let current = true;
     const id = Number(page.params.id);
     const mode = page.url.searchParams.get("mode");
     const warning = page.url.searchParams.get("warning");
-    let active = true;
     enhancementVersion++;
     enhancing = false;
     enhanceError = null;
@@ -164,18 +169,21 @@
     enhancedGenerated = false;
     hasEverEnhanced = false;
     configLoaded = false;
+    config = null;
+    templates = [];
+    selectedTemplateId = undefined;
     if (!Number.isInteger(id)) {
       notFound = true;
       return;
     }
-    loadConfig();
+    const configReady = loadConfig(() => current);
     loadMeetingAfterAutosave(
       notesAutosave,
       () => getMeeting(id),
       (error) => console.error("Failed to save notes:", error),
     )
-      .then((m) => {
-        if (!active) return;
+      .then(async (m) => {
+        if (!current) return;
         meeting = m;
         notes = notesAutosave.pendingNotes(id) ?? m.notepad;
         if (m.enhanced_markdown) {
@@ -186,15 +194,16 @@
         }
         if (isEnhanceMode(mode)) {
           tab = "enhance";
-          if (config?.model) {
-            runEnhancement();
+          await configReady;
+          if (current && config?.model && config.base_url.trim()) {
+            await runEnhancement();
           }
         }
       })
       .catch(() => {
-        if (active) notFound = true;
+        if (current) notFound = true;
       });
-    return () => { active = false; };
+    return () => { current = false; };
   });
 
   $effect(() => {
@@ -218,6 +227,7 @@
         meeting.title = trimmed;
       } catch (err) {
         console.error("Failed to rename meeting:", err);
+        return;
       }
     }
     editingTitle = false;
@@ -340,6 +350,14 @@
   function onNotesInput() {
     if (meeting) notesAutosave.schedule(meeting.id, notes);
   }
+
+  $effect(() => {
+    return registerUpdateGuard(() => {
+      if (editingTitle || editingSegmentId !== undefined) {
+        throw new Error("Finish or cancel the title or transcript edit before updating.");
+      }
+    });
+  });
 
   function formatMeta(m: MeetingDetail): string {
     const date = new Date(m.created_at).toLocaleDateString("en-US", {

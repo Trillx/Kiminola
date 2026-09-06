@@ -3,6 +3,7 @@ export type DraftAutosaveStatus = "saving" | "saved" | "error";
 export interface DraftAutosave<T = string> {
   schedule(value: T): void;
   flush(value: T): Promise<void>;
+  flushPending(): Promise<void>;
   cancel(): void;
 }
 
@@ -20,16 +21,18 @@ export function createDraftAutosave<T = string>(
   let queue = Promise.resolve();
   let latestRequest = 0;
   let cancelled = false;
+  let pending: { value: T } | undefined;
 
-  function enqueue(value: T): Promise<void> {
+  function enqueue(snapshot: { value: T }): Promise<void> {
     const request = ++latestRequest;
     if (!cancelled) onStatus("saving");
 
-    const run = queue.catch(() => undefined).then(() => save(value));
+    const run = queue.catch(() => undefined).then(() => save(snapshot.value));
     queue = run.catch(() => undefined);
 
     return run.then(
       () => {
+        if (pending === snapshot) pending = undefined;
         if (!cancelled && request === latestRequest) onStatus("saved");
       },
       (error: unknown) => {
@@ -42,21 +45,30 @@ export function createDraftAutosave<T = string>(
   return {
     schedule(value: T) {
       if (cancelled) return;
+      pending = { value };
       clearTimeout(timer);
       timer = setTimeout(() => {
         timer = undefined;
-        void enqueue(value).catch(() => undefined);
+        if (pending) void enqueue(pending).catch(() => undefined);
       }, delayMs);
     },
 
     flush(value: T) {
       clearTimeout(timer);
       timer = undefined;
-      return enqueue(value);
+      pending = { value };
+      return enqueue(pending);
+    },
+
+    flushPending() {
+      clearTimeout(timer);
+      timer = undefined;
+      return pending ? enqueue(pending) : queue;
     },
 
     cancel() {
       cancelled = true;
+      pending = undefined;
       clearTimeout(timer);
       timer = undefined;
     },

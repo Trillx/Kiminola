@@ -11,14 +11,14 @@
   let visible = $derived(
     updateState.version !== null &&
       dismissedVersion !== updateState.version &&
-      ["available", "downloading", "ready", "installing"].includes(updateState.status),
+      ["available", "downloading", "ready", "preparing", "installing"].includes(updateState.status),
   );
   let notes = $derived(compactReleaseNotes(updateState.notes));
 
   async function install() {
     actionError = "";
     const installed = await installUpdate(() => !isRecording);
-    if (!installed && !isRecording && updateState.status === "error") {
+    if (!installed && !isRecording && updateState.error) {
       actionError = updateState.error ?? "The update could not be installed.";
     }
   }
@@ -40,6 +40,8 @@
       <strong>Kimi Nola {updateState.version} is available</strong>
       {#if updateState.status === "downloading"}
         <span>Downloading the signed update…</span>
+      {:else if updateState.status === "preparing"}
+        <span>Saving your changes before updating…</span>
       {:else if updateState.status === "installing"}
         <span>Installing now. Kimi Nola will restart when the update is complete.</span>
       {:else if isRecording}

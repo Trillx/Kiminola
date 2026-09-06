@@ -58,7 +58,9 @@ The identity applies to these surfaces, in priority order:
 | Live waveform bars | `scaleY(.15) → scaleY(1)`, `ease-in-out infinite alternate`; per-bar duration `0.5 + (i mod 5) × 0.11s`, delay `i × 0.07s`; 12 bars, 5px wide, 3px radius, 5px gap |
 | Buttons | hover invert (fill ↔ transparent), `0.3s` all |
 
-**No other animation.** No scroll reveals, no hover scales, no marquees. The identity moves only when audio is live.
+Functional window motion is also allowed: Companion layout moves and resizes visible windows together over 200 ms with cubic ease-out and no overshoot. Hidden/minimized notes open at their destination. User movement cancels the transition, and Windows reduced motion disables it. Shell geometry follows viewport resizing immediately; an explicit sidebar toggle may animate for 200 ms unless reduced motion is enabled.
+
+**No other decorative animation.** No scroll reveals, no hover scales, no marquees.
 
 ## 6. Logic to port
 

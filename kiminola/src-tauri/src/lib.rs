@@ -1,5 +1,6 @@
 mod asr;
 mod db;
+mod db_safety;
 mod export;
 mod llm;
 mod loopback;
@@ -125,7 +126,13 @@ pub fn run() {
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
-                    if let Some(current) = app.state::<shortcuts::ShortcutState>().current.lock().unwrap().as_ref() {
+                    if let Some(current) = app
+                        .state::<shortcuts::ShortcutState>()
+                        .current
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                    {
                         if let Ok(current) = Shortcut::from_str(current) {
                             if shortcut == &current {
                                 let _ = app.emit("shortcut:triggered", ());
@@ -138,7 +145,9 @@ pub fn run() {
         .setup(|app| {
             recording::setup(app);
             db::setup(app);
-            shortcuts::setup(app)?;
+            if let Err(error) = shortcuts::setup(app) {
+                eprintln!("[shortcuts] startup settings unavailable: {error}");
+            }
             meeting_presence::setup(app)?;
             if std::env::args().any(|arg| arg == "--background") {
                 if let Some(window) = app.get_webview_window("main") {
@@ -180,6 +189,11 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            db::database_status,
+            db::retry_database,
+            db::restore_database_backup,
+            recording::prepare_app_update,
+            recording::cancel_app_update,
             recording::start_recording,
             recording::stop_recording,
             recording::pause_recording,

@@ -62,12 +62,25 @@ jobs:
         working-directory: kiminola
         run: npm.cmd run check
 
+      - name: Test frontend update safety
+        working-directory: kiminola
+        run: npm.cmd test
+
       - name: Prepare native dependencies
         working-directory: kiminola
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: .\scripts\prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
+
+      - name: Test database upgrade and recovery
+        if: matrix.arch == 'x64'
+        working-directory: kiminola/src-tauri
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:SHERPA_ONNX_LIB_DIR;$env:PATH"
+          cargo test --lib --target '${{ matrix.target }}' db
+          if ($LASTEXITCODE -ne 0) { throw 'Database safety tests failed.' }
 
       - name: Build unsigned CI installer
         working-directory: kiminola

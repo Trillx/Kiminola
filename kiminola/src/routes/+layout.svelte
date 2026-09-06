@@ -2,19 +2,24 @@
   import "../app.css";
   import { onMount } from "svelte";
   import { page } from "$app/state";
-  import { goto } from "$app/navigation";
+  import { beforeNavigate, goto } from "$app/navigation";
   import { themeState } from "$lib/theme.svelte";
   import { sidebarState } from "$lib/sidebar.svelte";
+  import { stopSidebarMotion } from "$lib/sidebar-motion";
   import { isOnboardingComplete, onShortcutTriggered } from "$lib/tauri";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import Topbar from "$lib/components/Topbar.svelte";
   import MeetingPresencePrompt from "$lib/components/MeetingPresencePrompt.svelte";
   import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import { libraryDestinationState, recordingHref } from "$lib/library-tree.svelte";
-  import { startAutomaticUpdateCheck } from "$lib/update.svelte";
-  import { setupCompactWindowSync } from "$lib/compact-window";
+  import { startAutomaticUpdateCheck, updateState } from "$lib/update.svelte";
+  import DatabaseGate from "$lib/components/DatabaseGate.svelte";
 
   let { children } = $props();
+  let databaseReady = $state(false);
+  let updateBusy = $derived(updateState.status === "preparing" || updateState.status === "installing");
+  beforeNavigate(({ cancel }) => { if (updateBusy) cancel(); });
+  import { setupCompactWindowSync } from "$lib/compact-window";
   let compactWindow = $state(false);
   let compactWindowResizing = $state(false);
 
@@ -25,24 +30,16 @@
   });
 
   $effect(() => {
-    const useCompactShell = compactWindow || sidebarState.collapsed;
-    document.documentElement.style.setProperty(
-      "--sidebar-width",
-      useCompactShell ? "0px" : "240px",
-    );
-    document.documentElement.dataset.compactWindow = compactWindow ? "true" : "false";
-    document.documentElement.setAttribute(
-      "data-compact-window-resizing",
-      compactWindowResizing ? "true" : "false",
-    );
+    document.documentElement.dataset.sidebarCollapsed = String(sidebarState.collapsed);
+    document.documentElement.setAttribute("data-compact-window-resizing", compactWindowResizing ? "true" : "false");
   });
 
-  // A companion layout can make the main window much narrower than the
-  // library's normal width. Collapse the navigation chrome at that width
-  // without changing the user's saved sidebar preference.
+  // CSS owns compact layout. A resize also ends any in-flight button animation
+  // so shell geometry follows the viewport without a trailing transition.
   onMount(() => {
     const media = window.matchMedia("(max-width: 760px)");
-    return setupCompactWindowSync({
+    window.addEventListener("resize", stopSidebarMotion);
+    const stopCompactSync = setupCompactWindowSync({
       media,
       initialCompactWindow: compactWindow,
       requestFrame: (callback) => requestAnimationFrame(callback),
@@ -52,10 +49,12 @@
         compactWindowResizing = resizing;
       },
     });
+    return () => { stopCompactSync(); window.removeEventListener("resize", stopSidebarMotion); stopSidebarMotion(); };
   });
 
   // Onboarding gate: the library is inaccessible until onboarding completes.
-  onMount(async () => {
+  async function onDatabaseReady() {
+    databaseReady = true;
     try {
       const complete = await isOnboardingComplete();
       if (!complete) {
@@ -64,7 +63,7 @@
     } catch (err) {
       console.error("[layout] onboarding check failed:", err);
     }
-  });
+  }
 
   // The global shortcut opens the recording view. Once there, the page owns
   // the stop action so native finalization and durable meeting save stay one
@@ -72,6 +71,7 @@
   $effect(() => {
     let unlisten: (() => void) | undefined;
     onShortcutTriggered(() => {
+      if (!databaseReady || updateBusy) return;
       if (page.url.pathname !== "/record") {
         goto(recordingHref(libraryDestinationState.last));
       }
@@ -86,10 +86,12 @@
   );
 
   $effect(() => {
-    if (!isOnboarding && !isMeetingPromptOverlay) startAutomaticUpdateCheck();
+    if (databaseReady && !isOnboarding && !isMeetingPromptOverlay) startAutomaticUpdateCheck();
   });
 </script>
 
+<DatabaseGate onready={onDatabaseReady}>
+<div inert={updateBusy}>
 {#if isOnboarding}
   {@render children()}
 {:else if isMeetingPromptOverlay}
@@ -105,3 +107,14 @@
     </main>
   </div>
 {/if}
+</div>
+{#if updateBusy}
+  <div class="update-shutdown" role="status" aria-live="polite">
+    {updateState.status === "preparing" ? "Saving your changes before updating…" : "Installing the update. Kimi Nola will restart…"}
+  </div>
+{/if}
+</DatabaseGate>
+
+<style>
+  .update-shutdown { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 32px; background: var(--paper); color: var(--ink); }
+</style>

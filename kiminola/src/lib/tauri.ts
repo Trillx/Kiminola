@@ -1,6 +1,12 @@
-import { invoke, Channel } from "@tauri-apps/api/core";
+import { invoke as nativeInvoke, Channel, type InvokeArgs } from "@tauri-apps/api/core";
+// @ts-expect-error Node strip-types tests import the TypeScript source directly.
+import { trackOperation } from "./pending-work.ts";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+
+function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
+  return trackOperation(nativeInvoke<T>(command, args));
+}
 
 export type TranscriptChannel = "you" | "others";
 

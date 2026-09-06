@@ -18,6 +18,7 @@ pub struct RecordingState {
     asr_engine: Arc<Mutex<Option<Arc<AsrEngine>>>>,
     pending_loopback_target: SyncMutex<Option<PendingLoopbackTarget>>,
     active: AtomicBool,
+    updating: AtomicBool,
 }
 
 struct ActiveRecording {
@@ -87,11 +88,17 @@ impl RecordingState {
             asr_engine: Arc::new(Mutex::new(None)),
             pending_loopback_target: SyncMutex::new(None),
             active: AtomicBool::new(false),
+            updating: AtomicBool::new(false),
         }
     }
 
     fn set_active(&self, active: bool) {
         self.active.store(active, Ordering::Release);
+    }
+
+    fn set_active_for_app(&self, app: &AppHandle, active: bool) {
+        self.set_active(active);
+        crate::meeting_presence::recording_activity_changed(app, active);
     }
 
     fn is_active(&self) -> bool {
@@ -195,12 +202,19 @@ impl TranscriptSink for TauriTranscriptSink {
 pub async fn start_recording(
     app: AppHandle,
     state: State<'_, RecordingState>,
+    database: State<'_, crate::db::DbState>,
 ) -> Result<RecordingStartStatus, String> {
+    crate::db::ensure_pool(&database.pool).await?;
     let mut session = state.session.lock().await;
+    if state.updating.load(Ordering::Acquire) {
+        return Err(
+            "The app is preparing to update. Recording is paused until it restarts.".into(),
+        );
+    }
     if session.is_some() {
         return Err("recording already in progress".into());
     }
-    state.set_active(true);
+    state.set_active_for_app(&app, true);
 
     // Grab the preloaded ASR engine (warmed in the background at app launch);
     // lanes are cheap per-recording streams over the shared weights.
@@ -214,7 +228,7 @@ pub async fn start_recording(
         Arc::new(DefaultAudioSource::for_process(target_process_id));
     let transcript_store = Arc::new(TranscriptEventStore::default());
     let sink: Arc<dyn TranscriptSink> = Arc::new(TauriTranscriptSink {
-        app,
+        app: app.clone(),
         store: Arc::clone(&transcript_store),
     });
     let new_session = RecordingSession::new(audio_source, engine, sink);
@@ -222,7 +236,7 @@ pub async fn start_recording(
     let start_status = match new_session.start().await {
         Ok(status) => status,
         Err(error) => {
-            state.set_active(false);
+            state.set_active_for_app(&app, false);
             return Err(error);
         }
     };
@@ -233,6 +247,34 @@ pub async fn start_recording(
     Ok(start_status)
 }
 
+#[tauri::command]
+pub async fn prepare_app_update(
+    state: State<'_, RecordingState>,
+    database: State<'_, crate::db::DbState>,
+) -> Result<(), String> {
+    let session = state.session.lock().await;
+    if session.is_some() || state.is_active() {
+        return Err("Finish and save the current recording before updating.".into());
+    }
+    state.updating.store(true, Ordering::Release);
+    if let Err(error) = database.pool.suspend().await {
+        state.updating.store(false, Ordering::Release);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_app_update(
+    state: State<'_, RecordingState>,
+    database: State<'_, crate::db::DbState>,
+) -> Result<(), String> {
+    let _session = state.session.lock().await;
+    database.pool.resume().await;
+    state.updating.store(false, Ordering::Release);
+    Ok(())
+}
+
 /// Stops the active recording session and returns the authoritative latest
 /// revision of every utterance. The response closes the event-delivery race at
 /// save time: the frontend can merge this snapshot before persisting. Repeated
@@ -240,18 +282,19 @@ pub async fn start_recording(
 /// first command completed but its IPC response was lost.
 #[tauri::command]
 pub async fn stop_recording(
+    app: AppHandle,
     state: State<'_, RecordingState>,
 ) -> Result<RecordingStopResult, String> {
     let mut session = state.session.lock().await;
     let Some(active) = session.take() else {
-        state.set_active(false);
+        state.set_active_for_app(&app, false);
         return Ok(RecordingStopResult {
             transcript: Vec::new(),
             finalization_warning: None,
         });
     };
     let stop_result = active.session.stop().await;
-    state.set_active(false);
+    state.set_active_for_app(&app, false);
     Ok(result_after_finalization(
         stop_result,
         &active.transcript_store,

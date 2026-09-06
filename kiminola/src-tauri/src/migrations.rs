@@ -1,11 +1,18 @@
 //! Use stable LF checksums for new databases while recognizing the exact CRLF
 //! variants shipped by earlier Windows builds. Never rewrite stored checksums.
 use sha2::{Digest, Sha384};
-use sqlx::migrate::Migration;
+use sqlx::migrate::{Migration, Migrator};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
+#[cfg(test)]
 pub(crate) async fn run(pool: &SqlitePool) -> Result<(), String> {
+    compatible(pool, &sqlx::migrate!("./migrations"))
+        .await?
+        .run(pool).await.map_err(|e| e.to_string())
+}
+
+pub(crate) async fn compatible(pool: &SqlitePool, source: &Migrator) -> Result<Migrator, String> {
     let has_history: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",
     ).fetch_one(pool).await.map_err(|e| e.to_string())?;
@@ -20,7 +27,12 @@ pub(crate) async fn run(pool: &SqlitePool) -> Result<(), String> {
         HashMap::new()
     };
 
-    let mut migrator = sqlx::migrate!("./migrations");
+    let mut migrator = Migrator {
+        migrations: source.iter().cloned().collect::<Vec<_>>().into(),
+        ignore_missing: source.ignore_missing,
+        locking: source.locking,
+        no_tx: source.no_tx,
+    };
     for migration in migrator.migrations.to_mut() {
         let lf = migration.sql.replace("\r\n", "\n");
         let crlf_checksum = Sha384::digest(lf.replace('\n', "\r\n").as_bytes());
@@ -38,5 +50,5 @@ pub(crate) async fn run(pool: &SqlitePool) -> Result<(), String> {
         }
     }
     // SQLx still checks dirty/missing versions and every other checksum mismatch.
-    migrator.run(pool).await.map_err(|e| e.to_string())
+    Ok(migrator)
 }

@@ -78,6 +78,41 @@ after that bridge release, later stable releases can arrive through the app.
   launch, restart, database preservation, model preservation, and live updater
   discovery still require a Windows test on each architecture.
 
+## Database and shutdown validation
+
+CI runs the actual SQLx migration and recovery tests on Windows x64. Native
+ARM64 validation remains required before publication. Run `npm test` and
+`cargo test --lib db` with the matching native DLL directory on PATH.
+
+The app saves pending editor changes and waits for outstanding app commands
+before installation. Its native update barrier blocks new recordings and
+closes the database pool. If saving fails, installation is cancelled and the
+app stays open. Exercise a downloaded update immediately after typing, while
+a save is still running, after a save failure, and during a recording.
+
+Existing databases receive a verified `VACUUM INTO` snapshot before pending
+migrations run. Snapshots live in `%LOCALAPPDATA%\Kiminola\data\backups` and
+are retained across updates. Backups are local, unencrypted like the source
+database, and contain notes and transcripts. They do not include API keys or
+downloaded models. Published migration files must remain byte-for-byte stable;
+add a new migration instead of editing an applied one.
+
+Database startup errors show a recovery screen. Retry restarts the app after
+successful initialization. Restore requires an explicit user choice and
+confirmation, validates and upgrades a temporary copy, then archives the
+original database and sidecars under `data\before-restore-*`. Changes after the
+backup will not appear in the restored library; the archived originals remain
+available. An interrupted restore leaves `kiminola.restore-pending`, which
+blocks normal startup until recovery succeeds. Do not delete that marker or
+replace the database with an empty file to bypass an error.
+
+For an installed release test, compare populated fixtures and migration history
+before and after updating. Include notes, enhanced notes, transcript timestamps,
+custom templates, settings, draft recovery text and library destinations.
+Confirm model hashes and local ASR still work. Exercise backup creation failure,
+an invalid migration, a corrupted backup, and interrupted restore using isolated
+test data. Neither a build nor these unit tests prove the signed installer path.
+
 Reference documentation: [Tauri updater](https://v2.tauri.app/plugin/updater/),
 [Tauri GitHub pipeline](https://v2.tauri.app/distribute/pipelines/github/), and
 [GitHub releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository).

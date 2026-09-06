@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import { sidebarState, toggleSidebar } from "$lib/sidebar.svelte";
@@ -26,6 +27,31 @@
   import LibraryTreeNode from "$lib/components/LibraryTreeNode.svelte";
 
   let collapsedNodes = $state<Record<string, boolean>>({});
+  const collapsedStorageKey = "kiminola-library-collapsed";
+  let storageReady = $state(false);
+  let loadRequest = 0;
+  let revealedPath: string | null = null;
+
+  onMount(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(collapsedStorageKey) ?? "{}");
+      if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+        collapsedNodes = Object.fromEntries(Object.entries(saved).filter(
+          ([key, value]) => /^(space|meeting):[1-9]\d*$/.test(key) && value === true,
+        )) as Record<string, boolean>;
+      }
+    } catch { /* Storage is optional; the tree must still work. */ }
+    storageReady = true;
+  });
+
+  $effect(() => {
+    if (!storageReady) return;
+    try {
+      localStorage.setItem(collapsedStorageKey, JSON.stringify(Object.fromEntries(
+        Object.entries(collapsedNodes).filter(([, value]) => value),
+      )));
+    } catch { /* An unavailable store must not block navigation. */ }
+  });
   let libraryTree = $state<LibraryNode[]>([]);
   let treeLoadError = $state<string | null>(null);
   let searchOpen = $state(false);
@@ -69,13 +95,36 @@
   }
 
   async function loadTree() {
+    const request = ++loadRequest;
+    const route = pathname;
     try {
-      libraryTree = await listLibraryTree();
+      const tree = await listLibraryTree();
+      if (request !== loadRequest) return;
+      libraryTree = tree;
       treeLoadError = null;
+      if (route !== revealedPath) {
+        const match = /^\/meeting\/(\d+)$/.exec(route);
+        if (match) {
+          const path = pathTo({ kind: "meeting", id: Number(match[1]) });
+          for (const ancestor of path.slice(0, -1)) collapsedNodes[nodeKey(ancestor)] = false;
+        }
+        revealedPath = route;
+      }
     } catch (err) {
+      if (request !== loadRequest) return;
       treeLoadError = errorMessage(err);
       console.error("Failed to load library tree:", err);
     }
+  }
+
+  function pathTo(location: LibraryLocation, nodes = libraryTree): LibraryLocation[] {
+    for (const node of nodes) {
+      const ref = nodeRef(node);
+      if (nodeKey(ref) === nodeKey(location)) return [ref];
+      const children = pathTo(location, node.children);
+      if (children.length) return [ref, ...children];
+    }
+    return [];
   }
 
   function toggleNode(location: LibraryLocation) {
@@ -84,7 +133,7 @@
   }
 
   function expandNode(location: LibraryLocation) {
-    collapsedNodes[nodeKey(location)] = false;
+    for (const ancestor of pathTo(location)) collapsedNodes[nodeKey(ancestor)] = false;
   }
 
   function beginCreateSpace(parentSpaceId: number | null = null) {
@@ -319,6 +368,7 @@
         <button class="btn btn-ghost btn-sm" onclick={() => beginCreateSpace()}>New Space</button>
       </div>
     {:else}
+      <div class="library-tree" role="list" aria-label="Spaces and meetings">
       {#each libraryTree as node (nodeKey(nodeRef(node)))}
         <LibraryTreeNode
           {node}
@@ -340,6 +390,7 @@
           onDragEnd={endDrag}
         />
       {/each}
+      </div>
     {/if}
 
     {#if actionError && !moveDialogOpen && !renameDialogOpen}

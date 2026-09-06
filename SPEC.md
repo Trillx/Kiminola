@@ -65,18 +65,21 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 ## 5. UI/UX decisions
 
 - Sidebar navigation: **Home** only; Spaces is a recursive tree. Spaces may contain nested Spaces and Meetings, and Meetings may contain child Meetings at arbitrary depth. Context menus and drag-and-drop use the same validated move operation; sibling ordering is not user-controlled in this pass.
+- Space and parent-Meeting branches expand independently, with consistent indentation and hairline connectors. Open/closed state persists locally; navigating to a Meeting reveals its ancestors. Disclosure arrows point right when closed and down when open. Branch height and arrows transition over 180 ms, with no motion when reduced motion is enabled. Enter/Space activate the focused control; Left/Right close/open branches and move between parent and child controls.
 - New meetings inherit an explicit Space or Meeting destination from the action that started them. Global New meeting and the shortcut use the last explicit destination, falling back to Personal. The destination is captured when recording starts.
 - Removed from prototype: Invite, Shared with me, Chat — out of MVP scope.
 - Live transcript auto-scrolls; scrollbar hidden until user scrolls.
 - Global hotkey: configurable start/stop (Tauri global-shortcut plugin), sensible default.
 - Onboarding: minimal first-run wizard — mic permission → model download with progress → optional BYOK key (skippable).
-- Companion layout: when the user chooses **Start recording** from a Meeting prompt, Kimi Nola arranges the detected meeting window on the left at roughly two-thirds of the active display and its own Notepad window on the right at roughly one-third. The arrangement is a starting point: normal windows may be resized, true full-screen/presentation windows are not forced to change, and user movement/resizing is never overridden.
+- Companion layout: when the user chooses **Start recording** from a Meeting prompt, Kimi Nola arranges the detected meeting window on the left at roughly two-thirds of the active display and its own Notepad window on the right at roughly one-third. Visible windows move and resize together in a 200 ms ease-out transition; reduced motion uses immediate placement. Hidden or minimized notes open at the destination. Starting a user move/resize, closing either window, or requesting another layout cancels the transition. The arrangement is a starting point: normal windows may be resized, true full-screen/presentation windows are not forced to change, and user movement/resizing is never overridden. During manual resizing, content follows the viewport immediately; only an explicit sidebar toggle animates the shell geometry.
 - Meeting-prompt recording also uses the detected meeting process tree as the preferred loopback target. Manual recording and unsupported/failed process activation use classic default-output loopback.
 - Active recordings checkpoint notes, elapsed duration, and the latest transcript revisions into a SQLite note draft. An interrupted session remains visible in the library and can be continued into a normal saved meeting; intentional cancellation removes only drafts created automatically for that recording.
 
 ## 6. Data model & storage
 
 - **SQLite single store** via sqlx + migrations.
+- **Update durability**: installation waits for pending note saves and app commands, blocks new recording starts, and closes the database pool before handing off to the installer. Save failures keep the app open.
+- **Migration recovery**: before changing an existing schema, create and verify a SQLite snapshot under the data folder's `backups/` directory. Backup or migration failure blocks normal app use and presents retry and restore options. Restore validates and migrates a staged copy first, preserves the original database and sidecars, and records an interruption marker so a failed restore cannot create an empty library. Backups are retained; an older app must not open a newer schema.
 - **Location**: `%LOCALAPPDATA%\Kiminola\data` for user data; `%LOCALAPPDATA%\Kiminola\models` for ASR models.
 - **Schema** (initial):
   - `meetings` — id, title, nullable `space_id`, nullable `parent_meeting_id`, created_at, duration_seconds. Exactly one location column is set for saved Meetings.
@@ -130,6 +133,11 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   session. A single signal remains a quiet possible hint with coarse evidence
   labels; detection never starts recording. Prompts defer while Windows reports
   presentation mode or a full-screen foreground app.
+- Detection associates helper-process audio with its meeting-app process family
+  and checks all active input/output audio endpoints, including non-default
+  headsets. Episode suppression and process-loopback capture use the family
+  root; Companion layout targets the family's visible application window.
+  Unrelated processes are never grouped solely by matching executable names.
 - Initial friendly labels are Granola, Zoom, Microsoft Teams, Google Meet,
   Webex, and a generic “another app” fallback. Raw executable names, window
   titles, URLs, calendar metadata, and detector history are not persisted or
@@ -140,12 +148,19 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Jot notes creates a standalone Note draft in the same library. Drafts
   autosave, survive restart, never expire silently, and may be explicitly
   deleted. Starting and saving a meeting can attach the draft's notes.
+- Recording startup, active capture, and finalization suppress meeting hints and
+  prompts. Starting recording clears pending prompts and retracts their visible
+  notifications. Episodes observed during recording remain suppressed until the
+  normal inactivity reset; a later meeting may prompt again.
 - At most one prompt is shown per active meeting-presence episode for an app.
   Any prompt action suppresses only that episode; after two consecutive
   detector polls without active meeting audio, the next meeting may prompt
   again even if the meeting app process remains open. Prompt actions are
   accepted only while their prompt ID is current; stale or unknown actions
   are rejected without recording.
+- One inactive poll does not discard an unanswered prompt. Two inactive polls
+  clear it and rearm the episode; process exit clears it immediately. Activity
+  continues to update while presentation/full-screen mode defers visible prompts.
 - Settings expose Meeting detection and Start with Windows. Tray status is
   “Detecting locally · not recording”, “Paused”, or “Off”.
 
