@@ -43,6 +43,11 @@ try {
         if (command === "plugin:event|unlisten") return;
         if (command === "is_onboarding_complete") return true;
         if (command === "database_status") return { ready: true, backups: [] };
+        if (command === "plugin:app|version") return "0.1.2";
+        if (command === "get_global_shortcut") return "Control+Shift+Space";
+        if (command === "check_model_pack") return true;
+        if (command === "get_llm_config") return { kind: "ollama", base_url: "http://localhost:11434/v1", model: "test", has_api_key: false };
+        if (command === "list_templates") return [{ id: 1, name: "General", prompt: "{transcript} {notes}", is_builtin: 1 }];
         if (["list_meetings", "list_note_drafts", "list_library_tree"].includes(command)) return [];
         if (command === "get_meeting_presence_state") return { enabled: false, paused: false, start_with_windows: false, mode: "disabled", hint: null, prompt: null };
         if (command === "get_note_draft") return {
@@ -124,6 +129,24 @@ try {
   assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector(".main")).transitionDuration), "0s");
   assert.equal(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector(".main")).marginLeft)), 240);
   console.log("PASS sidebar toggle: 200 ms motion, resize cancellation, saved preference, reduced motion");
+  await page.goto(origin + "/settings");
+  await page.getByRole("tab", { name: "General", exact: true }).waitFor();
+  assert.equal(await page.locator(".sidebar").count(), 0);
+  assert.equal(await page.locator(".topbar").count(), 0);
+  for (const label of ["General", "Speech model", "AI provider", "Shortcut", "Templates", "About"]) {
+    await page.getByRole("tab", { name: label, exact: true }).click();
+    await page.waitForFunction((name) => document.querySelector('[role="tab"][aria-selected="true"]')?.textContent?.trim() === name, label);
+    assert.equal(await page.locator('[role="tabpanel"]').count(), 1);
+  }
+  await page.setViewportSize({ width: 420, height: 800 });
+  await settleFrame();
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "settings at narrow width must fit");
+  await page.getByRole("link", { name: "Meetings", exact: true }).click();
+  await page.locator(".sidebar-collapse-btn").waitFor();
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await settleFrame();
+  assert.equal(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector(".main")).marginLeft)), 240, "leaving settings restores the sidebar");
+  console.log("PASS settings: all six sections, narrow layout, return to meetings with sidebar restored");
   assert.deepEqual(errors, [], "browser runtime errors");
 } finally {
   await browser?.close();
