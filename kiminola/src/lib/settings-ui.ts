@@ -84,6 +84,15 @@ export function isProviderConfigDirty(
   );
 }
 
+// UI invalidation is deliberately conservative: any endpoint edit clears key
+// status and pending replacements. The backend owns canonical credential scoping.
+export function providerIdentityChanged(
+  previous: ProviderFormConfig,
+  next: ProviderFormConfig,
+): boolean {
+  return previous.kind !== next.kind || previous.base_url !== next.base_url;
+}
+
 export function providerIsConfigured(config: ProviderFormConfig): boolean {
   if (config.base_url.trim() === "" || config.model.trim() === "") return false;
   if (config.kind === "ollama" || config.kind === "lm_studio") return true;

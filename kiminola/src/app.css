@@ -38,7 +38,7 @@
   --ink: #242424;
   --ink-strong: #121212;
   --text-muted: #474747; /* grey */
-  --soft: #857f72;
+  --soft: var(--text-muted); /* small metadata must retain normal-text contrast */
 
   --brand: #a88b4f; /* deepgold — light surfaces only */
   --brand-hover: #8f7640;
@@ -103,8 +103,8 @@
   --canvas: #242424; /* ink */
   --ink: #f2efe9; /* paper */
   --ink-strong: #fbf9f4;
-  --text-muted: #9b968b;
-  --soft: #6f6c64;
+  --text-muted: #aaa497; /* warm grey, AA even on elevated charcoal */
+  --soft: var(--text-muted);
 
   --brand: #ccc0a8; /* muted gold — dark surfaces only */
   --brand-hover: #d9cfb9;
@@ -380,6 +380,44 @@ html[data-sidebar-motion="true"] {
   color: var(--ink);
 }
 
+.sidebar-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: rgba(36, 36, 36, 0.5);
+}
+
+.sidebar.sidebar-drawer {
+  z-index: 40; /* below nested search/rename/move dialogs (50) */
+  width: min(320px, calc(100vw - 32px));
+  padding: 16px 12px 14px;
+  border-right: 1px solid var(--hairline-soft);
+  box-shadow: 8px 0 28px var(--shadow-paper);
+}
+
+.sidebar-drawer .wordmark { padding-right: 36px; }
+
+.sidebar-close-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.sidebar-open-btn[data-state="open"] { visibility: hidden; }
+.sidebar-close-btn:hover { background: var(--surface-elev); }
+.sidebar-collapse-btn:focus-visible,
+.sidebar-close-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+/* Keep high-z-index recording controls behind a modal drawer. */
+.main[inert] { isolation: isolate; }
+
 /* Breakpoint changes happen during a live native resize. Do not make the
    shell chase the pointer with a layout animation; manual sidebar collapse
    keeps its normal motion because this guard is only set by +layout.svelte. */
@@ -443,8 +481,16 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
   min-width: 212px; /* keep labels from wrapping during the collapse animation */
 }
+
+.sidebar > :not(nav),
+.sidebar nav > * { flex-shrink: 0; }
 
 .sidebar .nav-item {
   display: flex;
@@ -570,6 +616,8 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
 
 .sidebar .sidebar-bottom {
   margin-top: auto;
+  padding-top: 12px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -589,8 +637,8 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
   width: 22px;
   height: 22px;
   border-radius: 5px;
-  background: var(--brand);
-  color: #f2efe9; /* paper */
+  background: var(--ink);
+  color: var(--canvas);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2252,12 +2300,14 @@ textarea.template-prompt-editor {
     border-right: none;
   }
 
-  .sidebar > *:not(.sidebar-collapse-btn) {
-    display: none;
-  }
-
   .sidebar-collapse-btn {
     left: 16px;
+  }
+
+  .sidebar-open-btn {
+    top: 14px;
+    width: 32px;
+    height: 32px;
   }
 
   .main-content {

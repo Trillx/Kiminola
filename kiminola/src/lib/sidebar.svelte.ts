@@ -8,7 +8,12 @@ function initialCollapsed(): boolean {
   return localStorage.getItem(STORAGE_KEY) === "true";
 }
 
-export const sidebarState = $state({ collapsed: initialCollapsed() });
+// Compact navigation is transient; never overwrite the desktop preference.
+export const sidebarState = $state({ collapsed: initialCollapsed(), compactOpen: false });
+
+export function closeCompactSidebar() {
+  sidebarState.compactOpen = false;
+}
 
 export function toggleSidebar() {
   if (browser) startSidebarMotion();

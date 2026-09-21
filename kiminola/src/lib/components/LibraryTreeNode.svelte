@@ -14,7 +14,7 @@
   import Pencil from "@lucide/svelte/icons/pencil";
   import Plus from "@lucide/svelte/icons/plus";
   import type { LibraryLocation, LibraryNode } from "$lib/tauri";
-  import { canDropNode, nodeKey, nodeRef } from "$lib/library-tree";
+  import { nodeKey, nodeRef, type LibraryMoveValidation } from "$lib/library-tree";
   import LibraryTreeNode from "./LibraryTreeNode.svelte";
 
   type Props = {
@@ -22,7 +22,7 @@
     depth: number;
     collapsed: Record<string, boolean>;
     pathname: string;
-    tree: LibraryNode[];
+    moveValidation: LibraryMoveValidation;
     draggingNode: LibraryLocation | null;
     dropTarget: LibraryLocation | null;
     onToggle: (location: LibraryLocation) => void;
@@ -42,7 +42,7 @@
     depth,
     collapsed,
     pathname,
-    tree,
+    moveValidation,
     draggingNode,
     dropTarget,
     onToggle,
@@ -74,7 +74,7 @@
     !!draggingNode && dropTarget?.kind === location.kind && dropTarget.id === location.id,
   );
   let isValidDropTarget = $derived(
-    !!draggingNode && canDropNode(draggingNode, location, tree),
+    !!draggingNode && moveValidation.canDrop(location),
   );
 
   function handleDragStart(event: DragEvent) {
@@ -235,7 +235,7 @@
             depth={depth + 1}
             {collapsed}
             {pathname}
-            {tree}
+            {moveValidation}
             {draggingNode}
             {dropTarget}
             {onToggle}

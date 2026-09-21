@@ -1,5 +1,9 @@
 <script lang="ts">
+  import { onDestroy, tick } from "svelte";
   import type { TranscriptLine } from "$lib/tauri";
+  import { createTranscriptRowKey } from "$lib/transcript-state";
+
+  const rowKey = createTranscriptRowKey();
 
   let {
     lines,
@@ -36,13 +40,22 @@
     };
   });
 
-  // Auto-scroll to new lines, but only when the user is already near the bottom.
-  $effect(() => {
-    lines.length;
-    if (!bodyEl) return;
-    const nearBottom = bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < 60;
-    if (nearBottom) bodyEl.scrollTop = bodyEl.scrollHeight;
+  // Capture the user's position before DOM growth, then follow after rendering.
+  // Each ASR revision replaces `lines`, including edits to existing partials.
+  // A newly opened sheet has no body yet and always starts at the latest speech.
+  $effect.pre(() => {
+    lines;
+    if (!open) return;
+    const body = bodyEl;
+    const follow = !body || body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+    void tick().then(() => {
+      if (open && bodyEl && (!body || body === bodyEl) && follow) {
+        bodyEl.scrollTop = bodyEl.scrollHeight;
+      }
+    });
   });
+
+  onDestroy(() => clearTimeout(scrollHideTimer));
 
   // Show the scrollbar only while the user is actively scrolling.
   function onScroll() {
@@ -74,7 +87,7 @@
       <button class="sheet-close" onclick={() => (open = false)} aria-label="Close transcript">×</button>
     </div>
     <div class="sheet-body" bind:this={bodyEl} onscroll={onScroll}>
-      {#each lines as line, i (line.id ?? line.utterance_id ?? i)}
+      {#each lines as line (rowKey(line))}
         <div class="transcript-line" class:partial={line.is_partial === true}>
           <div class="speaker {line.channel}">{line.channel === "you" ? "You" : "Others"}</div>
           <div class="text">{line.text}</div>

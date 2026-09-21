@@ -10,13 +10,13 @@ use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use reqwest::header::{self, HeaderMap};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{ipc::Channel, State};
 
 use crate::db::{ensure_pool, update_enhanced_notes_impl, DbState};
 
 const CONFIG_KEY: &str = "llm_config";
 const KEYRING_SERVICE: &str = "kiminola";
-const KEYRING_ACCOUNT: &str = "provider_api_key";
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models?limit=1000";
 
 /// Supported OpenAI-compatible providers.
@@ -75,8 +75,8 @@ impl Default for ProviderConfig {
     }
 }
 
-/// Provider settings returned to the UI. The credential itself never leaves
-/// the OS keychain; only its presence is exposed for accurate status copy.
+/// Provider settings returned to the UI. Stored credentials are never returned;
+/// only key presence for this provider/endpoint identity is exposed.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderConfigView {
     #[serde(flatten)]
@@ -215,16 +215,16 @@ impl OpenAiCompatibleProvider {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
         if !api_key.is_empty() {
-            headers.insert(
-                header::AUTHORIZATION,
-                format!("Bearer {api_key}")
-                    .parse()
-                    .map_err(|e| format!("invalid api key: {e}"))?,
-            );
+            let mut authorization = header::HeaderValue::from_str(&format!("Bearer {api_key}"))
+                .map_err(|_| "invalid api key".to_string())?;
+            authorization.set_sensitive(true);
+            headers.insert(header::AUTHORIZATION, authorization);
         }
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            // Even same-origin redirects may escape the credential's endpoint path.
+            .redirect(reqwest::redirect::Policy::none())
             // Without these, a stalled provider stream hangs the enhancement
             // forever. read_timeout bounds idle time between chunks, not the
             // total generation length, so slow-but-alive models still finish.
@@ -235,7 +235,7 @@ impl OpenAiCompatibleProvider {
 
         Ok(Self {
             client,
-            base_url: config.base_url.trim_end_matches('/').to_string(),
+            base_url: normalized_base_url(config)?,
             model: config.model.clone(),
         })
     }
@@ -367,31 +367,83 @@ impl ChatProvider for OpenAiCompatibleProvider {
     }
 }
 
-fn keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| format!("keyring entry failed: {e}"))
+// Scope to the complete effective base URL, not just its origin: paths may be
+// separate tenants. Use the same normalization when constructing HTTP requests.
+fn normalized_base_url(config: &ProviderConfig) -> Result<String, String> {
+    let url = reqwest::Url::parse(config.base_url.trim())
+        .map_err(|_| "Base URL must be an absolute HTTP or HTTPS URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("Base URL must be an absolute HTTP or HTTPS URL".into());
+    }
+    if !url.username().is_empty() || url.password().is_some()
+        || url.query().is_some() || url.fragment().is_some()
+    {
+        return Err("Base URL cannot contain credentials, a query, or a fragment".into());
+    }
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
-fn load_api_key() -> Result<Option<String>, String> {
-    match keyring_entry()?.get_password() {
-        Ok(key) if key.is_empty() => Ok(None),
-        Ok(key) => Ok(Some(key)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("failed to read api key: {e}")),
+fn credential_account(config: &ProviderConfig) -> Result<String, String> {
+    let identity = serde_json::to_vec(&(config.kind, normalized_base_url(config)?))
+        .map_err(|_| "invalid provider identity".to_string())?;
+    // A versioned, bounded account name avoids delimiter collisions and keyring
+    // account-length limits without storing endpoint text in account metadata.
+    Ok(format!("provider_api_key_v2_{}", hex::encode(Sha256::digest(identity))))
+}
+
+// A narrow seam keeps native credential IO out of synthetic regression tests.
+trait ApiKeyStore: Send + Sync {
+    fn read(&self, account: &str) -> Result<Option<String>, String>;
+    // None deletes only the named credential; omission is handled by save_api_key.
+    fn write(&self, account: &str, key: Option<&str>) -> Result<(), String>;
+}
+
+struct OsApiKeyStore;
+
+fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, account)
+        .map_err(|_| "Could not access Windows Credential Manager".to_string())
+}
+
+impl ApiKeyStore for OsApiKeyStore {
+    fn read(&self, account: &str) -> Result<Option<String>, String> {
+        match keyring_entry(account)?.get_password() {
+            Ok(key) => Ok(Some(key)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err("Could not read the provider API key from Windows Credential Manager".into()),
+        }
+    }
+
+    fn write(&self, account: &str, key: Option<&str>) -> Result<(), String> {
+        let entry = keyring_entry(account)?;
+        match key {
+            None => entry.delete_credential().or_else(|e| match e {
+                keyring::Error::NoEntry => Ok(()),
+                _ => Err("Could not delete the provider API key from Windows Credential Manager".to_string()),
+            }),
+            Some(key) => entry.set_password(key)
+                .map_err(|_| "Could not save the provider API key to Windows Credential Manager".to_string()),
+        }
     }
 }
 
-fn save_api_key(api_key: Option<String>) -> Result<(), String> {
-    let entry = keyring_entry()?;
+fn load_api_key(config: &ProviderConfig, store: &impl ApiKeyStore) -> Result<Option<String>, String> {
+    // Deliberately never read/migrate the old unscoped account. Its provenance
+    // cannot be inferred from mutable saved config after a prior provider switch.
+    // Leave it untouched; the user must re-enter a key for this exact identity.
+    Ok(store.read(&credential_account(config)?)?.filter(|key| !key.trim().is_empty()))
+}
+
+fn save_api_key(
+    config: &ProviderConfig,
+    api_key: Option<String>,
+    store: &impl ApiKeyStore,
+) -> Result<(), String> {
+    let account = credential_account(config)?;
     match api_key {
         None => Ok(()),
-        Some(key) if key.trim().is_empty() => entry.delete_credential().or_else(|e| match e {
-            keyring::Error::NoEntry => Ok(()),
-            _ => Err(format!("failed to delete api key: {e}")),
-        }),
-        Some(key) => entry
-            .set_password(&key)
-            .map_err(|e| format!("failed to save api key: {e}")),
+        Some(key) if key.trim().is_empty() => store.write(&account, None),
+        Some(key) => store.write(&account, Some(&key)),
     }
 }
 
@@ -423,8 +475,18 @@ async fn save_config(pool: &sqlx::SqlitePool, config: &ProviderConfig) -> Result
 }
 
 fn build_provider(config: &ProviderConfig) -> Result<OpenAiCompatibleProvider, String> {
-    let key = load_api_key()?.unwrap_or_default();
-    OpenAiCompatibleProvider::new(config, key)
+    build_provider_with_store(config, &OsApiKeyStore)
+}
+
+fn build_provider_with_store(
+    config: &ProviderConfig,
+    store: &impl ApiKeyStore,
+) -> Result<OpenAiCompatibleProvider, String> {
+    let key = load_api_key(config, store)?;
+    if key.is_none() && matches!(config.kind, ProviderKind::OpenAi | ProviderKind::OpenRouter) {
+        return Err("Enter an API key for this provider and Base URL in AI provider settings".into());
+    }
+    OpenAiCompatibleProvider::new(config, key.unwrap_or_default())
 }
 
 /// Builds the message list sent to the LLM from transcript, notes, and a
@@ -452,8 +514,21 @@ impl PromptBuilder {
 #[tauri::command]
 pub async fn get_llm_config(state: State<'_, DbState>) -> Result<ProviderConfigView, String> {
     let pool = ensure_pool(&state.pool).await?;
-    let config = load_config(&pool).await?;
-    let has_api_key = load_api_key()?.is_some();
+    get_llm_config_impl(&pool, &OsApiKeyStore).await
+}
+
+async fn get_llm_config_impl(
+    pool: &sqlx::SqlitePool,
+    store: &impl ApiKeyStore,
+) -> Result<ProviderConfigView, String> {
+    let config = load_config(pool).await?;
+    // Allow repair of old invalid endpoints in the form, but never look up keys
+    // for them. Real credential-store failures still propagate to the retry UI.
+    let has_api_key = if normalized_base_url(&config).is_ok() {
+        load_api_key(&config, store)?.is_some()
+    } else {
+        false
+    };
     Ok(ProviderConfigView::new(config, has_api_key))
 }
 
@@ -469,9 +544,19 @@ pub async fn set_llm_config(
     api_key: Option<String>,
 ) -> Result<(), String> {
     let pool = ensure_pool(&state.pool).await?;
-    save_config(&pool, &config).await?;
-    save_api_key(api_key)?;
-    Ok(())
+    set_llm_config_impl(&pool, &config, api_key, &OsApiKeyStore).await
+}
+
+async fn set_llm_config_impl(
+    pool: &sqlx::SqlitePool,
+    config: &ProviderConfig,
+    api_key: Option<String>,
+    store: &impl ApiKeyStore,
+) -> Result<(), String> {
+    // A keyring failure must not activate the new config. If SQLite subsequently
+    // fails, the key remains bound to its own identity, never another endpoint.
+    save_api_key(config, api_key, store)?;
+    save_config(pool, config).await
 }
 
 #[tauri::command]
@@ -584,6 +669,158 @@ async fn stream_enhancement(
         Err(error) => LlmEvent::Error(error),
     };
     let _ = on_event.send(event);
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    // Never instantiate the OS adapter or contact a provider in these tests.
+    #[derive(Default)]
+    struct MemoryKeys {
+        values: Mutex<HashMap<String, String>>,
+        reads: Mutex<Vec<String>>,
+        fail_read: bool,
+        fail_write: bool,
+    }
+
+    impl ApiKeyStore for MemoryKeys {
+        fn read(&self, account: &str) -> Result<Option<String>, String> {
+            self.reads.lock().unwrap().push(account.to_owned());
+            if self.fail_read { return Err("synthetic credential read failure".into()); }
+            Ok(self.values.lock().unwrap().get(account).cloned())
+        }
+
+        fn write(&self, account: &str, key: Option<&str>) -> Result<(), String> {
+            if self.fail_write { return Err("synthetic credential write failure".into()); }
+            let mut values = self.values.lock().unwrap();
+            match key {
+                Some(key) => { values.insert(account.to_owned(), key.to_owned()); }
+                None => { values.remove(account); }
+            }
+            Ok(())
+        }
+    }
+
+    fn config(kind: ProviderKind, base_url: &str) -> ProviderConfig {
+        ProviderConfig { kind, base_url: base_url.into(), model: "synthetic-model".into() }
+    }
+
+    #[test]
+    fn credentials_belong_to_provider_and_full_endpoint_not_model() {
+        let store = MemoryKeys::default();
+        let original = ProviderConfig::default();
+        save_api_key(&original, Some("synthetic-cloud-key".into()), &store).unwrap();
+        assert_eq!(load_api_key(&original, &store).unwrap().as_deref(), Some("synthetic-cloud-key"));
+        for other in [
+            config(ProviderKind::OpenRouter, &original.base_url),
+            config(ProviderKind::OpenAi, "https://other.example.invalid/v1"),
+            config(ProviderKind::OpenAi, "https://api.openai.com/other-tenant/v1"),
+            config(ProviderKind::OpenAi, "http://api.openai.com/v1"),
+            config(ProviderKind::OpenAi, "https://api.openai.com:8443/v1"),
+            config(ProviderKind::Ollama, "http://localhost:11434/v1"),
+            config(ProviderKind::LmStudio, "http://localhost:1234/v1"),
+        ] {
+            assert!(load_api_key(&other, &store).unwrap().is_none());
+        }
+        let changed_model = ProviderConfig { model: "another-model".into(), ..original.clone() };
+        assert_eq!(load_api_key(&changed_model, &store).unwrap(), load_api_key(&original, &store).unwrap());
+        let equivalent = config(ProviderKind::OpenAi, "https://API.OPENAI.COM:443/v1/");
+        assert_eq!(credential_account(&equivalent).unwrap(), credential_account(&original).unwrap());
+        let provider = build_provider_with_store(&equivalent, &store).unwrap();
+        assert_eq!(provider.base_url, original.base_url);
+    }
+
+    #[test]
+    fn legacy_unscoped_key_is_never_read_or_migrated() {
+        let store = MemoryKeys::default();
+        store.write("provider_api_key", Some("synthetic-legacy-key")).unwrap();
+        for kind in [ProviderKind::OpenAi, ProviderKind::OpenRouter, ProviderKind::Ollama, ProviderKind::LmStudio] {
+            let destination = config(kind, kind.default_base_url());
+            assert!(load_api_key(&destination, &store).unwrap().is_none());
+        }
+        assert!(store.reads.lock().unwrap().iter().all(|account| account != "provider_api_key"));
+        assert_eq!(store.values.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn omission_and_deletion_affect_only_the_destination_credential() {
+        let store = MemoryKeys::default();
+        let a = ProviderConfig::default();
+        let b = config(ProviderKind::OpenRouter, ProviderKind::OpenRouter.default_base_url());
+        save_api_key(&a, Some("synthetic-a".into()), &store).unwrap();
+        save_api_key(&b, None, &store).unwrap();
+        assert!(load_api_key(&b, &store).unwrap().is_none());
+        save_api_key(&b, Some("synthetic-b".into()), &store).unwrap();
+        save_api_key(&b, None, &store).unwrap();
+        assert_eq!(load_api_key(&b, &store).unwrap().as_deref(), Some("synthetic-b"));
+        save_api_key(&b, Some("  ".into()), &store).unwrap();
+        assert!(load_api_key(&b, &store).unwrap().is_none());
+        assert_eq!(load_api_key(&a, &store).unwrap().as_deref(), Some("synthetic-a"));
+    }
+
+    #[test]
+    fn cloud_requires_its_own_key_while_local_can_be_unauthenticated() {
+        let store = MemoryKeys::default();
+        save_api_key(&ProviderConfig::default(), Some("synthetic-cloud-key".into()), &store).unwrap();
+        let cloud = config(ProviderKind::OpenRouter, ProviderKind::OpenRouter.default_base_url());
+        assert!(build_provider_with_store(&cloud, &store).is_err());
+        let local = config(ProviderKind::Ollama, ProviderKind::Ollama.default_base_url());
+        assert!(build_provider_with_store(&local, &store).is_ok());
+        save_api_key(&local, Some("synthetic-local-key".into()), &store).unwrap();
+        assert_eq!(load_api_key(&local, &store).unwrap().as_deref(), Some("synthetic-local-key"));
+        assert!(build_provider_with_store(&local, &store).is_ok());
+        let failed_store = MemoryKeys { fail_read: true, ..Default::default() };
+        assert!(build_provider_with_store(&local, &failed_store).is_err());
+    }
+
+    #[test]
+    fn ambiguous_or_credential_bearing_urls_are_rejected_before_key_lookup() {
+        let store = MemoryKeys::default();
+        for url in ["", "relative/v1", "ftp://example.invalid/v1", "https://user:password@example.invalid/v1", "https://example.invalid/v1?key=secret", "https://example.invalid/v1#fragment"] {
+            let invalid = config(ProviderKind::OpenAi, url);
+            assert!(load_api_key(&invalid, &store).is_err());
+            assert!(save_api_key(&invalid, Some("synthetic-key".into()), &store).is_err());
+        }
+        assert!(store.reads.lock().unwrap().is_empty());
+        assert!(store.values.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn key_write_failure_keeps_saved_config_unchanged() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            .execute(&pool).await.unwrap();
+        let original = ProviderConfig::default();
+        save_config(&pool, &original).await.unwrap();
+        let next = config(ProviderKind::OpenRouter, ProviderKind::OpenRouter.default_base_url());
+        let failed_store = MemoryKeys { fail_write: true, ..Default::default() };
+        assert!(set_llm_config_impl(&pool, &next, Some("synthetic-new-key".into()), &failed_store).await.is_err());
+        assert_eq!(load_config(&pool).await.unwrap().kind, original.kind);
+        let store = MemoryKeys::default();
+        store.write("provider_api_key", Some("synthetic-legacy-key")).unwrap();
+        set_llm_config_impl(&pool, &next, None, &store).await.unwrap();
+        let view = get_llm_config_impl(&pool, &store).await.unwrap();
+        assert_eq!(view.config.kind, next.kind);
+        assert!(!view.has_api_key);
+        set_llm_config_impl(&pool, &next, Some("synthetic-scoped-key".into()), &store).await.unwrap();
+        let view = get_llm_config_impl(&pool, &store).await.unwrap();
+        assert!(view.has_api_key);
+        assert!(serde_json::to_value(view).unwrap().get("api_key").is_none());
+        // Pre-upgrade configurations may have URLs that new saves reject. Keep
+        // them editable without attempting any credential lookup for that URL.
+        let invalid_legacy = config(ProviderKind::OpenAi, "https://example.invalid/v1?old=setting");
+        save_config(&pool, &invalid_legacy).await.unwrap();
+        let reads_before = store.reads.lock().unwrap().len();
+        let view = get_llm_config_impl(&pool, &store).await.unwrap();
+        assert!(!view.has_api_key);
+        assert_eq!(view.config.base_url, invalid_legacy.base_url);
+        assert_eq!(store.reads.lock().unwrap().len(), reads_before);
+        pool.close().await;
+    }
 }
 
 #[cfg(test)]

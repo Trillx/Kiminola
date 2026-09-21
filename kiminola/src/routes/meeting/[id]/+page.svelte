@@ -5,6 +5,7 @@
   import { exportMeeting, type MeetingExportAction } from "$lib/meeting-export";
   import { page } from "$app/state";
   import { registerUpdateGuard } from "$lib/pending-work";
+  import { providerIsConfigured, settingsSectionHref } from "$lib/settings-ui";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
     getMeeting,
@@ -42,6 +43,7 @@
   let enhancementVersion = 0;
   onDestroy(() => {
     enhancementVersion++;
+    segmentEditVersion++;
     clearTimeout(renderTimer);
     unsubscribeNotes();
     void notesAutosave.flush().catch((error) => console.error("Failed to save notes:", error));
@@ -156,6 +158,7 @@
     enhanceError = null;
     clearTimeout(renderTimer);
     renderTimer = undefined;
+    resetSegmentEdit();
     meeting = null;
     notFound = false;
     tab = "mynotes";
@@ -192,7 +195,7 @@
         if (isEnhanceMode(mode)) {
           tab = "enhance";
           await configReady;
-          if (current && config?.model && config.base_url.trim()) {
+          if (current && config != null && providerIsConfigured(config)) {
             await runEnhancement();
           }
         }
@@ -276,44 +279,83 @@
   // Inline transcript editing.
   let editingSegmentId = $state<number | undefined>(undefined);
   let editSegmentText = $state("");
+  let segmentEditError = $state<{ action: "save" | "delete"; message: string } | null>(null);
+  let segmentOperation = $state<"save" | "delete" | null>(null);
+  // A route reload (even of the same meeting) or a new editor retires callbacks.
+  let segmentEditVersion = 0;
 
   function startSegmentEdit(line: TranscriptLine) {
-    if (line.id === undefined) return;
+    if (line.id === undefined || segmentOperation) return;
+    segmentEditVersion++;
     editingSegmentId = line.id;
     editSegmentText = line.text;
+    segmentEditError = null;
   }
 
   function cancelSegmentEdit() {
+    // An IPC write cannot be undone: do not imply Cancel aborts an active save.
+    if (segmentOperation) return;
+    resetSegmentEdit();
+  }
+
+  function resetSegmentEdit() {
+    segmentEditVersion++;
     editingSegmentId = undefined;
     editSegmentText = "";
+    segmentEditError = null;
+    segmentOperation = null;
   }
 
   async function saveSegmentEdit() {
-    if (editingSegmentId === undefined || !meeting) return;
+    if (editingSegmentId === undefined || !meeting || segmentOperation) return;
     const text = editSegmentText.trim();
     if (!text) {
       cancelSegmentEdit();
       return;
     }
+    const destination = meeting;
+    const segmentId = editingSegmentId;
+    const version = segmentEditVersion;
+    const isCurrent = () => meeting === destination && segmentEditVersion === version;
+    segmentOperation = "save";
     try {
-      await updateSegmentText(editingSegmentId, text);
-      const line = meeting.transcript.find((l) => l.id === editingSegmentId);
+      await updateSegmentText(segmentId, text);
+      if (!isCurrent()) return;
+      const line = destination.transcript.find((l) => l.id === segmentId);
       if (line) line.text = text;
+      resetSegmentEdit();
     } catch (err) {
+      if (!isCurrent()) return;
       console.error("Failed to update segment:", err);
+      segmentEditError = {
+        action: "save",
+        message: "Could not save this correction. Your edit is still here; retry saving or cancel.",
+      };
     } finally {
-      cancelSegmentEdit();
+      if (isCurrent()) segmentOperation = null;
     }
   }
 
   async function removeSegment(segmentId: number) {
-    if (!meeting) return;
+    if (!meeting || segmentOperation || editingSegmentId !== segmentId) return;
+    const destination = meeting;
+    const version = segmentEditVersion;
+    const isCurrent = () => meeting === destination && segmentEditVersion === version;
+    segmentOperation = "delete";
     try {
       await deleteSegment(segmentId);
-      meeting.transcript = meeting.transcript.filter((l) => l.id !== segmentId);
-      if (editingSegmentId === segmentId) cancelSegmentEdit();
+      if (!isCurrent()) return;
+      destination.transcript = destination.transcript.filter((l) => l.id !== segmentId);
+      if (editingSegmentId === segmentId) resetSegmentEdit();
     } catch (err) {
+      if (!isCurrent()) return;
       console.error("Failed to delete segment:", err);
+      segmentEditError = {
+        action: "delete",
+        message: "Could not delete this segment. Your edit is still here; retry deleting or cancel.",
+      };
+    } finally {
+      if (isCurrent()) segmentOperation = null;
     }
   }
 
@@ -349,7 +391,7 @@
     return `${date} · ${mins} min`;
   }
 
-  let configured = $derived(configLoaded && config != null && config.base_url.trim() !== "" && config.model.trim() !== "");
+  let configured = $derived(configLoaded && config != null && providerIsConfigured(config));
 
   const templateOptions = $derived(templates.map((t) => ({ value: String(t.id), label: t.name })));
   const selectedTemplateLabel = $derived(
@@ -537,7 +579,7 @@
                       {/each}
                     </Select.Content>
                   </Select.Root>
-                  <a class="manage-templates" href="/settings">Manage templates</a>
+                  <a class="manage-templates" href={settingsSectionHref("templates")}>Manage templates</a>
                 </div>
                 <div class="tool-actions">
                   <Button
@@ -571,15 +613,34 @@
                       <Textarea
                         bind:value={editSegmentText}
                         onkeydown={onSegmentKeydown}
-                        onblur={saveSegmentEdit}
+                        disabled={segmentOperation !== null}
                         rows={2}
                         class="segment-edit-textarea"
                       />
+                      {#if segmentEditError}
+                        <p class="segment-edit-error" role="alert">{segmentEditError.message}</p>
+                      {/if}
                       <div class="segment-edit-actions">
-                        <button class="segment-action save" onclick={saveSegmentEdit}>Save</button>
-                        <button class="segment-action" onclick={cancelSegmentEdit}>Cancel</button>
+                        <button
+                          class="segment-action save"
+                          disabled={segmentOperation !== null}
+                          onclick={saveSegmentEdit}
+                        >
+                          {segmentOperation === "save" ? "Saving…" : segmentEditError?.action === "save" ? "Retry save" : "Save"}
+                        </button>
+                        <button
+                          class="segment-action"
+                          disabled={segmentOperation !== null}
+                          onclick={cancelSegmentEdit}
+                        >Cancel</button>
                         {#if line.id !== undefined}
-                          <button class="segment-action delete" onclick={() => line.id !== undefined && removeSegment(line.id)}>Delete</button>
+                          <button
+                            class="segment-action delete"
+                            disabled={segmentOperation !== null}
+                            onclick={() => line.id !== undefined && removeSegment(line.id)}
+                          >
+                            {segmentOperation === "delete" ? "Deleting…" : segmentEditError?.action === "delete" ? "Retry delete" : "Delete"}
+                          </button>
                         {/if}
                       </div>
                     </div>
@@ -588,6 +649,7 @@
                   <button
                     type="button"
                     class="raw-line"
+                    disabled={segmentOperation !== null}
                     onclick={() => startSegmentEdit(line)}
                     title="Click to edit"
                   >
