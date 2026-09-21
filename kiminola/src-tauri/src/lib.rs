@@ -231,6 +231,7 @@ pub fn run() {
             models::check_microphone_permission,
             models::open_model_folder,
             llm::get_llm_config,
+            llm::list_openrouter_models,
             llm::set_llm_config,
             llm::test_llm_config,
             llm::enhance_meeting,
