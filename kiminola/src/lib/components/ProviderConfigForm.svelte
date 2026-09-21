@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import {
     getLlmConfig,
+    listOpenRouterModels,
     setLlmConfig,
     testLlmConfig,
+    type OpenRouterModel,
     type ProviderConfig,
     type ProviderKind,
   } from "$lib/tauri";
@@ -11,9 +13,18 @@
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
   import * as Select from "$lib/components/ui/select";
+  import * as Command from "$lib/components/ui/command";
+  import * as Popover from "$lib/components/ui/popover";
   import CheckIcon from "@lucide/svelte/icons/check";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
-  import { isProviderConfigDirty, providerIsConfigured } from "$lib/settings-ui";
+  import ChevronsUpDown from "@lucide/svelte/icons/chevrons-up-down";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import {
+    isProviderConfigDirty,
+    openRouterModelOptionLabel,
+    providerIsConfigured,
+    uniqueOpenRouterModels,
+  } from "$lib/settings-ui";
 
   interface Props {
     onSaved?: () => void;
@@ -51,6 +62,13 @@
   let testOutput = $state("");
   let saveSuccess = $state(false);
   let saveError = $state("");
+  let openRouterModels = $state<OpenRouterModel[]>([]);
+  let modelListState = $state<"idle" | "loading" | "ready" | "error">("idle");
+  let modelListError = $state("");
+  let modelPickerOpen = $state(false);
+  let modelPickerTrigger = $state<HTMLButtonElement>(null!);
+  let modelListRequest = 0;
+  let disposed = false;
 
   $effect(() => {
     getLlmConfig()
@@ -66,6 +84,31 @@
       });
   });
 
+  async function refreshOpenRouterModels() {
+    const request = ++modelListRequest;
+    modelPickerOpen = false;
+    modelListState = "loading";
+    modelListError = "";
+    try {
+      const models = uniqueOpenRouterModels(await listOpenRouterModels());
+      if (disposed || request !== modelListRequest || config?.kind !== "open_router") return;
+      openRouterModels = models;
+      modelListState = "ready";
+      modelPickerOpen = models.length > 0;
+    } catch (err) {
+      if (disposed || request !== modelListRequest || config?.kind !== "open_router") return;
+      modelListError = String(err);
+      modelListState = "error";
+    }
+  }
+
+  function selectOpenRouterModel(model: OpenRouterModel) {
+    if (!config) return;
+    config = { ...config, model: model.id };
+    modelPickerOpen = false;
+    void tick().then(() => modelPickerTrigger?.focus());
+  }
+
   function setProviderDefaults(kind: ProviderKind) {
     if (!config) return;
     config = {
@@ -74,6 +117,11 @@
       base_url: DEFAULT_URLS[kind],
       model: DEFAULT_MODELS[kind],
     };
+    modelListRequest += 1;
+    modelPickerOpen = false;
+    openRouterModels = [];
+    modelListState = "idle";
+    modelListError = "";
   }
 
   async function save(runTest = false) {
@@ -99,7 +147,6 @@
     }
   }
 
-  let disposed = false;
   onDestroy(() => { disposed = true; });
 
   async function test() {
@@ -178,13 +225,91 @@
     </div>
 
     <div class="field">
-      <Label for="provider-model">Model</Label>
-      <Input
-        id="provider-model"
-        type="text"
-        bind:value={config.model}
-        placeholder="gpt-4o-mini"
-      />
+      <div class="model-field-heading">
+        <Label for="provider-model">Model</Label>
+        {#if config.kind === "open_router"}
+          <Button
+            variant="outline"
+            size="xs"
+            onclick={() => void refreshOpenRouterModels()}
+            disabled={modelListState === "loading"}
+          >
+            <RefreshCw class={modelListState === "loading" ? "animate-spin" : undefined} aria-hidden="true" />
+            {modelListState === "loading"
+              ? "Loading…"
+              : modelListState === "idle"
+                ? "Load models"
+                : "Refresh models"}
+          </Button>
+        {/if}
+      </div>
+      <div class="model-picker-row">
+        <Input
+          id="provider-model"
+          type="text"
+          bind:value={config.model}
+          aria-describedby={config.kind === "open_router" ? "openrouter-model-help" : undefined}
+          placeholder={config.kind === "open_router" ? "Enter an OpenRouter model ID" : "gpt-4o-mini"}
+        />
+        {#if config.kind === "open_router"}
+          <Popover.Root bind:open={modelPickerOpen}>
+            <Popover.Trigger bind:ref={modelPickerTrigger}>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="outline"
+                  role="combobox"
+                  aria-expanded={modelPickerOpen}
+                  aria-label="Choose an OpenRouter model"
+                  disabled={openRouterModels.length === 0}
+                >
+                  Choose
+                  <ChevronsUpDown class="opacity-50" aria-hidden="true" />
+                </Button>
+              {/snippet}
+            </Popover.Trigger>
+            <Popover.Content class="w-[min(560px,calc(100vw-32px))] p-0" align="end">
+              <Command.Root>
+                <Command.Input placeholder="Search provider, name, or model ID…" />
+                <Command.List>
+                  <Command.Empty>No model found. You can enter an ID manually.</Command.Empty>
+                  <Command.Group value="openrouter-models">
+                    {#each openRouterModels as model (model.id)}
+                      <Command.Item
+                        value={`${model.name} ${model.id}`}
+                        onSelect={() => selectOpenRouterModel(model)}
+                      >
+                        <span class="model-option-copy">
+                          <strong>{openRouterModelOptionLabel(model)}</strong>
+                          <small>{model.id}</small>
+                        </span>
+                      </Command.Item>
+                    {/each}
+                  </Command.Group>
+                </Command.List>
+              </Command.Root>
+            </Popover.Content>
+          </Popover.Root>
+        {/if}
+      </div>
+      {#if config.kind === "open_router"}
+        <span
+          id="openrouter-model-help"
+          class="field-help model-catalog-status"
+          class:error={modelListState === "error"}
+          role={modelListState === "error" ? "alert" : "status"}
+        >
+          {#if modelListState === "loading"}
+            Loading the current OpenRouter catalog…
+          {:else if modelListState === "ready"}
+            {openRouterModels.length} models loaded. Choose from the searchable catalog, or enter an ID manually.
+          {:else if modelListState === "error"}
+            Couldn’t load models: {modelListError}. You can still enter a model ID manually.
+          {:else}
+            Refresh to load the current OpenRouter catalog, or enter a model ID manually.
+          {/if}
+        </span>
+      {/if}
     </div>
 
     <details class="provider-advanced">
