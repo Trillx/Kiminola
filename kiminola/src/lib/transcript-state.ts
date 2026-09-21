@@ -1,5 +1,22 @@
 import type { TranscriptEvent, TranscriptLine } from "./tauri";
 
+/** Keys belong to a renderer, never to the persisted transcript. Recovered rows
+ * retain object identity as live events insert, sort, and replace other rows. */
+export function createTranscriptRowKey(): (line: TranscriptLine) => string {
+  const recoveredKeys = new WeakMap<TranscriptLine, string>();
+  let nextRecoveredKey = 0;
+  return (line) => {
+    if (line.utterance_id !== undefined) return `live:${line.utterance_id}`;
+    if (line.id !== undefined) return `saved:${line.id}`;
+    let key = recoveredKeys.get(line);
+    if (key === undefined) {
+      key = `recovered:${nextRecoveredKey++}`;
+      recoveredKeys.set(line, key);
+    }
+    return key;
+  };
+}
+
 const MIN_ECHO_WORDS = 3;
 const MIN_ECHO_CHARACTERS = 12;
 const MIN_TIME_OVERLAP = 0.35;

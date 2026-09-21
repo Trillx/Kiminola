@@ -12,9 +12,17 @@ Run these commands from this directory:
 npm install
 npm run dev
 npm run check
+npm test
+npm run test:ui
 npm run build
 npm run tauri dev
 ```
+
+`npm test` runs the Node regression suite (Node 24 recommended). `npm run test:ui`
+starts and stops its own local Vite server and runs isolated Playwright/axe checks
+against synthetic Tauri IPC. It does not access native audio, Credential Manager,
+or the user database. Chrome must be installed; set `PLAYWRIGHT_CHANNEL=msedge`
+to use Edge instead. These checks complement, rather than replace, native tests.
 
 Rust validation runs from `src-tauri/`:
 

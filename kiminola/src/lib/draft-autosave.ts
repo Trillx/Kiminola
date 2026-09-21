@@ -1,33 +1,51 @@
 export type DraftAutosaveStatus = "saving" | "saved" | "error";
+type DraftValue<T> = T | (() => T);
 
 export interface DraftAutosave<T = string> {
-  schedule(value: T): void;
-  flush(value: T): Promise<void>;
+  schedule(value: DraftValue<T>): void;
+  flush(value: DraftValue<T>): Promise<void>;
   flushPending(): Promise<void>;
   cancel(): void;
 }
 
 /**
- * Debounces draft writes and serializes them so an older, slower request can
- * never overwrite newer notes. `flush` joins the same queue and is used before
- * meeting finalization or navigation.
+ * Debounces writes with a non-resetting maximum wait and serializes them so an
+ * older request cannot overwrite newer notes. A snapshot factory is evaluated
+ * only when its write runs, not for every edit. Failed snapshots stay pending
+ * for retry. `flush` joins the same queue before finalization or navigation.
  */
 export function createDraftAutosave<T = string>(
   save: (value: T) => Promise<void>,
   onStatus: (status: DraftAutosaveStatus) => void,
   delayMs = 500,
+  maxWaitMs = 5_000,
 ): DraftAutosave<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   let queue = Promise.resolve();
   let latestRequest = 0;
   let cancelled = false;
-  let pending: { value: T } | undefined;
+  let pending: { value: DraftValue<T> } | undefined;
 
-  function enqueue(snapshot: { value: T }): Promise<void> {
+  function clearTimers() {
+    clearTimeout(timer);
+    clearTimeout(deadline);
+    timer = undefined;
+    deadline = undefined;
+  }
+
+  function dispatchPending() {
+    clearTimers();
+    if (pending) void enqueue(pending).catch(() => undefined);
+  }
+
+  function enqueue(snapshot: { value: DraftValue<T> }): Promise<void> {
     const request = ++latestRequest;
     if (!cancelled) onStatus("saving");
 
-    const run = queue.catch(() => undefined).then(() => save(snapshot.value));
+    const run = queue.catch(() => undefined).then(() => save(
+      typeof snapshot.value === "function" ? (snapshot.value as () => T)() : snapshot.value,
+    ));
     queue = run.catch(() => undefined);
 
     return run.then(
@@ -43,34 +61,29 @@ export function createDraftAutosave<T = string>(
   }
 
   return {
-    schedule(value: T) {
+    schedule(value: DraftValue<T>) {
       if (cancelled) return;
       pending = { value };
       clearTimeout(timer);
-      timer = setTimeout(() => {
-        timer = undefined;
-        if (pending) void enqueue(pending).catch(() => undefined);
-      }, delayMs);
+      timer = setTimeout(dispatchPending, delayMs);
+      deadline ??= setTimeout(dispatchPending, maxWaitMs);
     },
 
-    flush(value: T) {
-      clearTimeout(timer);
-      timer = undefined;
+    flush(value: DraftValue<T>) {
+      clearTimers();
       pending = { value };
       return enqueue(pending);
     },
 
     flushPending() {
-      clearTimeout(timer);
-      timer = undefined;
+      clearTimers();
       return pending ? enqueue(pending) : queue;
     },
 
     cancel() {
       cancelled = true;
       pending = undefined;
-      clearTimeout(timer);
-      timer = undefined;
+      clearTimers();
     },
   };
 }

@@ -90,6 +90,8 @@
   let navigationDialogOpen = $state(false);
   let pendingNavigationTarget: string | null = null;
   let startupRecoveryExitTarget: string | null = null;
+  let recoveryExitTarget = $state<string | null>(null);
+  let navigationAllowed = false;
   let transcriptOffsetMs = 0;
 
   type FinishMode = "save" | "generate" | "enhance";
@@ -119,11 +121,13 @@
   );
 
   beforeNavigate(({ cancel, to }) => {
-    if (!to || to.url.href === page.url.href || !shouldGuardRecordingNavigation(phase)) return;
-    if (startupRecoveryExitTarget) {
+    if (navigationAllowed || !to || to.url.href === page.url.href) return;
+    if (startupRecoveryExitTarget || phase === "stopping") {
       cancel();
       return;
     }
+    // Startup failure can still leave a notepad with uncheckpointed edits.
+    if (!shouldGuardRecordingNavigation(phase) && phase !== "failed") return;
     pendingNavigationTarget = `${to.url.pathname}${to.url.search}${to.url.hash}`;
     navigationDialogOpen = true;
     cancel();
@@ -173,7 +177,7 @@
 
   function configureNoteAutosave(draftId: number) {
     noteAutosave?.cancel();
-    noteAutosave = createDraftAutosave(
+    noteAutosave = createDraftAutosave<RecoverySnapshot>(
       async (snapshot) => {
         try {
           await updateNoteDraftRecovery(
@@ -233,22 +237,27 @@
   }
 
   function checkpointRecovery() {
-    noteAutosave?.schedule(recoverySnapshot());
+    noteAutosave?.schedule(recoverySnapshot);
   }
 
   async function flushNoteCheckpoint() {
     const autosave = noteAutosave;
-    if (!autosave) return;
-    try {
-      await autosave.flush(recoverySnapshot());
-    } catch {
-      // The normal meeting save below still receives the current notepad.
-    }
+    if (!autosave) throw new Error("Recovery copy unavailable. Try again to create one.");
+    await autosave.flush(recoverySnapshot);
   }
 
   function closeNoteAutosave() {
     noteAutosave?.cancel();
     noteAutosave = undefined;
+  }
+
+  async function leavePage(destination: string) {
+    navigationAllowed = true;
+    try {
+      await goto(destination);
+    } finally {
+      navigationAllowed = false;
+    }
   }
 
   function beginControlOperation() {
@@ -271,22 +280,8 @@
   async function completeStartupRecoveryExit(): Promise<boolean> {
     const destination = startupRecoveryExitTarget;
     if (!destination) return false;
-
-    freezeElapsedTiming();
-    phase = "stopping";
-    await flushNoteCheckpoint();
-    if (nativeSessionActive) {
-      const stopResult = await stopRecording().catch(() => null);
-      if (stopResult) {
-        nativeSessionActive = false;
-        applyStopResult(stopResult);
-        await flushNoteCheckpoint();
-      }
-    }
-    closeNoteAutosave();
     startupRecoveryExitTarget = null;
-    pendingNavigationTarget = null;
-    await goto(destination);
+    await leaveWithRecovery(destination);
     return true;
   }
 
@@ -400,7 +395,8 @@
       await pauseRecording();
       freezeElapsedTiming();
       phase = "paused";
-      await flushNoteCheckpoint();
+      // Capture is already paused; checkpoint failure is shown by the save status.
+      await flushNoteCheckpoint().catch(() => undefined);
     } catch (error) {
       controlError = {
         action: "pause",
@@ -437,9 +433,11 @@
 
   async function finishMeeting(mode: FinishMode) {
     await waitForControlToSettle();
+    if (phase === "stopping") return;
     freezeElapsedTiming();
     phase = "stopping";
     finishError = null;
+    recoveryExitTarget = null;
     pendingFinishMode = mode;
 
     let meetingId: number;
@@ -449,7 +447,8 @@
         nativeSessionActive = false;
         applyStopResult(stopResult);
       }
-      await flushNoteCheckpoint();
+      // A successful meeting save is an independent durability boundary.
+      await flushNoteCheckpoint().catch(() => undefined);
       meetingId = await saveMeeting({
         title,
         durationSeconds: elapsed,
@@ -471,30 +470,21 @@
     if (mode !== "save") params.set("mode", mode);
     if (transcriptFinalizationWarning) params.set("warning", "transcript-finalization");
     const query = params.toString();
-    await goto(`/meeting/${meetingId}${query ? `?${query}` : ""}`);
+    await leavePage(`/meeting/${meetingId}${query ? `?${query}` : ""}`);
   }
 
-  function retryFinish() {
-    if (pendingFinishMode && canRetryFinish(phase)) {
-      void finishMeeting(pendingFinishMode);
+  async function retryFinish() {
+    if (!canRetryFinish(phase)) return;
+    if (recoveryExitTarget) {
+      await leaveWithRecovery(recoveryExitTarget);
+    } else if (pendingFinishMode) {
+      await finishMeeting(pendingFinishMode);
     }
   }
 
   async function openRecoveryDraft() {
     await waitForControlToSettle();
-    freezeElapsedTiming();
-    phase = "stopping";
-    await flushNoteCheckpoint();
-    if (nativeSessionActive) {
-      const stopResult = await stopRecording().catch(() => null);
-      if (stopResult) {
-        nativeSessionActive = false;
-        applyStopResult(stopResult);
-        await flushNoteCheckpoint();
-      }
-    }
-    closeNoteAutosave();
-    await goto(noteDraftId === null ? "/" : `/note/${noteDraftId}`);
+    await leaveWithRecovery(noteDraftId === null ? "/" : `/note/${noteDraftId}`);
   }
 
   function continueRecordingHere() {
@@ -522,20 +512,39 @@
       noteSaveStatus = "Preparing recovery copy before leaving...";
       return;
     }
+    await leaveWithRecovery(destination);
+  }
+
+  async function leaveWithRecovery(destination: string) {
+    if (phase === "stopping") return;
     freezeElapsedTiming();
     phase = "stopping";
-    await flushNoteCheckpoint();
-    if (nativeSessionActive) {
-      const stopResult = await stopRecording().catch(() => null);
-      if (stopResult) {
+    finishError = null;
+    recoveryExitTarget = destination;
+    try {
+      if (nativeSessionActive) {
+        const stopResult = await stopRecording();
         nativeSessionActive = false;
         applyStopResult(stopResult);
-        await flushNoteCheckpoint();
       }
+      if (!noteAutosave) {
+        if (noteDraftId === null) {
+          noteDraftId = await createNoteDraft(recordingLocation);
+          recoveryDraftCreated = true;
+        }
+        configureNoteAutosave(noteDraftId);
+      }
+      await flushNoteCheckpoint();
+    } catch (error) {
+      phase = "finish_failed";
+      pendingFinishMode ??= "save";
+      finishError = errorMessage(error, "The recovery copy could not be saved.");
+      return;
     }
     closeNoteAutosave();
     pendingNavigationTarget = null;
-    await goto(destination);
+    recoveryExitTarget = null;
+    await leavePage(destination);
   }
 
   function onNavigationDialogOpenChange(open: boolean) {
@@ -545,21 +554,41 @@
 
   async function cancel() {
     await waitForControlToSettle();
-    const discardAutoDraft = shouldDiscardAutoDraft(recoveryDraftCreated, nativeSessionActive);
+    // In the failure state this button promises "Keep recovery copy", even if
+    // a rejected stop command left native capture active.
+    const discardAutoDraft = phase !== "finish_failed" &&
+      shouldDiscardAutoDraft(recoveryDraftCreated, nativeSessionActive);
+    if (!discardAutoDraft) {
+      await leaveWithRecovery("/");
+      return;
+    }
+    await discardAndLeave("/");
+  }
+
+  async function discardAndLeave(destination: string) {
+    await waitForControlToSettle();
+    if (phase === "stopping") return;
     freezeElapsedTiming();
     phase = "stopping";
-    if (!discardAutoDraft) await flushNoteCheckpoint();
-    closeNoteAutosave();
-    if (nativeSessionActive) {
-      await stopRecording();
-      nativeSessionActive = false;
+    try {
+      if (nativeSessionActive) {
+        await stopRecording();
+        nativeSessionActive = false;
+      }
+      const autosave = noteAutosave;
+      closeNoteAutosave();
+      // Cancellation drops pending edits, but an in-flight write must settle
+      // before deleting an automatically created draft.
+      await autosave?.flushPending();
+      if (recoveryDraftCreated && noteDraftId !== null) await deleteNoteDraft(noteDraftId);
+    } catch (error) {
+      phase = "finish_failed";
+      pendingFinishMode ??= "save";
+      recoveryExitTarget = destination;
+      finishError = errorMessage(error, "The recording could not be discarded.");
+      return;
     }
-    if (discardAutoDraft && noteDraftId !== null) {
-      await deleteNoteDraft(noteDraftId).catch((error) => {
-        console.error("Failed to remove cancelled recovery draft:", error);
-      });
-    }
-    goto("/");
+    await leavePage(destination);
   }
 
   function onDialogOpenChange(open: boolean) {
@@ -614,13 +643,22 @@
       <div class="recording-finish-error" role="alert">
         <div>
           <strong>The meeting isn't saved yet.</strong>
-          <span>{finishError} Your recovery copy is still available.</span>
+          <span>{finishError} Your latest work is still here. Retry before leaving.</span>
         </div>
         <div class="recording-start-error-actions">
           <Button size="sm" onclick={retryFinish}>Retry saving</Button>
-          <Button size="sm" variant="outline" onclick={openRecoveryDraft}>
-            Open recovery copy
-          </Button>
+          {#if recoveryExitTarget}
+            <Button size="sm" variant="outline" onclick={() => void finishMeeting("save")}>
+              Save as meeting
+            </Button>
+            <Button size="sm" variant="outline" onclick={() => void discardAndLeave(recoveryExitTarget!)}>
+              Discard unsaved changes and leave
+            </Button>
+          {:else}
+            <Button size="sm" variant="outline" onclick={openRecoveryDraft}>
+              Open recovery copy
+            </Button>
+          {/if}
         </div>
       </div>
     {/if}
@@ -697,6 +735,7 @@
       </div>
       <Textarea
         bind:value={notepad}
+        disabled={stopping}
         oninput={checkpointRecovery}
         placeholder="Jot rough thoughts, action items, or quotes here…"
         class="notepad-textarea"

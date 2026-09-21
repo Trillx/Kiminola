@@ -13,7 +13,7 @@
   import * as Select from "$lib/components/ui/select";
   import CheckIcon from "@lucide/svelte/icons/check";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
-  import { isProviderConfigDirty, providerIsConfigured } from "$lib/settings-ui";
+  import { isProviderConfigDirty, providerIdentityChanged, providerIsConfigured } from "$lib/settings-ui";
 
   interface Props {
     onSaved?: () => void;
@@ -46,6 +46,7 @@
   let savedConfig = $state<ProviderConfig | null>(null);
   let apiKey = $state("");
   let loaded = $state(false);
+  let loadError = $state("");
   let saving = $state(false);
   let testing = $state(false);
   let testOutput = $state("");
@@ -53,47 +54,86 @@
   let saveError = $state("");
 
   $effect(() => {
-    getLlmConfig()
-      .then((c) => {
-        config = c;
-        savedConfig = { ...c };
-      })
-      .catch((err) => {
-        console.error("Failed to load LLM config:", err);
-      })
-      .finally(() => {
-        loaded = true;
-      });
+    void loadProviderConfig();
   });
 
+  async function loadProviderConfig() {
+    loaded = false;
+    loadError = "";
+    try {
+      const c = await getLlmConfig();
+      if (disposed) return;
+      config = c;
+      savedConfig = { ...c };
+    } catch {
+      if (disposed) return;
+      config = null;
+      loadError = "Could not load provider settings. Your saved settings have not been changed. Retry to load them again.";
+    } finally {
+      if (!disposed) loaded = true;
+    }
+  }
+
   function setProviderDefaults(kind: ProviderKind) {
-    if (!config) return;
-    config = {
+    if (!config || config.kind === kind) return;
+    changeIdentity({
       ...config,
       kind,
       base_url: DEFAULT_URLS[kind],
       model: DEFAULT_MODELS[kind],
-    };
+    });
+  }
+
+  function setBaseUrl(base_url: string) {
+    if (config) changeIdentity({ ...config, base_url });
+  }
+
+  function changeIdentity(next: ProviderConfig) {
+    if (!config || saving || testing) return;
+    if (providerIdentityChanged(config, next)) {
+      // Reuse only presence already confirmed for this exact saved identity.
+      // Other destinations must be saved/read back before their key is known.
+      next = {
+        ...next,
+        has_api_key: savedConfig != null &&
+          !providerIdentityChanged(savedConfig, next) && savedConfig.has_api_key === true,
+      };
+      apiKey = "";
+      testOutput = "";
+      saveSuccess = false;
+      saveError = "";
+    }
+    config = next;
   }
 
   async function save(runTest = false) {
-    if (!config) return;
+    if (!config || saving || testing || disposed) return;
     saving = true;
     saveSuccess = false;
     saveError = "";
+    let persisted = false;
     try {
       const hasReplacementKey = apiKey.trim() !== "";
-      await setLlmConfig(config, hasReplacementKey ? apiKey : undefined);
-      if (hasReplacementKey) config = { ...config, has_api_key: true };
+      await setLlmConfig({ ...config }, hasReplacementKey ? apiKey : undefined);
+      persisted = true;
+      if (disposed) return;
       apiKey = "";
-      savedConfig = { ...config };
+      const refreshed = await getLlmConfig();
+      if (disposed) return;
+      config = refreshed;
+      savedConfig = { ...refreshed };
       saveSuccess = true;
       setTimeout(() => (saveSuccess = false), 3000);
       onSaved?.();
       if (runTest) await test();
     } catch (err) {
-      saveError = String(err);
-      console.error("Failed to save LLM config:", err);
+      if (disposed) return;
+      if (persisted) {
+        config = null;
+        loadError = "Provider saved, but its status could not be reloaded. Retry to reload it; no connection test was sent.";
+      } else {
+        saveError = String(err);
+      }
     } finally {
       saving = false;
     }
@@ -134,6 +174,10 @@
     config != null && isProviderConfigDirty(savedConfig, config, apiKey),
   );
 
+  const canSave = $derived(
+    config != null && config.base_url.trim() !== "" && config.model.trim() !== "",
+  );
+
   const canTestAfterSave = $derived(
     config != null &&
       providerIsConfigured({
@@ -144,7 +188,12 @@
 </script>
 
 {#if !loaded}
-  <div class="empty-state">Loading provider settings…</div>
+  <div class="empty-state" role="status">Loading provider settings…</div>
+{:else if loadError}
+  <div class="provider-config provider-settings-form">
+    <div class="test-output error" role="alert">{loadError}</div>
+    <Button variant="outline" onclick={() => void loadProviderConfig()}>Retry</Button>
+  </div>
 {:else if config}
   <div class="provider-config provider-settings-form">
     <header class="provider-heading">
@@ -161,6 +210,7 @@
       <Label for="provider-kind">Provider</Label>
       <Select.Root
         type="single"
+        disabled={saving || testing}
         value={config.kind}
         onValueChange={(value) => setProviderDefaults(value as ProviderKind)}
       >
@@ -182,6 +232,7 @@
       <Input
         id="provider-model"
         type="text"
+        disabled={saving || testing}
         bind:value={config.model}
         placeholder="gpt-4o-mini"
       />
@@ -194,7 +245,9 @@
         <Input
           id="provider-base-url"
           type="text"
-          bind:value={config.base_url}
+          disabled={saving || testing}
+          value={config.base_url}
+          oninput={(event) => setBaseUrl(event.currentTarget.value)}
           placeholder="https://api.openai.com/v1"
         />
         <span class="field-help">Change this only for a custom or self-hosted endpoint.</span>
@@ -206,6 +259,7 @@
       <Input
         id="provider-key"
         type="password"
+        disabled={saving || testing}
         bind:value={apiKey}
         placeholder={config.has_api_key
           ? "Saved — enter a new key to replace it"
@@ -215,20 +269,25 @@
         autocomplete="off"
       />
       <span class="field-help">
-        Stored in Windows Credential Manager. Leave blank to keep the saved key; it is sent only to
-        the provider you choose.
+        Stored in Windows Credential Manager for this provider and Base URL only. Changing either
+        clears the replacement key. Leave blank to keep only this endpoint’s saved key.
+        Older unscoped keys are not reused; re-enter your key if needed.
       </span>
     </div>
 
     <div class="config-actions">
-      <Button onclick={() => void save(true)} disabled={saving || testing || !isDirty || !canTestAfterSave}>
-        {saving ? "Saving…" : testing ? "Testing…" : "Save and test"}
+      <Button onclick={() => void save(canTestAfterSave)} disabled={saving || testing || !isDirty || !canSave}>
+        {saving ? "Saving…" : testing ? "Testing…" : canTestAfterSave ? "Save and test" : "Save provider"}
       </Button>
-      <Button variant="outline" onclick={test} disabled={saving || testing || !isConfigured}>
+      <Button variant="outline" onclick={test} disabled={saving || testing || isDirty || !isConfigured}>
         {testing ? "Testing…" : "Test saved connection"}
       </Button>
       {#if !isDirty && isConfigured}<span class="saved-indicator">Saved</span>{/if}
     </div>
+
+    {#if isDirty && canSave && !canTestAfterSave}
+      <span class="field-help">Save this provider to check for its own stored key. No connection test will be sent.</span>
+    {/if}
 
     {#if saveSuccess}
       <div class="save-success" role="status">

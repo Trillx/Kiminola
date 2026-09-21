@@ -40,11 +40,6 @@ export function destinationKey(location: LibraryLocation | null): string {
   return location ? nodeKey(location) : "library-root";
 }
 
-function containsNode(node: LibraryNode, target: LibraryLocation): boolean {
-  if (node.kind === target.kind && node.id === target.id) return true;
-  return node.children.some((child) => containsNode(child, target));
-}
-
 function findNode(nodes: LibraryNode[], ref: LibraryLocation): LibraryNode | null {
   for (const node of nodes) {
     if (node.kind === ref.kind && node.id === ref.id) return node;
@@ -54,15 +49,41 @@ function findNode(nodes: LibraryNode[], ref: LibraryLocation): LibraryNode | nul
   return null;
 }
 
+export interface LibraryMoveValidation {
+  canDrop: (target: LibraryLocation | null) => boolean;
+}
+
+// Build once per source/tree snapshot, then share O(1) checks across the move
+// dialog and every drag target. Keys include kind because IDs can overlap.
+export function createMoveValidation(
+  tree: LibraryNode[],
+  source: LibraryLocation | null,
+): LibraryMoveValidation {
+  const sourceNode = source ? findNode(tree, source) : null;
+  const descendants = new Set<string>();
+  const pending = sourceNode ? [sourceNode] : [];
+  while (pending.length) {
+    const node = pending.pop()!;
+    descendants.add(nodeKey(node));
+    pending.push(...node.children);
+  }
+  const atRoot = source && tree.some((node) => nodeKey(node) === nodeKey(source));
+  return {
+    canDrop(target) {
+      if (!source || !sourceNode) return false;
+      if (!target) return source.kind === "space" && !atRoot;
+      if (source.kind === "space" && target.kind !== "space") return false;
+      return !descendants.has(nodeKey(target));
+    },
+  };
+}
+
 export function canDropNode(
   source: LibraryLocation,
   target: LibraryLocation,
   tree: LibraryNode[],
 ): boolean {
-  if (source.kind === "space" && target.kind !== "space") return false;
-  if (source.kind === target.kind && source.id === target.id) return false;
-  const sourceNode = findNode(tree, source);
-  return !sourceNode || !containsNode(sourceNode, target);
+  return createMoveValidation(tree, source).canDrop(target);
 }
 
 export interface LibraryDestinationOption {
@@ -75,19 +96,17 @@ export interface LibraryDestinationOption {
 export function moveOptions(
   tree: LibraryNode[],
   source: LibraryLocation | null,
+  validation = createMoveValidation(tree, source),
 ): LibraryDestinationOption[] {
   if (!source) return [];
   const sourceLocation = source;
   const options: LibraryDestinationOption[] = [];
   if (sourceLocation.kind === "space") {
-    const isAlreadyAtRoot = tree.some(
-      (node) => node.kind === "space" && node.id === sourceLocation.id,
-    );
     options.push({
       location: null,
       label: "Library root",
       depth: 0,
-      disabled: isAlreadyAtRoot,
+      disabled: !validation.canDrop(null),
     });
   }
   function visit(nodes: LibraryNode[], depth: number, path: string[]) {
@@ -95,12 +114,11 @@ export function moveOptions(
       const location = nodeRef(node);
       const name = node.kind === "space" ? node.name : node.title;
       const nextPath = [...path, name];
-      const accepts = sourceLocation.kind === "meeting" || node.kind === "space";
       options.push({
         location,
         label: nextPath.join(" / "),
         depth,
-        disabled: !accepts || !canDropNode(sourceLocation, location, tree),
+        disabled: !validation.canDrop(location),
       });
       visit(node.children, depth + 1, nextPath);
     }

@@ -1,0 +1,83 @@
+// Synthetic browser-only Tauri IPC. No native APIs, user files, credentials or audio.
+(() => {
+  let serial = 0;
+  let nextDraftId = 101;
+  const callbacks = new Map();
+  const listeners = new Map();
+  const summary = (id, title) => ({ id, title, created_at: '2026-09-21T15:00:00Z', duration_seconds: 600, space_name: 'Personal', location_path: 'Personal', parent_meeting_id: null });
+  const meetings = [summary(1, 'Alpha planning'), summary(2, 'Beta launch')];
+  const transcript = [{ id: 11, channel: 'you', text: 'Original transcript sentence.', start_ms: 0, end_ms: 1000 }];
+  const presence = { enabled: false, paused: false, start_with_windows: false, mode: 'off', hint: null, prompt: null };
+  let config = { kind: 'open_ai', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', has_api_key: true };
+  // Presence flags only: fixture credentials never contain secret values.
+  const savedIdentities = new Set([
+    JSON.stringify(['open_ai', 'https://api.openai.com/v1']),
+    JSON.stringify(['open_router', 'https://openrouter.ai/api/v1']),
+  ]);
+  window.audit = {
+    calls: [], failConfig: false, failShortcut: false, failSegment: false, failSearch: false,
+    slowSearch: false, modelDelay: 0, treeCount: 2, failRecovery: false, recovery: null,
+    emit(event, payload) {
+      for (const [id, item] of listeners) if (item.event === event) callbacks.get(item.handler)?.({ event, id, payload });
+    },
+  };
+  window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener(event, id) { listeners.delete(id); } };
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    transformCallback(fn) { const id = ++serial; callbacks.set(id, fn); return id; },
+    unregisterCallback(id) { callbacks.delete(id); },
+    async invoke(cmd, args = {}) {
+      // Match native IPC's JSON boundary: Svelte state proxies cannot be
+      // structured-cloned directly, but are valid serializable arguments.
+      args = JSON.parse(JSON.stringify(args));
+      window.audit.calls.push({ cmd, args: structuredClone(args) });
+      switch (cmd) {
+        case 'plugin:event|listen': { const id = ++serial; listeners.set(id, args); return id; }
+        case 'plugin:event|unlisten': listeners.delete(args.eventId); return;
+        case 'is_onboarding_complete': return true;
+        case 'set_onboarding_complete': return;
+        case 'check_microphone_permission': return 'Granted';
+        case 'plugin:app|version': return '0.1.4';
+        case 'get_meeting_presence_state': return { ...presence };
+        case 'list_meetings': return structuredClone(meetings);
+        case 'list_note_drafts': return [];
+        case 'list_library_tree': return [{ kind: 'space', id: 1, name: 'Personal', children: window.audit.treeCount > 2 ? Array.from({ length: window.audit.treeCount }, (_, i) => ({ ...summary(i + 1, `Meeting ${i + 1}`), kind: 'meeting', children: [] })) : meetings.map(m => ({ ...m, kind: 'meeting', children: [] })) }];
+        case 'get_note_draft': return { id: 100, title: 'Recovery fixture', created_at: '2026-09-21T15:00:00Z', updated_at: '2026-09-21T15:00:00Z', raw_markdown: 'Recovered notes', meeting_id: null, recovery_duration_seconds: 60, recovery_location: null, recovery_transcript: Array.from({ length: 3 }, (_, i) => ({ channel: 'you', text: `Recovered sentence ${i + 1}`, start_ms: i * 2000, end_ms: i * 2000 + 1000 })) };
+        case 'get_meeting': return { ...meetings.find(m => m.id === args.id), notepad: 'Sample meeting notes.', enhanced_markdown: '## Summary\n\nFixture summary.', transcript: structuredClone(transcript) };
+        case 'get_llm_config': if (window.audit.failConfig) throw new Error('Fixture: config database unavailable'); return structuredClone(config);
+        case 'set_llm_config':
+          config = { ...args.config, has_api_key: savedIdentities.has(JSON.stringify([args.config.kind, args.config.base_url])) };
+          return;
+        case 'test_llm_config': return;
+        case 'list_templates': return [{ id: 1, name: 'General', prompt: 'Summarize {transcript} using {notes}', is_builtin: 1 }];
+        case 'get_global_shortcut': return 'Ctrl+Shift+R';
+        case 'set_global_shortcut': if (window.audit.failShortcut) throw new Error('Fixture: invalid shortcut'); return;
+        case 'check_model_pack': await new Promise(r => setTimeout(r, window.audit.modelDelay)); return true;
+        case 'search_meetings': {
+          const q = args.query;
+          if (window.audit.slowSearch) await new Promise(r => setTimeout(r, q === 'alpha' ? 800 : 20));
+          if (window.audit.failSearch) throw new Error('Fixture: search unavailable');
+          return structuredClone(meetings.filter(m => m.title.toLowerCase().includes(q)));
+        }
+        case 'update_segment_text':
+          if (window.audit.failSegment) throw new Error('Fixture: segment write failed');
+          await new Promise(r => setTimeout(r, 80));
+          transcript.find(x => x.id === args.segmentId).text = args.text;
+          return;
+        case 'delete_segment': return;
+        case 'update_notes': return;
+        case 'rename_meeting': meetings.find(m => m.id === args.meetingId).title = args.title; return;
+        case 'create_note_draft': return nextDraftId++;
+        case 'update_note_draft_recovery':
+          if (window.audit.failRecovery) throw new Error('Fixture: recovery write rejected');
+          window.audit.recovery = structuredClone(args); return;
+        case 'delete_note_draft': return;
+        case 'start_recording': return { meeting_audio_available: true, transcription_available: true };
+        case 'pause_recording': return;
+        case 'resume_recording': return { meeting_audio_available: true, transcription_available: true };
+        case 'stop_recording': return { transcript: [], finalization_warning: null };
+        default: throw new Error(`Fixture has no handler for ${cmd}`);
+      }
+    },
+  };
+})();

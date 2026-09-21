@@ -52,6 +52,7 @@
   let shortcut = $state("");
   let savingShortcut = $state(false);
   let shortcutSaved = $state(false);
+  let shortcutError = $state("");
   let appVersion = $state("");
   let presence = $state<MeetingPresenceState>({
     enabled: false,
@@ -291,14 +292,16 @@
   }
 
   async function saveShortcut() {
+    if (savingShortcut) return;
     savingShortcut = true;
     shortcutSaved = false;
+    shortcutError = "";
     try {
       await setGlobalShortcut(shortcut.trim() || null);
       shortcutSaved = true;
       setTimeout(() => (shortcutSaved = false), 3000);
     } catch (err) {
-      console.error("Failed to save shortcut:", err);
+      shortcutError = err instanceof Error ? err.message : String(err);
     } finally {
       savingShortcut = false;
     }
@@ -425,7 +428,7 @@
           </div>
 
           {#if modelState === "idle" || modelState === "checking"}
-            <div class="model-status" aria-live="polite">Checking the model packâ€¦</div>
+            <div class="model-status" aria-live="polite">Checking the model pack…</div>
           {:else if modelState === "ready"}
             <div class="model-status ready" role="status">
               <strong>Model ready.</strong>
@@ -439,7 +442,7 @@
           {:else if modelState === "downloading"}
             <div class="model-progress" aria-live="polite">
               <div class="model-progress-row">
-                <span>Downloading and verifyingâ€¦</span>
+                <span>Downloading and verifying…</span>
                 <span class="mono">{modelDownloadedMB} / {modelTotalMB} MB</span>
               </div>
               <Progress value={modelProgress} max={100} class="h-2" />
@@ -478,15 +481,18 @@
           </div>
           <label class="field">
             <span>Accelerator</span>
-            <input type="text" bind:value={shortcut} placeholder="Ctrl+Shift+R" />
+            <input type="text" bind:value={shortcut} placeholder="Ctrl+Shift+R" disabled={savingShortcut} aria-invalid={shortcutError ? "true" : undefined} aria-describedby={shortcutError ? "shortcut-error" : undefined} />
           </label>
           <div class="config-actions">
             <button class="btn btn-primary" onclick={saveShortcut} disabled={savingShortcut}>
               {savingShortcut ? "Saving…" : "Save shortcut"}
             </button>
           </div>
+          {#if shortcutError}
+            <div id="shortcut-error" class="test-output error" role="alert">Could not save shortcut: {shortcutError}</div>
+          {/if}
           {#if shortcutSaved}
-            <div class="test-output">Shortcut saved.</div>
+            <div class="test-output" role="status">Shortcut saved.</div>
           {/if}
         </div>
       {:else if active === "about"}

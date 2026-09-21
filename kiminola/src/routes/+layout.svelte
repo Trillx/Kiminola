@@ -2,9 +2,9 @@
   import "../app.css";
   import { onMount } from "svelte";
   import { page } from "$app/state";
-  import { beforeNavigate, goto } from "$app/navigation";
+  import { afterNavigate, beforeNavigate, goto } from "$app/navigation";
   import { themeState } from "$lib/theme.svelte";
-  import { sidebarState } from "$lib/sidebar.svelte";
+  import { closeCompactSidebar, sidebarState } from "$lib/sidebar.svelte";
   import { stopSidebarMotion } from "$lib/sidebar-motion";
   import { isOnboardingComplete, onShortcutTriggered } from "$lib/tauri";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -20,6 +20,7 @@
   let databaseReady = $state(false);
   let updateBusy = $derived(updateState.status === "preparing" || updateState.status === "installing");
   beforeNavigate(({ cancel }) => { if (updateBusy) cancel(); });
+  afterNavigate(closeCompactSidebar);
   import { setupCompactWindowSync } from "$lib/compact-window";
   let compactWindow = $state(false);
   let compactWindowResizing = $state(false);
@@ -47,6 +48,7 @@
       requestFrame: (callback) => requestAnimationFrame(callback),
       cancelFrame: (handle) => cancelAnimationFrame(handle),
       onStateChange: ({ compactWindow: nextCompactWindow, compactWindowResizing: resizing }) => {
+        if (compactWindow !== nextCompactWindow) closeCompactSidebar();
         compactWindow = nextCompactWindow;
         compactWindowResizing = resizing;
       },
@@ -100,8 +102,8 @@
   <MeetingPresencePrompt overlay />
 {:else}
   <div class="app" class:sidebar-collapsed={sidebarState.collapsed} class:focused-settings={isSettings}>
-    {#if !isSettings}<Sidebar />{/if}
-    <main class="main">
+    {#if !isSettings}<Sidebar compact={compactWindow} />{/if}
+    <main class="main" inert={compactWindow && sidebarState.compactOpen}>
       {#if !isSettings}<Topbar />{/if}
       {@render children()}
       <MeetingPresencePrompt />

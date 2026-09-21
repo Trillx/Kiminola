@@ -25,28 +25,36 @@
     return `${date} · ${mins} min`;
   }
 
-  async function runSearch(q: string) {
-    const trimmed = q.trim();
-    if (!trimmed) {
-      results = [];
-      searching = false;
-      return;
-    }
-    searching = true;
+  let searchError = $state("");
+  let searchGeneration = 0;
+
+  function invalidateSearch() {
+    searchGeneration++;
+    clearTimeout(searchTimer);
+    searchTimer = undefined;
+  }
+
+  async function runSearch(q: string, generation: number) {
     try {
-      results = await searchMeetings(trimmed);
+      const matches = await searchMeetings(q);
+      if (generation === searchGeneration && open) results = matches;
     } catch (err) {
-      console.error("Search failed:", err);
+      if (generation !== searchGeneration || !open) return;
+      searchError = err instanceof Error ? err.message : String(err);
       results = [];
     } finally {
-      searching = false;
+      if (generation === searchGeneration && open) searching = false;
     }
   }
 
   function onInput() {
-    clearTimeout(searchTimer);
-    searching = true;
-    searchTimer = setTimeout(() => runSearch(query), 150);
+    invalidateSearch();
+    const trimmed = query.trim();
+    const generation = searchGeneration;
+    results = [];
+    searchError = "";
+    searching = trimmed.length > 0;
+    if (searching) searchTimer = setTimeout(() => runSearch(trimmed, generation), 150);
   }
 
   function goToMeeting(id: number) {
@@ -57,12 +65,17 @@
   }
 
   $effect(() => {
-    if (open) {
-      query = "";
-      results = [];
-      searching = false;
-      setTimeout(() => inputRef?.focus(), 50);
-    }
+    const isOpen = open;
+    invalidateSearch();
+    query = "";
+    results = [];
+    searching = false;
+    searchError = "";
+    const focusTimer = isOpen ? setTimeout(() => inputRef?.focus(), 50) : undefined;
+    return () => {
+      clearTimeout(focusTimer);
+      invalidateSearch();
+    };
   });
 </script>
 
@@ -75,6 +88,7 @@
       <Input
         bind:ref={inputRef}
         type="text"
+        aria-label="Search titles, notes, and transcripts"
         placeholder="Search titles, notes, transcripts…"
         bind:value={query}
         oninput={onInput}
@@ -82,8 +96,11 @@
       />
     </div>
     <div class="search-results">
-      {#if searching && results.length === 0}
-        <div class="search-empty">Searching…</div>
+      {#if searchError}
+        <div class="search-empty" role="alert">Search failed: {searchError}</div>
+        <button class="search-result" onclick={onInput}>Try again</button>
+      {:else if searching && results.length === 0}
+        <div class="search-empty" role="status">Searching…</div>
       {:else if query.trim() && results.length === 0}
         <div class="search-empty">No meetings found.</div>
       {:else}
