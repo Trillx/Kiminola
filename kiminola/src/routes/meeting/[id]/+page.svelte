@@ -5,7 +5,7 @@
   import { exportMeeting, type MeetingExportAction } from "$lib/meeting-export";
   import { page } from "$app/state";
   import { registerUpdateGuard } from "$lib/pending-work";
-  import { settingsSectionHref } from "$lib/settings-ui";
+  import { providerIsConfigured, settingsSectionHref } from "$lib/settings-ui";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
     getMeeting,
@@ -195,7 +195,7 @@
         if (isEnhanceMode(mode)) {
           tab = "enhance";
           await configReady;
-          if (current && config?.model && config.base_url.trim()) {
+          if (current && config != null && providerIsConfigured(config)) {
             await runEnhancement();
           }
         }
@@ -391,7 +391,7 @@
     return `${date} · ${mins} min`;
   }
 
-  let configured = $derived(configLoaded && config != null && config.base_url.trim() !== "" && config.model.trim() !== "");
+  let configured = $derived(configLoaded && config != null && providerIsConfigured(config));
 
   const templateOptions = $derived(templates.map((t) => ({ value: String(t.id), label: t.name })));
   const selectedTemplateLabel = $derived(

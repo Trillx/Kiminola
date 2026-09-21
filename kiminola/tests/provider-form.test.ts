@@ -39,10 +39,10 @@ function providerForm(overrides: Record<string, unknown> = {}) {
     compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
   }).outputText.replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "").replace(/^export \{\};?\s*$/gm, "");
   const api = new Function(...Object.keys(adapters), `${source}\nreturn {
-    setProviderDefaults, save,
-    replaceKey(value) { apiKey = value; },
+    setProviderDefaults, save, test,
+    replaceKey(value) { ${component.includes('bind:value={apiKey}') ? 'apiKey = value;' : 'setApiKey(value);'} },
     editBaseUrl(value) { ${component.includes('bind:value={config.base_url}') ? 'config.base_url = value;' : 'setBaseUrl(value);'} },
-    editModel(value) { config.model = value; },
+    editModel(value) { ${component.includes('bind:value={config.model}') ? 'config.model = value;' : 'setModel(value);'} },
     retry() { return loadProviderConfig(); },
     state() { return { config, savedConfig, apiKey, loaded, saving, testOutput, saveError, loadError: typeof loadError === 'undefined' ? '' : loadError }; }
   };`)(...Object.values(adapters));
@@ -102,6 +102,28 @@ test("model-only edits keep the key attached to the unchanged identity", async (
   form.editModel("another-model");
   assert.equal(form.state().config.has_api_key, true);
   assert.equal(form.state().apiKey, "synthetic-same-endpoint-key");
+});
+
+test("provider, model, and API-key edits clear the previous connection result", async (t) => {
+  const form = providerForm({ testLlmConfig: async (onEvent: (event: { event: string; data: string }) => void) => {
+    onEvent({ event: "done", data: "" });
+  } });
+  t.after(form.dispose);
+  form.load();
+  await tick();
+
+  await form.test();
+  assert.equal(form.state().testOutput, "Connection succeeded.");
+  form.editModel("another-model");
+  assert.equal(form.state().testOutput, "");
+
+  await form.test();
+  form.replaceKey("synthetic-replacement-key");
+  assert.equal(form.state().testOutput, "");
+
+  await form.test();
+  form.setProviderDefaults("open_router");
+  assert.equal(form.state().testOutput, "");
 });
 
 test("a failed provider load has an actionable error and retry recovers the form", async (t) => {

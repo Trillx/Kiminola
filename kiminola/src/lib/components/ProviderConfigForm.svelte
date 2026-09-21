@@ -88,6 +88,18 @@
     if (config) changeIdentity({ ...config, base_url });
   }
 
+  function setModel(model: string) {
+    if (!config || saving || testing || config.model === model) return;
+    config = { ...config, model };
+    testOutput = "";
+  }
+
+  function setApiKey(value: string) {
+    if (saving || testing || apiKey === value) return;
+    apiKey = value;
+    testOutput = "";
+  }
+
   function changeIdentity(next: ProviderConfig) {
     if (!config || saving || testing) return;
     if (providerIdentityChanged(config, next)) {
@@ -233,7 +245,8 @@
         id="provider-model"
         type="text"
         disabled={saving || testing}
-        bind:value={config.model}
+        value={config.model}
+        oninput={(event) => setModel(event.currentTarget.value)}
         placeholder="gpt-4o-mini"
       />
     </div>
@@ -260,7 +273,8 @@
         id="provider-key"
         type="password"
         disabled={saving || testing}
-        bind:value={apiKey}
+        value={apiKey}
+        oninput={(event) => setApiKey(event.currentTarget.value)}
         placeholder={config.has_api_key
           ? "Saved — enter a new key to replace it"
           : usesLocalProvider

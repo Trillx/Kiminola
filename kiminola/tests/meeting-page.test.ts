@@ -6,7 +6,7 @@ import { parse, type AST } from "svelte/compiler";
 // @ts-expect-error Node imports TypeScript directly.
 import { createMeetingNotesAutosave, loadMeetingAfterAutosave } from "../src/lib/meeting-notes.ts";
 // @ts-expect-error Node imports TypeScript directly.
-import { resolveSettingsSection, settingsSectionHref } from "../src/lib/settings-ui.ts";
+import { providerIsConfigured, resolveSettingsSection, settingsSectionHref } from "../src/lib/settings-ui.ts";
 
 const component = readFileSync(new URL("../src/routes/meeting/[id]/+page.svelte", import.meta.url), "utf8");
 function elementsIn(value: unknown): Array<AST.RegularElement | AST.Component> {
@@ -83,13 +83,14 @@ function pageController(overrides: Record<string, unknown> = {}) {
     page: route,
     console: { ...console, error: (...args: unknown[]) => { errors.push(args); } },
     getMeeting: async (id: number) => meetingData(id),
-    getLlmConfig: async () => ({ model: "test", base_url: "https://example.invalid" }),
+    getLlmConfig: async () => ({ kind: "open_ai", model: "test", base_url: "https://example.invalid", has_api_key: true }),
     listTemplates: async () => [{ id: 1, name: "General" }],
     renderMarkdown: (value: string) => value,
     onDestroy: (destroy: () => void) => { destroyers.push(destroy); },
     registerPendingSave: () => () => {},
     registerUpdateGuard: () => () => {},
     loadMeetingAfterAutosave,
+    providerIsConfigured,
     settingsSectionHref,
     updateNotes: async (_id: number, text: string) => { stored = text; },
     enhanceMeeting: async () => { observed.push(stored); },
@@ -211,7 +212,34 @@ test("automatic enhancement waits for provider configuration", async (t) => {
   controller.load();
   await tick();
   assert.equal(controller.observed.length, 0);
-  config.resolve({ model: "test", base_url: "https://example.invalid" });
+  config.resolve({ kind: "open_ai", model: "test", base_url: "https://example.invalid", has_api_key: true });
+  await tick();
+  assert.equal(controller.observed.length, 1);
+});
+
+test("automatic enhancement does not start for a cloud provider without a saved key", async (t) => {
+  const controller = pageController({
+    getLlmConfig: async () => ({
+      kind: "open_ai", model: "test", base_url: "https://example.invalid", has_api_key: false,
+    }),
+  });
+  t.after(controller.dispose);
+  controller.route.url.searchParams.set("mode", "enhance");
+  controller.load();
+  await tick();
+  assert.equal(controller.observed.length, 0);
+  assert.match(component, /configured\s*=\s*\$derived\([\s\S]*?providerIsConfigured\(config\)/);
+});
+
+test("automatic enhancement allows an unauthenticated local provider", async (t) => {
+  const controller = pageController({
+    getLlmConfig: async () => ({
+      kind: "ollama", model: "llama3.1", base_url: "http://localhost:11434/v1", has_api_key: false,
+    }),
+  });
+  t.after(controller.dispose);
+  controller.route.url.searchParams.set("mode", "enhance");
+  controller.load();
   await tick();
   assert.equal(controller.observed.length, 1);
 });
