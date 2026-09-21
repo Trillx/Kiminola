@@ -16,6 +16,32 @@ export type ProviderFormConfig = {
   has_api_key?: boolean;
 };
 
+export type OpenRouterModelOption = {
+  id: string;
+  name: string;
+  context_length: number | null;
+};
+
+export function uniqueOpenRouterModels<T extends OpenRouterModelOption>(models: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return models.filter((model) => {
+    if (seen.has(model.id)) return false;
+    seen.add(model.id);
+    return true;
+  });
+}
+
+export function openRouterModelOptionLabel(model: OpenRouterModelOption): string {
+  if (model.context_length == null) return model.name;
+  const context =
+    model.context_length >= 1_000_000
+      ? `${Math.round(model.context_length / 100_000) / 10}M`
+      : model.context_length >= 1_000
+        ? `${Math.round(model.context_length / 1_000)}K`
+        : String(model.context_length);
+  return `${model.name} · ${context} context`;
+}
+
 export function resolveSettingsSection(value: string | null): SettingsSection {
   return SETTINGS_SECTIONS.some((section) => section.id === value)
     ? (value as SettingsSection)

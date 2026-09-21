@@ -238,6 +238,12 @@ export interface ProviderConfig {
   has_api_key?: boolean;
 }
 
+export interface OpenRouterModel {
+  id: string;
+  name: string;
+  context_length: number | null;
+}
+
 export interface Template {
   id: number;
   name: string;
@@ -247,6 +253,10 @@ export interface Template {
 
 export async function getLlmConfig(): Promise<ProviderConfig> {
   return invoke("get_llm_config");
+}
+
+export async function listOpenRouterModels(): Promise<OpenRouterModel[]> {
+  return invoke("list_openrouter_models");
 }
 
 export async function setLlmConfig(config: ProviderConfig, apiKey?: string): Promise<void> {

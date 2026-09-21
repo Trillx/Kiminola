@@ -17,6 +17,7 @@ use crate::db::{ensure_pool, update_enhanced_notes_impl, DbState};
 
 const CONFIG_KEY: &str = "llm_config";
 const KEYRING_SERVICE: &str = "kiminola";
+const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models?limit=1000";
 
 /// Supported OpenAI-compatible providers.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,6 +91,92 @@ impl ProviderConfigView {
             has_api_key,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenRouterModel {
+    pub id: String,
+    pub name: String,
+    pub context_length: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenRouterModelLinks {
+    next: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterModelsResponse {
+    data: Vec<OpenRouterModel>,
+    #[serde(default)]
+    links: OpenRouterModelLinks,
+}
+
+fn parse_openrouter_models_page(body: &str) -> Result<OpenRouterModelsResponse, String> {
+    serde_json::from_str(body).map_err(|e| format!("invalid OpenRouter model list: {e}"))
+}
+
+fn sort_openrouter_models(models: &mut [OpenRouterModel]) {
+    models.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn openrouter_models_page_url(value: &str) -> Result<reqwest::Url, String> {
+    let base = reqwest::Url::parse("https://openrouter.ai")
+        .map_err(|e| format!("invalid OpenRouter origin: {e}"))?;
+    let url = base
+        .join(value)
+        .map_err(|e| format!("invalid OpenRouter model page: {e}"))?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("openrouter.ai")
+        || url.path() != "/api/v1/models"
+    {
+        return Err("OpenRouter returned an invalid model page link".to_string());
+    }
+    Ok(url)
+}
+
+async fn fetch_openrouter_models() -> Result<Vec<OpenRouterModel>, String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    let mut next = Some(OPENROUTER_MODELS_URL.to_string());
+    let mut visited = std::collections::HashSet::new();
+    let mut models = Vec::new();
+
+    while let Some(page) = next.take() {
+        let url = openrouter_models_page_url(&page)?;
+        if visited.len() >= 100 || !visited.insert(url.to_string()) {
+            return Err("OpenRouter returned an invalid pagination sequence".to_string());
+        }
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("failed to load OpenRouter models: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "OpenRouter model list returned {}",
+                response.status()
+            ));
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("failed to read OpenRouter model list: {e}"))?;
+        let catalog = parse_openrouter_models_page(&body)?;
+        models.extend(catalog.data);
+        next = catalog.links.next;
+    }
+
+    sort_openrouter_models(&mut models);
+    Ok(models)
 }
 
 /// A single chat message for the completion endpoint.
@@ -443,6 +530,11 @@ async fn get_llm_config_impl(
         false
     };
     Ok(ProviderConfigView::new(config, has_api_key))
+}
+
+#[tauri::command]
+pub async fn list_openrouter_models() -> Result<Vec<OpenRouterModel>, String> {
+    fetch_openrouter_models().await
 }
 
 #[tauri::command]
@@ -865,6 +957,51 @@ mod tests {
         assert_eq!(json["has_api_key"], true);
         assert_eq!(json["kind"], "open_ai");
         assert!(json.get("api_key").is_none());
+    }
+
+    #[test]
+    fn openrouter_catalog_page_exposes_next_link_and_models_sort_by_name() {
+        let page = parse_openrouter_models_page(
+            r#"{
+                "data": [
+                    {"id": "openai/gpt-4o", "name": "OpenAI: GPT-4o", "context_length": 128000},
+                    {"id": "anthropic/claude-3.5-sonnet", "name": "Anthropic: Claude 3.5 Sonnet", "context_length": 200000}
+                ],
+                "links": {"next": "/api/v1/models?offset=2&limit=2"}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            page.links.next.as_deref(),
+            Some("/api/v1/models?offset=2&limit=2")
+        );
+
+        let mut models = page.data;
+        sort_openrouter_models(&mut models);
+        assert_eq!(
+            models,
+            vec![
+                OpenRouterModel {
+                    id: "anthropic/claude-3.5-sonnet".into(),
+                    name: "Anthropic: Claude 3.5 Sonnet".into(),
+                    context_length: Some(200000),
+                },
+                OpenRouterModel {
+                    id: "openai/gpt-4o".into(),
+                    name: "OpenAI: GPT-4o".into(),
+                    context_length: Some(128000),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn openrouter_pagination_stays_on_the_catalog_endpoint() {
+        let next = openrouter_models_page_url("/api/v1/models?offset=1000&limit=1000").unwrap();
+        assert_eq!(next.host_str(), Some("openrouter.ai"));
+        assert_eq!(next.path(), "/api/v1/models");
+        assert!(openrouter_models_page_url("https://example.com/api/v1/models").is_err());
+        assert!(openrouter_models_page_url("/api/v1/models/other").is_err());
     }
 
     #[test]
