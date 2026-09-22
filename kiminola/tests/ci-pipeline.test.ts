@@ -39,6 +39,7 @@ test('CI runs distinct quality, security, and native packaging gates', async () 
   assert.match(workflow, /portable[\\/]Kimi-Nola-\$\{\{ matrix\.arch \}\}-portable\.zip/);
   assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/);
   assert.match(workflow, /cargo-audit:[\s\S]*?checks: write/);
+  assert.match(workflow, /cargo-audit:[\s\S]*?ignore: RUSTSEC-2023-0071/);
   assert.doesNotMatch(workflow, /windows-latest|@[vV]\d+\b|@stable\b/);
 
   assert.match(scripts['test:browser'] ?? '', /test:ui/);
@@ -68,6 +69,7 @@ test('release validates before creating a draft and builds on native runners', a
   assert.match(workflow, /create-release:[\s\S]*?needs:[\s\S]*?- preflight[\s\S]*?- hardware-gate/);
   assert.match(workflow, /security-gate:[\s\S]*?npm audit --omit=dev --audit-level=moderate/);
   assert.match(workflow, /security-gate:[\s\S]*?rustsec\/audit-check@[0-9a-f]{40}/);
+  assert.match(workflow, /security-gate:[\s\S]*?ignore: RUSTSEC-2023-0071/);
   assert.match(workflow, /create-release:[\s\S]*?needs:[\s\S]*?- security-gate/);
   assert.match(workflow, /runner: windows-2025/);
   assert.match(workflow, /runner: windows-11-arm/);

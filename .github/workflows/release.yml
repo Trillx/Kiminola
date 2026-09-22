@@ -127,6 +127,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: kiminola/src-tauri
+          # SQLx's derive/migration macros retain the optional MySQL backend in
+          # Cargo.lock, but it is not enabled or compiled by this SQLite-only app.
+          ignore: RUSTSEC-2023-0071
 
   hardware-gate:
     name: Dispatch and verify release hardware gate
