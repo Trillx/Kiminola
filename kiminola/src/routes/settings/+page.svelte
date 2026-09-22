@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { page } from "$app/state";
-  import { goto } from "$app/navigation";
+  import { beforeNavigate, goto } from "$app/navigation";
   import { getVersion } from "@tauri-apps/api/app";
   import ProviderConfigForm from "$lib/components/ProviderConfigForm.svelte";
   import { themeState, toggleTheme } from "$lib/theme.svelte";
@@ -79,8 +79,18 @@
   let templatesLoading = $state(false);
   let templateStatus = $state<{ message: string; error: boolean } | null>(null);
   let deleteConfirmOpen = $state(false);
+  let discardConfirmOpen = $state(false);
+  let pendingTemplate: Template | null = null;
+  let pendingSection: SettingsSection | null = null;
+  let savedName = $state("");
+  let savedPrompt = $state("");
   let templateStatusTimer: ReturnType<typeof setTimeout> | undefined;
   const selectedTemplate = $derived(templates.find((t) => t.id === selectedTemplateId));
+  const templateDirty = $derived(
+    selectedTemplateId !== undefined && !selectedTemplate?.is_builtin &&
+    (editingName !== savedName || editingPrompt !== savedPrompt),
+  );
+  const promptError = $derived(validateTemplatePrompt(editingPrompt));
 
   function flashTemplateStatus(message: string, error = false) {
     templateStatus = { message, error };
@@ -111,11 +121,47 @@
     selectedTemplateId = t.id;
     editingName = t.name;
     editingPrompt = t.prompt;
+    savedName = t.name;
+    savedPrompt = t.prompt;
+  }
+
+  function requestTemplateSelection(t: Template) {
+    if (templateDirty) {
+      pendingTemplate = t;
+      discardConfirmOpen = true;
+    } else {
+      selectTemplate(t);
+    }
+  }
+
+  function discardTemplateChanges() {
+    if (pendingTemplate) selectTemplate(pendingTemplate);
+    else {
+      editingName = savedName;
+      editingPrompt = savedPrompt;
+    }
+    pendingTemplate = null;
+    discardConfirmOpen = false;
+    if (pendingSection) {
+      const section = pendingSection;
+      pendingSection = null;
+      activateSection(section);
+    }
   }
 
   function newTemplate() {
     const defaultPrompt = "Summarize the meeting.\n\n## Summary\n## Action items\n\nTranscript:\n{transcript}\n\nRaw notes:\n{notes}";
-    selectTemplate({ id: -1, name: "New template", prompt: defaultPrompt, is_builtin: 0 } as Template);
+    requestTemplateSelection({ id: -1, name: "New template", prompt: defaultPrompt, is_builtin: 0 } as Template);
+  }
+
+  function copyTemplate() {
+    if (!selectedTemplate) return;
+    requestTemplateSelection({
+      id: -1,
+      name: `${selectedTemplate.name} copy`,
+      prompt: selectedTemplate.prompt,
+      is_builtin: 0,
+    });
   }
 
   async function saveTemplate() {
@@ -141,6 +187,8 @@
           t.id === selectedTemplateId ? { ...t, name, prompt: editingPrompt } : t,
         );
       }
+      savedName = editingName;
+      savedPrompt = editingPrompt;
       flashTemplateStatus("Template saved.");
     } catch (err) {
       flashTemplateStatus(String(err), true);
@@ -221,6 +269,11 @@
   }
 
   function activateSection(section: SettingsSection) {
+    if (section !== active && templateDirty) {
+      pendingSection = section;
+      discardConfirmOpen = true;
+      return;
+    }
     if (section === "templates") {
       activateTemplates();
     } else {
@@ -248,6 +301,10 @@
   });
 
   onMount(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (templateDirty) event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
     if (active === "models") void refreshModelHealth();
     if (active === "templates") void loadTemplates();
     getGlobalShortcut()
@@ -265,7 +322,15 @@
     getMeetingPresenceState()
       .then((next) => (presence = next))
       .catch((err) => console.error("Failed to load meeting presence settings:", err));
-    return () => unlisten?.();
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeUnload);
+      unlisten?.();
+    };
+  });
+
+  beforeNavigate(({ cancel, to }) => {
+    if (templateDirty && to?.url.pathname !== page.url.pathname &&
+      !window.confirm("Discard unsaved template changes?")) cancel();
   });
 
   function presenceLabel(): string {
@@ -582,13 +647,13 @@
           <header class="settings-card-header settings-card-header-row">
             <div>
               <h2>Summary templates</h2>
-              <p>Choose a built-in template or create a custom prompt.</p>
+              <p>Choose a built-in template or write instructions for your own meeting notes.</p>
             </div>
             <Button variant="outline" onclick={newTemplate}><Plus size={15} aria-hidden="true" /> New template</Button>
           </header>
 
           <div class="template-requirements">
-            <span>Required variables</span>
+            <span>Keep these placeholders in your prompt:</span>
             <code>{`{transcript}`}</code>
             <code>{`{notes}`}</code>
           </div>
@@ -607,7 +672,7 @@
                   onValueChange={(value) => {
                     const id = Number(value);
                     const t = templates.find((x) => x.id === id);
-                    if (t) selectTemplate(t);
+                    if (t) requestTemplateSelection(t);
                   }}
                 >
                   <Select.Trigger id="template-select" class="w-full">
@@ -633,21 +698,28 @@
                   </div>
                 </div>
                 <pre class="template-preview" role="region" aria-label="Built-in template prompt">{editingPrompt}</pre>
+                <div class="template-actions">
+                  <Button variant="outline" onclick={copyTemplate}>Use as starting point</Button>
+                </div>
               {:else}
                 <div class="template-editor">
                   <div class="field">
-                    <Label for="template-name">Name</Label>
+                    <Label for="template-name">Name {#if templateDirty}<span class="mono">· Unsaved changes</span>{/if}</Label>
                     <Input id="template-name" bind:value={editingName} placeholder="Template name" />
                   </div>
                   <div class="template-editor-scroll">
                     <div class="field">
                       <Label for="template-prompt">Prompt</Label>
+                      <p class="enhance-copy">Tell Kimi Nola which sections to write and what details to capture. Keep both placeholders so it can read the transcript and your notes.</p>
                       <Textarea
                         id="template-prompt"
                         class="template-prompt-editor"
                         bind:value={editingPrompt}
                         rows={12}
+                        aria-invalid={promptError ? "true" : undefined}
+                        aria-describedby={promptError ? "template-prompt-error" : undefined}
                       />
+                      {#if promptError}<p id="template-prompt-error" class="test-output error" role="alert">{promptError}</p>{/if}
                     </div>
                     <div class="template-actions">
                       <Button onclick={saveTemplate}>Save template</Button>
@@ -671,7 +743,7 @@
   </div>
 </div>
 
-<Dialog.Root bind:open={deleteConfirmOpen}>
+  <Dialog.Root bind:open={deleteConfirmOpen}>
   <Dialog.Content>
     <Dialog.Header>
       <Dialog.Title>Delete “{selectedTemplate?.name ?? "template"}”?</Dialog.Title>
@@ -682,6 +754,23 @@
     <Dialog.Footer>
       <Button variant="outline" onclick={() => (deleteConfirmOpen = false)}>Cancel</Button>
       <Button variant="destructive" onclick={() => void deleteSelectedTemplate()}>Delete template</Button>
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
+
+<Dialog.Root bind:open={discardConfirmOpen}>
+  <Dialog.Content>
+    <Dialog.Header>
+      <Dialog.Title>Discard template changes?</Dialog.Title>
+      <Dialog.Description>Your edits to this template have not been saved.</Dialog.Description>
+    </Dialog.Header>
+    <Dialog.Footer>
+      <Button variant="outline" onclick={() => {
+        discardConfirmOpen = false;
+        pendingTemplate = null;
+        pendingSection = null;
+      }}>Keep editing</Button>
+      <Button variant="destructive" onclick={discardTemplateChanges}>Discard changes</Button>
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
