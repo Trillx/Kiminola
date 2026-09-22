@@ -134,16 +134,27 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 - Meeting presence is an opt-in background companion. Closing the main window
   hides it and leaves the companion running; tray Quit exits fully.
-- Detection stays local and advisory. A prompt requires two independent
-  signals: a known process or visible app window plus an active Core Audio
-  session. A single signal remains a quiet possible hint with coarse evidence
-  labels; detection never starts recording. Prompts defer while Windows reports
-  presentation mode or a full-screen foreground app.
+- Detection stays local and advisory, inspecting session metadata without
+  opening capture streams. A recognized native meeting app requires its process
+  or visible window plus an active Core Audio session. Other apps use a balanced
+  fallback: a visible app window and both active input and output sessions
+  associated with the same app family for two consecutive successful detector
+  polls. Playback alone or input alone is not enough for an unknown app to
+  prompt. Activity means running streams, not audible speech; this is never
+  proof of a meeting. Partial evidence remains a quiet possible hint with
+  coarse evidence labels; detection never starts recording. Prompts defer
+  while Windows reports presentation mode or a full-screen foreground app.
 - Detection associates helper-process audio with its meeting-app process family
   and checks all active input/output audio endpoints, including non-default
   headsets. Episode suppression and process-loopback capture use the family
   root; Companion layout targets the family's visible application window.
   Unrelated processes are never grouped solely by matching executable names.
+  Unknown apps may associate same-executable descendants and embedded WebView
+  helpers with their visible owner, but never use an arbitrary shell ancestor
+  as the owner. Browser audio is only app-family evidence, not proof about a
+  particular tab. Browsers use the balanced input/output rule even when a
+  meeting title supplies a friendly label. Unattributable activity must not
+  be presented as certain.
 - Initial friendly labels are Granola, Zoom, Microsoft Teams, Google Meet,
   Webex, and a generic “another app” fallback. Raw executable names, window
   titles, URLs, calendar metadata, and detector history are not persisted or
@@ -159,14 +170,27 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   notifications. Episodes observed during recording remain suppressed until the
   normal inactivity reset; a later meeting may prompt again.
 - At most one prompt is shown per active meeting-presence episode for an app.
+  An eligible recognized native meeting app may replace an unanswered generic-app
+  prompt; the superseded episode stays consumed and its old actions are stale.
   Any prompt action suppresses only that episode; after two consecutive
   detector polls without active meeting audio, the next meeting may prompt
   again even if the meeting app process remains open. Prompt actions are
   accepted only while their prompt ID is current; stale or unknown actions
   are rejected without recording.
 - One inactive poll does not discard an unanswered prompt. Two inactive polls
-  clear it and rearm the episode; process exit clears it immediately. Activity
-  continues to update while presentation/full-screen mode defers visible prompts.
+  clear it and rearm the episode; observed process exit or PID reuse clears it
+  immediately. Creation times distinguish successive processes sharing a PID.
+  Explicit recording actions revalidate the process instance before queuing
+  and consuming a capture target; a changed target fails rather than recording
+  a replacement app. Hidden windows and incomplete audio scans do not establish
+  inactivity. Failed scans break onset/inactivity streaks without clearing
+  explicit dismissals. Activity continues to update while presentation/full-screen
+  mode defers visible prompts.
+- Pausing suppresses prompts while local metadata observation continues, so
+  meeting endings still rearm episodes. Unanswered prompts may return on resume
+  with fresh action IDs; explicitly dismissed episodes remain suppressed until
+  their normal inactivity reset. Disabling detection stops observation and
+  clears runtime state.
 - Settings expose Meeting detection and Start with Windows. Tray status is
   “Detecting locally · not recording”, “Paused”, or “Off”.
 

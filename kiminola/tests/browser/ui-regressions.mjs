@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 import { runOnboardingProviderTests } from './onboarding-provider.mjs';
+import { runMeetingPresenceTests } from './meeting-presence.mjs';
 
 // Real frontend, synthetic IPC only. Never opens the native app or the user's browser profile.
 const require = createRequire(import.meta.url);
@@ -47,7 +48,8 @@ async function check(name, run) {
 }
 async function open(page, route = '/') {
   await page.goto(origin + route);
-  await page.locator('.main-content').waitFor();
+  // The first route can trigger Vite's cold dependency transform on Windows.
+  await page.locator('.main-content').waitFor({ timeout: 30000 });
   await page.evaluate(() => document.fonts.ready);
 }
 async function record(page, draft = false) {
@@ -62,6 +64,7 @@ try {
     : { channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true });
 
   await runOnboardingProviderTests({ check, open, eventually, origin });
+  await runMeetingPresenceTests({ check, open, eventually, origin });
 
   await check('UI-02 Cancel never writes a transcript correction', async page => {
     await open(page, '/meeting/1');

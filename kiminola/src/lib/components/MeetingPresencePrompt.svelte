@@ -8,8 +8,10 @@
     getMeetingPresenceState,
     jotNotesFromMeetingPrompt,
     onMeetingPresenceAction,
+    onMeetingPresenceError,
     onMeetingPresencePrompt,
     onMeetingPresenceState,
+    onRecordingStarted,
     sendMeetingPresenceActionToMain,
     startRecordingFromMeetingPrompt,
     type MeetingPresenceState,
@@ -20,6 +22,7 @@
   let prompt = $state<MeetingPrompt | null>(null);
   let busy = $state(false);
   let error = $state("");
+  let promptVersion = 0;
 
   onMount(() => {
     const previousRootBackground = overlay ? document.documentElement.style.background : "";
@@ -32,23 +35,40 @@
     let unlistenPrompt: (() => void) | undefined;
     let unlistenState: (() => void) | undefined;
     let unlistenAction: (() => void) | undefined;
+    let unlistenError: (() => void) | undefined;
+    let unlistenRecordingStarted: (() => void) | undefined;
 
     onMeetingPresencePrompt((next) => {
+      promptVersion += 1;
       prompt = next;
       error = "";
     }).then((fn) => (unlistenPrompt = fn));
 
     onMeetingPresenceState((state: MeetingPresenceState) => {
+      promptVersion += 1;
       prompt = state.prompt;
-      if (overlay && !state.prompt) {
+      if (overlay && !state.prompt && !error && !busy) {
         void hideOverlay();
       }
     }).then((fn) => (unlistenState = fn));
 
+    onMeetingPresenceError((failure) => {
+      if (!prompt || prompt.id === failure.prompt_id) error = failure.message;
+    }).then((fn) => (unlistenError = fn));
+
+    onRecordingStarted(() => {
+      error = "";
+      if (overlay && !prompt && !busy) void hideOverlay();
+    }).then((fn) => (unlistenRecordingStarted = fn));
+
     onMeetingPresenceAction(async (action) => {
-      prompt = null;
+      // Handoffs carry no prompt ID. Read the claimed backend state instead of
+      // clearing whichever (possibly newer) prompt is currently displayed.
+      const actionVersion = promptVersion;
+      const state = await getMeetingPresenceState().catch(() => null);
+      if (state && actionVersion === promptVersion) prompt = state.prompt;
       if (overlay) {
-        await hideOverlay();
+        if (!prompt) await hideOverlay();
         return;
       }
       if (action.action === "notes" && action.draft_id !== undefined) {
@@ -58,14 +78,19 @@
       }
     }).then((fn) => (unlistenAction = fn));
 
+    const initialVersion = promptVersion;
     getMeetingPresenceState()
-      .then((state) => (prompt = state.prompt))
+      .then((state) => {
+        if (initialVersion === promptVersion) prompt = state.prompt;
+      })
       .catch((err) => console.error("Failed to load meeting prompt state:", err));
 
     return () => {
       unlistenPrompt?.();
       unlistenState?.();
       unlistenAction?.();
+      unlistenError?.();
+      unlistenRecordingStarted?.();
       if (overlay) {
         document.documentElement.style.background = previousRootBackground;
         document.body.style.background = previousBodyBackground;
@@ -80,7 +105,7 @@
   }
 
   async function handoffToMain(action: { action: "notes" | "start"; draft_id?: number }) {
-    await hideOverlay();
+    if (!prompt) await hideOverlay();
     const main = await WebviewWindow.getByLabel("main");
     await main?.show();
     await main?.setFocus();
@@ -95,7 +120,7 @@
     try {
       if (action === "notes") {
         const draftId = await jotNotesFromMeetingPrompt(promptId);
-        prompt = null;
+        if (prompt?.id === promptId) prompt = null;
         if (overlay) {
           await handoffToMain({ action: "notes", draft_id: draftId });
         } else {
@@ -111,13 +136,19 @@
         }
       } else {
         await dismissMeetingPrompt(promptId);
-        prompt = null;
-        await hideOverlay();
+        if (prompt?.id === promptId) prompt = null;
+        if (!prompt) await hideOverlay();
       }
     } catch (err) {
-      error = "That prompt is no longer active.";
+      const refreshVersion = promptVersion;
+      error = !prompt || prompt.id === promptId ? String(err) : error;
       const state = await getMeetingPresenceState().catch(() => null);
-      prompt = state?.prompt ?? null;
+      // Events delivered during the refresh are newer than its snapshot. A
+      // failed refresh is not evidence that the current prompt disappeared.
+      if (state && refreshVersion === promptVersion) {
+        prompt = state.prompt;
+        if (prompt?.id && prompt.id !== promptId) error = "";
+      }
       console.error("Meeting prompt action failed:", err);
     } finally {
       busy = false;
@@ -125,17 +156,30 @@
   }
 </script>
 
-{#if prompt}
+{#if prompt || error}
   <aside class="meeting-prompt" aria-live="assertive" aria-label="Meeting prompt">
-    <div class="prompt-kicker">{prompt.app_label}</div>
-    <div class="prompt-title">{prompt.message}</div>
-    <div class="prompt-copy">{prompt.not_recording_message}</div>
-    <div class="prompt-actions">
-      <Button onclick={() => resolve("notes")} disabled={busy}>Jot notes</Button>
-      <Button variant="secondary" onclick={() => resolve("start")} disabled={busy}>Start recording</Button>
-      <Button variant="ghost" onclick={() => resolve("dismiss")} disabled={busy}>Not now</Button>
-    </div>
-    {#if error}<div class="prompt-error">{error}</div>{/if}
+    {#if prompt}
+      <div class="prompt-kicker">{prompt.app_label}</div>
+      <div class="prompt-title">{prompt.message}</div>
+      <div class="prompt-copy">{prompt.not_recording_message}</div>
+      <div class="prompt-actions">
+        <Button onclick={() => resolve("notes")} disabled={busy}>Jot notes</Button>
+        <Button variant="secondary" onclick={() => resolve("start")} disabled={busy}>Start recording</Button>
+        <Button variant="ghost" onclick={() => resolve("dismiss")} disabled={busy}>Not now</Button>
+      </div>
+    {:else}
+      <div class="prompt-title">Couldn’t start recording</div>
+      <div class="prompt-actions">
+        <Button
+          variant="ghost"
+          onclick={() => {
+            error = "";
+            void hideOverlay();
+          }}>Close</Button
+        >
+      </div>
+    {/if}
+    {#if error}<div class="prompt-error" role="alert">{error}</div>{/if}
   </aside>
 {/if}
 
