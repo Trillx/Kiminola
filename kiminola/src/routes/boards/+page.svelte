@@ -141,7 +141,7 @@
     }
   }
 
-  async function moveCard(cardId: number, columnId: number) {
+  async function moveCard(cardId: number, columnId: number, select: HTMLSelectElement, persistedColumnId: number) {
     if (busy) return;
     busy = true;
     error = null;
@@ -149,6 +149,7 @@
       await moveBoardCard(cardId, columnId);
       await loadBoards();
     } catch (cause) {
+      select.value = String(persistedColumnId);
       error = errorMessage(cause);
     } finally {
       busy = false;
@@ -272,7 +273,10 @@
                           aria-label={`Move ${card.title}`}
                           value={String(column.id)}
                           disabled={busy}
-                          onchange={(event) => void moveCard(card.id, Number((event.currentTarget as HTMLSelectElement).value))}
+                          onchange={(event) => {
+                            const select = event.currentTarget as HTMLSelectElement;
+                            void moveCard(card.id, Number(select.value), select, column.id);
+                          }}
                         >
                           {#each activeBoard.columns as destination (destination.id)}
                             <option value={destination.id}>{destination.name}</option>
@@ -360,7 +364,7 @@
   }
 
   .board-welcome {
-    color: var(--brand-deep);
+    color: var(--ink-strong);
   }
 
   .board-welcome span {
@@ -423,7 +427,10 @@
     text-align: left;
   }
 
-  .board-list-item:hover,
+  .board-list-item:hover {
+    background: var(--surface-elev);
+  }
+
   .board-list-item.active {
     background: var(--brand-soft);
     color: var(--brand-deep);
@@ -473,12 +480,12 @@
 
   .board-title-button:hover,
   .column-title-button:hover {
-    color: var(--brand);
+    color: var(--text-muted);
   }
 
   .board-home-link,
   .card-source {
-    color: var(--brand);
+    color: var(--text-muted);
     font-size: 12px;
     text-decoration: none;
   }

@@ -45,4 +45,55 @@ export async function runBoardsTests({ check, open }) {
     const doneColumn = page.locator('.kanban-column[aria-label="Done"]');
     await doneColumn.getByText('Follow up with the team.', { exact: true }).waitFor();
   });
+
+  await check('A rejected card move restores the persisted column selection', async page => {
+    await open(page, '/boards');
+    await page.evaluate(async () => {
+      await window.__TAURI_INTERNALS__.invoke('add_board_card', {
+        boardId: 1,
+        columnId: 1,
+        title: 'Retry this move',
+        meetingId: 1,
+      });
+    });
+    await page.reload();
+    await page.evaluate(() => window.audit.failBoardMove = true);
+
+    const move = page.getByLabel('Move Retry this move', { exact: true });
+    await move.selectOption('5');
+    await page.getByRole('alert').filter({ hasText: 'Fixture: board card move failed' }).waitFor();
+    assert.equal(await move.inputValue(), '1');
+  });
+
+  await check('Boards reserves gold for the selected board', async page => {
+    await open(page, '/boards');
+    const resolveColor = async token => page.evaluate(tokenName => {
+      const probe = document.createElement('span');
+      probe.style.color = `var(${tokenName})`;
+      document.body.append(probe);
+      const value = getComputedStyle(probe).color;
+      probe.remove();
+      return value;
+    }, token);
+    const muted = await resolveColor('--text-muted');
+    const inkStrong = await resolveColor('--ink-strong');
+    const home = await page.locator('.board-home-link').evaluate(element => getComputedStyle(element).color);
+    const welcome = await page.locator('.board-welcome strong').evaluate(element => getComputedStyle(element).color);
+
+    await page.evaluate(async () => {
+      await window.__TAURI_INTERNALS__.invoke('add_board_card', {
+        boardId: 1,
+        columnId: 1,
+        title: 'Check the source link',
+        meetingId: 1,
+      });
+    });
+    await page.reload();
+    await page.getByText('Check the source link', { exact: true }).waitFor();
+    const source = await page.locator('.card-source').evaluate(element => getComputedStyle(element).color);
+
+    assert.equal(home, muted);
+    assert.equal(source, muted);
+    assert.equal(welcome, inkStrong);
+  });
 }

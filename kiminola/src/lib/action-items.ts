@@ -1,4 +1,4 @@
-const ACTION_HEADING = /^#{1,6}\s*(?:action items?|next steps?|follow[- ]?ups?)\s*:?[ \t]*$/i;
+const ACTION_HEADING = /^#{1,6}\s*(?:action items?|(?:ask\s*\/\s*)?next steps?|follow[- ]?ups?)\s*:?[ \t]*$/i;
 const OTHER_HEADING = /^#{1,6}\s+/;
 const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.+?)\s*$/;
 

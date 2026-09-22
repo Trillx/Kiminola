@@ -66,7 +66,7 @@
   window.audit = {
     calls: [], failConfig: false, failShortcut: false, failSegment: false, failSearch: false,
     slowSearch: false, modelDelay: 0, treeCount: 2, failRecovery: false, recovery: null,
-    failPresenceAction: null, consumeAndFailPresenceAction: null, failPresenceState: false,
+    failPresenceAction: null, consumeAndFailPresenceAction: null, failPresenceState: false, failBoardMove: false,
     windows: { main: { visible: windowLabel === 'main', focused: false }, 'meeting-prompt': { visible: windowLabel === 'meeting-prompt', focused: false } },
     hasListener(event) { return [...listeners.values()].some(item => item.event === event); },
     seedNoteDraft(draft) { drafts.set(draft.id, structuredClone(draft)); },
@@ -163,6 +163,7 @@
           return structuredClone(card);
         }
         case 'move_board_card': {
+          if (window.audit.failBoardMove) throw new Error('Fixture: board card move failed');
           const target = columnById(args.columnId);
           const source = boards.flatMap(board => board.columns).find(column => column.cards.some(card => card.id === args.cardId));
           const index = source?.cards.findIndex(card => card.id === args.cardId) ?? -1;
