@@ -26,6 +26,7 @@
   import X from "@lucide/svelte/icons/x";
   import Plus from "@lucide/svelte/icons/plus";
   import House from "@lucide/svelte/icons/house";
+  import LayoutDashboard from "@lucide/svelte/icons/layout-dashboard";
   import Search from "@lucide/svelte/icons/search";
   import SettingsIcon from "@lucide/svelte/icons/settings";
   import SearchDialog from "$lib/components/SearchDialog.svelte";
@@ -358,6 +359,7 @@
 
   <nav aria-label="Library">
     <a class="nav-item" class:active={pathname === "/"} href="/"><House size={16} aria-hidden="true" /> <span>Home</span></a>
+    <a class="nav-item" class:active={pathname.startsWith("/boards")} href="/boards"><LayoutDashboard size={16} aria-hidden="true" /> <span>Boards</span></a>
 
     <ContextMenu.Root>
       <ContextMenu.Trigger class="spaces-header-trigger" role="group" tabindex={0}>

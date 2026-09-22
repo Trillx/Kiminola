@@ -5,6 +5,10 @@ Canonical language for the project. Implementation details do not belong here.
 ## Terms
 
 - **Meeting** — a single recorded conversation the user captures with Kiminola. Has one capture session, one transcript, and one set of notes.
+- **Board** — a user-created workflow surface for organizing action-item cards. A Board has an ordered set of Board columns and persists locally with the rest of Kimi Nola's meeting data.
+- **Board column** — an ordered lane within a Board. Users may add, rename, and use columns as destinations when moving cards.
+- **Board card** — a local action-item card with a title, position, and optional link to its source Meeting. Moving a card changes its Board column without changing the Meeting or enhanced notes.
+- **Action item** — a concise follow-up extracted from enhanced Meeting notes. Adding one to a Board copies its title into a Board card and preserves the source Meeting link.
 - **Calendar account** — a user-authorized Google Calendar or Microsoft 365/Outlook identity from which Kimi Nola may read scheduled items. The first Microsoft integration supports both work/school and personal Microsoft accounts.
 - **Selected calendar** — a user-approved event collection belonging to a Calendar account. Only selected calendars are eligible for Calendar sync. Deselecting one stops its sync and requires an explicit choice to retain or erase its already-synced local data.
 - **Calendar event** — an externally scheduled item imported from a Selected calendar. It is not a Meeting and has no capture session, transcript, or notes by itself. Its source identity is provider, Calendar account, Selected calendar, and external event-instance identity; a matching title and time from another calendar remains a separate Calendar event. Each expanded occurrence of a recurring series is its own Calendar event and may retain a series reference.

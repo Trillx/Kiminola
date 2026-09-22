@@ -8,6 +8,7 @@ import { chromium } from 'playwright';
 import { createServer } from 'vite';
 import { runOnboardingProviderTests } from './onboarding-provider.mjs';
 import { runMeetingPresenceTests } from './meeting-presence.mjs';
+import { runBoardsTests } from './boards.mjs';
 
 // Real frontend, synthetic IPC only. Never opens the native app or the user's browser profile.
 const require = createRequire(import.meta.url);
@@ -65,6 +66,7 @@ try {
 
   await runOnboardingProviderTests({ check, open, eventually, origin });
   await runMeetingPresenceTests({ check, open, eventually, origin });
+  await runBoardsTests({ check, open, origin });
 
   await check('UI-02 Cancel never writes a transcript correction', async page => {
     await open(page, '/meeting/1');
