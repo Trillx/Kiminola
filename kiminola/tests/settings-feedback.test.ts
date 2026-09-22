@@ -16,6 +16,7 @@ function controller(route: string, adapters: Record<string, unknown>, expose: st
     $effect: () => {},
     onMount: () => {},
     onDestroy: () => {},
+    beforeNavigate: () => {},
     page: { url: new URL("http://localhost/settings?section=shortcut") },
     resolveSettingsSection,
     console: { error: () => {} },
@@ -39,6 +40,27 @@ test("shortcut save rejection stays visible until a successful retry", async () 
   await ui.saveShortcut();
   assert.equal(ui.state().error, "");
   assert.equal(ui.state().shortcutSaved, true);
+});
+
+test("dismissing the discard dialog clears abandoned template and section actions", () => {
+  const ui = controller("settings", {}, `{
+    onDiscardDialogOpenChange,
+    setPending(template, section) {
+      pendingTemplate = template;
+      pendingSection = section;
+      discardConfirmOpen = true;
+    },
+    state() { return { discardConfirmOpen, pendingTemplate, pendingSection }; }
+  }`);
+  ui.setPending({ id: 9, name: "Abandoned", prompt: "", is_builtin: 0 }, "general");
+
+  ui.onDiscardDialogOpenChange(false);
+
+  assert.deepEqual(ui.state(), {
+    discardConfirmOpen: false,
+    pendingTemplate: null,
+    pendingSection: null,
+  });
 });
 
 test("microphone permission success does not invent an audio-level test", async () => {

@@ -134,6 +134,14 @@
     }
   }
 
+  function onDiscardDialogOpenChange(open: boolean) {
+    discardConfirmOpen = open;
+    if (!open) {
+      pendingTemplate = null;
+      pendingSection = null;
+    }
+  }
+
   function discardTemplateChanges() {
     if (pendingTemplate) selectTemplate(pendingTemplate);
     else {
@@ -758,18 +766,14 @@
   </Dialog.Content>
 </Dialog.Root>
 
-<Dialog.Root bind:open={discardConfirmOpen}>
+<Dialog.Root bind:open={discardConfirmOpen} onOpenChange={onDiscardDialogOpenChange}>
   <Dialog.Content>
     <Dialog.Header>
       <Dialog.Title>Discard template changes?</Dialog.Title>
       <Dialog.Description>Your edits to this template have not been saved.</Dialog.Description>
     </Dialog.Header>
     <Dialog.Footer>
-      <Button variant="outline" onclick={() => {
-        discardConfirmOpen = false;
-        pendingTemplate = null;
-        pendingSection = null;
-      }}>Keep editing</Button>
+      <Button variant="outline" onclick={() => onDiscardDialogOpenChange(false)}>Keep editing</Button>
       <Button variant="destructive" onclick={discardTemplateChanges}>Discard changes</Button>
     </Dialog.Footer>
   </Dialog.Content>
