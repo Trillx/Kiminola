@@ -275,6 +275,9 @@ pub async fn start_recording(
         session: new_session,
         transcript_store,
     });
+    if let Err(error) = app.emit("recording:started", ()) {
+        eprintln!("failed to emit recording:started: {error}");
+    }
     Ok(start_status)
 }
 

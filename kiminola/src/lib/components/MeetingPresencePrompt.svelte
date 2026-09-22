@@ -11,6 +11,7 @@
     onMeetingPresenceError,
     onMeetingPresencePrompt,
     onMeetingPresenceState,
+    onRecordingStarted,
     sendMeetingPresenceActionToMain,
     startRecordingFromMeetingPrompt,
     type MeetingPresenceState,
@@ -35,6 +36,7 @@
     let unlistenState: (() => void) | undefined;
     let unlistenAction: (() => void) | undefined;
     let unlistenError: (() => void) | undefined;
+    let unlistenRecordingStarted: (() => void) | undefined;
 
     onMeetingPresencePrompt((next) => {
       promptVersion += 1;
@@ -53,6 +55,11 @@
     onMeetingPresenceError((failure) => {
       if (!prompt || prompt.id === failure.prompt_id) error = failure.message;
     }).then((fn) => (unlistenError = fn));
+
+    onRecordingStarted(() => {
+      error = "";
+      if (overlay && !prompt && !busy) void hideOverlay();
+    }).then((fn) => (unlistenRecordingStarted = fn));
 
     onMeetingPresenceAction(async (action) => {
       // Handoffs carry no prompt ID. Read the claimed backend state instead of
@@ -83,6 +90,7 @@
       unlistenState?.();
       unlistenAction?.();
       unlistenError?.();
+      unlistenRecordingStarted?.();
       if (overlay) {
         document.documentElement.style.background = previousRootBackground;
         document.body.style.background = previousBodyBackground;

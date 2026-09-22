@@ -82,6 +82,10 @@ export function onRecordingQuitBlocked(handler: () => void): Promise<UnlistenFn>
   return listen<unknown>("recording:quit-blocked", () => handler());
 }
 
+export function onRecordingStarted(handler: () => void): Promise<UnlistenFn> {
+  return listen<unknown>("recording:started", () => handler());
+}
+
 /* ---------- persistence (SQLite via src-tauri db.rs) ---------- */
 
 export interface MeetingSummary {
