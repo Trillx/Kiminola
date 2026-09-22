@@ -158,6 +158,10 @@ foreach ($runtimeName in $runtimeNames) {
     }
 }
 
+# Native test executables load these DLLs before Cargo can copy them beside
+# every generated harness, so expose the selected architecture explicitly.
+Add-BuildPath -Path $libDir
+
 # tauri.conf.json intentionally stages these four runtime DLLs from target/release
 # so cross-target bundles receive the DLLs for the selected architecture.
 New-Item -ItemType Directory -Path $releaseResourceDir -Force | Out-Null

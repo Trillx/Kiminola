@@ -1,8 +1,8 @@
 # Releasing Kimi Nola for Windows
 
 Kimi Nola ships NSIS installers and complete portable archives for Windows x64
-and ARM64. Tag builds carry Tauri updater signatures; that identity is separate
-from Authenticode/SignPath trust for Windows prompts. The in-app updater checks
+and ARM64. Tag builds carry Tauri updater signatures and SignPath Authenticode;
+those are separate identities. The in-app updater checks
 the published stable GitHub Release feed and installs only a higher updater-
 signed version. Drafts and prereleases are never offered in the app.
 
@@ -15,8 +15,44 @@ Keep the private key and password outside the repository, with an offline
 backup. The public key is committed in
 `kiminola/src-tauri/tauri.conf.json`. Configure these GitHub Actions secrets:
 
+Protect `main` with required pull-request checks and protect the `v*` tag namespace
+with a repository ruleset restricted to release maintainers. The workflow also fetches
+and peels each tag and refuses to expose signing credentials or dispatch self-hosted
+hardware unless that exact commit is reachable from `origin/main`.
+
 - `TAURI_SIGNING_PRIVATE_KEY` - the complete contents of the private key file.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` - the key password.
+- `SIGNPATH_API_TOKEN` - a SignPath CI user token restricted to this project and
+  release-signing policy.
+
+Configure these GitHub repository variables from the SignPath project:
+
+- `SIGNPATH_ORGANIZATION_ID`
+- `SIGNPATH_PROJECT_SLUG`
+- `SIGNPATH_SIGNING_POLICY_SLUG`
+- `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG` - an artifact configuration for the
+  GitHub Actions ZIP wrapper shown below.
+- `SIGNPATH_SIGNER_THUMBPRINT` - the 40-character SHA-1 thumbprint of the one
+  SignPath certificate approved for Kimi Nola releases. Update it only as part
+  of a documented certificate rotation.
+
+`actions/upload-artifact` submits a ZIP even when it contains one executable,
+so the SignPath artifact configuration must use a `<zip-file>` root and require
+exactly one PE payload:
+
+```xml
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="*.exe" min-matches="1" max-matches="1">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
+```
+
+Both signing requests leave `skip-decompress` disabled and verify the returned
+certificate against `SIGNPATH_SIGNER_THUMBPRINT`; a valid signature from any
+other certificate fails the release.
 
 For a local `gh` installation, these commands send the files directly to
 GitHub without printing their contents:
@@ -42,31 +78,66 @@ Provision Visual Studio Build Tools, the Windows SDK, LLVM under
 Also provision a deterministic 16 kHz mono PCM speech fixture at
 `%LOCALAPPDATA%\Kiminola\hardware\speech-test.wav` and its expected transcript
 at `%LOCALAPPDATA%\Kiminola\hardware\speech-test.txt`, then configure this
-repository variable:
+repository variables:
 
 - `KIMINOLA_HARDWARE_CI=true`
+- `KIMINOLA_X64_HARDWARE_MICROPHONE_NAME=<exact default input-device name>`
+- `KIMINOLA_ARM64_HARDWARE_MICROPHONE_NAME=<exact default input-device name>`
+
+The configured input names must identify the physical microphones attached to
+the respective runners. Virtual, loopback, Stereo Mix, Voicemeeter, and cable
+devices are rejected. The physical-microphone test requires the configured
+device to capture the 440 Hz acoustic stimulus, rather than accepting arbitrary
+non-silent ambient audio.
 
 `KIMINOLA_PREVIOUS_RELEASE_TAG=vX.Y.Z` is optional. When omitted, the workflow
-uses the latest published stable release; a manual dispatch can override either
-source. A missing hardware configuration fails visibly and blocks tag releases
-instead of reporting a green no-op.
+selects the highest updater-signed stable release strictly older than the
+candidate; a manual dispatch can request a specific baseline only when it equals
+that computed highest eligible release. Eligibility first requires the canonical
+installer and signature assets; the selected signature is then verified
+cryptographically before execution. An invalid signature blocks the gate rather than
+silently falling back to an older release. A stale override is rejected. A missing
+baseline or hardware configuration fails visibly and blocks tag releases instead
+of reporting a green no-op.
 
-The runners must use dedicated test accounts. The workflow backs up any existing
-Kimi Nola application and data directories before replacing them and restores
-those directories in a `finally` block. It never receives updater signing
+The runners must use dedicated test accounts. The workflow snapshots the existing
+Kimi Nola application directory, complete persistent user root, installer-managed
+registry keys, and Start Menu/Desktop shortcuts into the stable, same-volume
+`%LOCALAPPDATA%\KiminolaHardwareRecovery` root before replacing them. An atomic
+write-through transaction journal is written before the first mutation, after
+each filesystem snapshot, immediately after each durably flushed registry export,
+before each live registry deletion starts, and again after each key is removed.
+Immediately after checkout, every new run restores
+or fails closed on an incomplete transaction before tool setup or hardware fixtures
+are read, so cancellation, timeout, service termination, or restart cannot strand
+recoverable state under runner temporary storage. The
+journal and backups are removed only after every restoration check succeeds.
+Incomplete snapshots are never deleted or nested during recovery; failures preserve
+the recovery root for manual intervention. The workflow never receives updater signing
 secrets. The scheduled run verifies native runner and LLVM architecture,
-non-silent physical-microphone capture under a known acoustic stimulus, classic
+physical-microphone capture of the known 440 Hz acoustic stimulus against a
+matched stimulus-off baseline while the source process remains live, classic
 and process-tree loopback, deterministic speech transcription against the
 expected text, native packaging, installation, startup, and preservation across
 a previous-to-current installer upgrade. Before executing the previous installer,
-the workflow verifies its updater signature against the public key embedded in
-the app. The update test inserts a unique meeting-and-note row into the real
-SQLite database and checks that exact row after installation; it also compares
-every provisioned model-file hash.
+the workflow decodes its Tauri Base64 signature and verifies the resulting
+Minisign data against the public key embedded in the app. The update test inserts a
+complete semantic fixture directly into the untouched previous-version SQLite
+database, launches the candidate to apply any pending migrations, and checks the
+meeting, raw and enhanced notes, timestamped transcript, custom template, setting,
+recovery draft, and library destination through exact queries and application
+deserialization afterward. A release with no new migration still verifies the complete
+unchanged history and all preserved data. It also compares every provisioned model-file
+hash. The legacy startup probe keeps the previous process alive until the migration
+count from that exact release tag, compatible checksums, integrity check, required
+tables, and default Personal space are readable.
+Both installed versions must expose native executable and runtime-DLL PE machine
+types matching the physical runner.
 
-Ordinary pull requests do not use physical devices. They build and start native
-unsigned x64 and ARM64 packages on GitHub-hosted runners and retain the installer
-and complete portable archives for seven days. Each archive contains
+Ordinary pull requests do not use physical devices. Pull requests, `main` pushes,
+and version tags build and start native unsigned x64 and ARM64 packages on
+GitHub-hosted runners and retain the installer and complete portable archives for
+seven days. Each archive contains
 `kiminola.exe` and all required ONNX Runtime/sherpa DLLs.
 
 ## Release flow
@@ -82,37 +153,59 @@ and complete portable archives for seven days. Each archive contains
    ```
 
 3. The tag workflow checks all three application versions, validates the tag,
-   and tests the release support scripts. It then runs the full physical x64 and
-   ARM64 hardware workflow. Both hardware jobs must pass before a draft exists.
+   requires the updater and SignPath credentials/configuration, tests the release
+   support scripts, and reruns locked npm and Rust dependency audits. A
+   GitHub-hosted gate then dispatches the physical x64
+   and ARM64 checks as a separate workflow and verifies that run succeeded for the
+   exact tag commit. Keeping self-hosted jobs outside the signing dependency graph
+   preserves SignPath OSS trusted-build provenance. Both hardware jobs must pass
+   before a draft exists.
 4. Native x64 and ARM64 release jobs build in parallel, verify the executable
-   and four bundled DLL PE architectures, run startup smoke tests, and bundle
-   that same verified executable. Each job uploads its NSIS installer, updater
-   `.sig`, complete portable archive, and a SHA-256 verification report.
-5. A final serialized job downloads the exact release assets, checks every
-   report hash and portable-archive member, and verifies both updater signatures
-   with pinned Minisign and the public key embedded in the app. It then uploads
-   one `latest.json` whose URLs and literal signatures must match the verified
-   installers, downloads that uploaded manifest, and requires its SHA-256 to
-   match the validated local file. Any mismatch leaves the release as a draft.
-6. Test the draft installers on matching Windows architectures. For an
-   update-enabled baseline, install the previous published version, create a
-   small meeting/data marker, and accept the update from inside the app. Check
-   that the app restarts once and that the SQLite database and downloaded model
-   files remain intact.
+   and four bundled DLL PE architectures, submit the executable and NSIS installer
+   to SignPath, and require `Get-AuthenticodeSignature` to report `Valid`. The
+   installer is renamed to the canonical
+   `Kimi.Nola_<version>_<arch>-setup.exe` form, and the updater signature is
+   regenerated only after the installer receives its final Authenticode bytes.
+   Read-only build jobs pass the installer, updater `.sig`,
+   complete portable archive, and SHA-256/Authenticode verification report to a
+   minimal publishing job; repository-write access is not exposed to build hooks
+   or signing actions.
+5. A read-only verification job downloads the exact release assets, checks every
+   report hash, installer and extracted portable-executable Authenticode signer
+   thumbprints, portable-archive member, and the PE architecture of every extracted
+   executable and native DLL, then
+   verifies both updater signatures with pinned Minisign and the public key
+   embedded in the app. It generates one unsigned `latest.json` whose URLs and
+   literal verified installer signatures must match the verified installers. A
+   minimal publishing job uploads that file, downloads it again, requires its
+   SHA-256 to match, and checks the exact final draft asset set. Any mismatch
+   leaves the release as a draft.
+6. Download the exact final signed draft installers and test them on matching Windows
+   architectures. Confirm their SHA-256, Authenticode signer/timestamp, and updater
+   signatures against the workflow reports before execution. Install the
+   previous published version, create a small meeting/data marker, run the draft
+   installer as an upgrade, and check that the new app starts with the SQLite
+   database and downloaded model files intact. Transcribe the deterministic speech
+   fixture through the installed application so inference exercises the DLLs beside
+   the installed executable. Drafts are not exposed by the
+   app's stable `releases/latest` feed, so this pre-publication gate deliberately
+   validates the same installer directly rather than claiming an in-app update.
 7. Open the draft, confirm both architectures, portable archives, and
    `latest.json`, and select
    **Publish release**. Keep it non-prerelease; this is what makes the stable
    `releases/latest/download/latest.json` endpoint resolve to it.
-8. After publication, verify the public manifest and both installer URLs. The
+8. After publication, verify the public manifest and both installer URLs, then
+   run an in-app updater smoke test from the previous stable release on x64 and
+   ARM64. The
    manifest must contain complete entries for `windows-x86_64` and
    `windows-aarch64`, with literal signature contents rather than `.sig` URLs.
    Installer URLs must be the permanent tag-versioned
    `releases/download/<tag>/` URLs; draft-only `untagged-*` URLs stop
    resolving at publication.
 
-The existing `v0.1.1` installation predates the updater configuration. Users
-on that version need one manual install of the first updater-enabled release;
-after that bridge release, later stable releases can arrive through the app.
+`v0.1.2` is the first updater-enabled release. Users on `v0.1.1` or any older
+installation need one manual upgrade to `v0.1.2` or later; after that bridge,
+later stable releases can arrive through the app.
 
 ## Safety rules
 
@@ -128,9 +221,11 @@ after that bridge release, later stable releases can arrive through the app.
 ## Database and shutdown validation
 
 CI runs locked Rust all-target and documentation tests on Windows x64 and again
-on native x64 and ARM64 release jobs. Native package jobs also run an executable
-startup smoke test. Physical x64 and ARM64 validation is a required tag gate,
-and signed in-app updater acceptance remains a manual publication gate. Run
+on native x64 and ARM64 release jobs. Native package jobs also run executable
+startup behavior checks before their artifacts are accepted.
+Physical x64 and ARM64 validation is a required tag gate. Because draft releases
+are absent from the stable feed, in-app updater acceptance is a post-publication
+smoke test rather than a pre-publication gate. Run
 `npm test`, `cargo test --locked --all-targets`, and `cargo test --locked --doc`
 with the matching native DLL directory on PATH.
 

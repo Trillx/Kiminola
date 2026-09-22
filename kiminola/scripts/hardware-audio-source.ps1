@@ -3,6 +3,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutputPath,
 
+    [string]$ReadyPath,
+
     [ValidateRange(10, 900)]
     [int]$DurationSeconds = 180
 )
@@ -41,6 +43,9 @@ try {
 $player = [Media.SoundPlayer]::new($OutputPath)
 $player.Load()
 $player.PlayLooping()
+if (-not [string]::IsNullOrWhiteSpace($ReadyPath)) {
+    [IO.File]::WriteAllText($ReadyPath, 'playing', [Text.UTF8Encoding]::new($false))
+}
 try {
     Start-Sleep -Seconds $DurationSeconds
 } finally {

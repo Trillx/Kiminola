@@ -26,30 +26,36 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'hardware-recovery.ps1')
 
 if ($env:KIMINOLA_HARDWARE_RUNNER -ne '1') {
     throw 'Refusing destructive installer validation outside a dedicated Kimi Nola hardware runner.'
 }
-if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
-    throw 'GH_TOKEN is required to download the previous release.'
-}
-if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
-    throw 'GITHUB_REPOSITORY is required to locate the previous release.'
-}
 
-$currentInstallerPath = (Resolve-Path -LiteralPath $CurrentInstaller).Path
-$cargoManifestFullPath = (Resolve-Path -LiteralPath $CargoManifestPath).Path
 $appRoot = Join-Path $env:LOCALAPPDATA 'Kimi Nola'
 $userRoot = Join-Path $env:LOCALAPPDATA 'Kiminola'
 $dataRoot = Join-Path $userRoot 'data'
 $modelRoot = Join-Path $userRoot 'models\nemotron'
 $installedExecutable = Join-Path $appRoot 'kiminola.exe'
 $databasePath = Join-Path $dataRoot 'kiminola.db'
-$fixtureRoot = Join-Path $env:TEMP ("kiminola-hardware-update-" + [guid]::NewGuid().ToString('N'))
-$appBackup = Join-Path $fixtureRoot 'pre-existing-app'
-$dataBackup = Join-Path $fixtureRoot 'pre-existing-data'
-$appWasBackedUp = $false
-$dataWasBackedUp = $false
+$provisionedSpeechFixture = Join-Path $userRoot 'hardware\speech-test.wav'
+$provisionedExpectedTranscript = Join-Path $userRoot 'hardware\speech-test.txt'
+$fixtureRoot = Join-Path $env:TEMP "kiminola-hardware-update-$([guid]::NewGuid().ToString('N'))"
+$postInstallSpeechFixture = Join-Path $fixtureRoot 'speech-test.wav'
+$postInstallExpectedTranscript = Join-Path $fixtureRoot 'speech-test.txt'
+$recoveryRoot = Join-Path $env:LOCALAPPDATA 'KiminolaHardwareRecovery'
+$recoveryJournal = Join-Path $recoveryRoot 'active-transaction.json'
+
+
+if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+    throw 'GH_TOKEN is required to download the previous release.'
+}
+if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
+    throw 'GITHUB_REPOSITORY is required to locate the previous release.'
+}
+$currentInstallerPath = (Resolve-Path -LiteralPath $CurrentInstaller).Path
+$cargoManifestFullPath = (Resolve-Path -LiteralPath $CargoManifestPath).Path
+
 $modelHashes = @{}
 foreach ($file in @('encoder.int8.onnx', 'decoder.int8.onnx', 'joiner.int8.onnx', 'tokens.txt')) {
     $path = Join-Path $modelRoot $file
@@ -58,7 +64,38 @@ foreach ($file in @('encoder.int8.onnx', 'decoder.int8.onnx', 'joiner.int8.onnx'
     }
     $modelHashes[$file] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
 }
-New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+foreach ($fixture in @($provisionedSpeechFixture, $provisionedExpectedTranscript)) {
+    if (-not (Test-Path -LiteralPath $fixture -PathType Leaf)) {
+        throw "The provisioned post-install ASR fixture is missing: $fixture."
+    }
+}
+
+$active = @(Get-Process -Name 'kiminola' -ErrorAction SilentlyContinue)
+if ($active.Count -gt 0) {
+    throw "Refusing to replace an active Kimi Nola process on the hardware runner: $($active.Id -join ', ')."
+}
+
+$transactionId = [guid]::NewGuid().ToString('N')
+$transactionRoot = Join-Path $recoveryRoot $transactionId
+$stateSet = New-KiminolaHardwareStateSet -TransactionRoot $transactionRoot
+$appState = $stateSet.App
+$userState = $stateSet.User
+$startMenuState = $stateSet.StartMenu
+$desktopState = $stateSet.Desktop
+$uninstallRegistryState = $stateSet.UninstallRegistry
+$installRegistryState = $stateSet.InstallRegistry
+Test-HardwareStatePlan -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+
+function Assert-InstalledArchitecture {
+    $paths = @(
+        $installedExecutable,
+        (Join-Path $appRoot 'onnxruntime.dll'),
+        (Join-Path $appRoot 'onnxruntime_providers_shared.dll'),
+        (Join-Path $appRoot 'sherpa-onnx-c-api.dll'),
+        (Join-Path $appRoot 'sherpa-onnx-cxx-api.dll')
+    )
+    & (Join-Path $PSScriptRoot 'verify-pe-architecture.ps1') -Target $Target -Paths $paths
+}
 
 function Invoke-DatabaseFixture {
     param(
@@ -87,21 +124,32 @@ function Invoke-DatabaseFixture {
     }
 }
 
+function Invoke-InstalledAsrFixture {
+    $env:KIMINOLA_ASR_MODEL_DIR = $modelRoot
+    $env:KIMINOLA_TEST_SPEECH_WAV = $postInstallSpeechFixture
+    $env:KIMINOLA_REQUIRE_ASR_FIXTURE = '1'
+    $env:KIMINOLA_EXPECTED_SPEECH_TEXT = (Get-Content -Raw -LiteralPath $postInstallExpectedTranscript).Trim()
+    try {
+        cargo test --locked --lib `
+            --manifest-path $cargoManifestFullPath `
+            --target $Target `
+            asr::tests::session_transcribes_speech_wav `
+            -- --exact
+        if ($LASTEXITCODE -ne 0) {
+            throw 'ASR failed after candidate installation.'
+        }
+    } finally {
+        Remove-Item Env:KIMINOLA_ASR_MODEL_DIR -ErrorAction SilentlyContinue
+        Remove-Item Env:KIMINOLA_TEST_SPEECH_WAV -ErrorAction SilentlyContinue
+        Remove-Item Env:KIMINOLA_REQUIRE_ASR_FIXTURE -ErrorAction SilentlyContinue
+        Remove-Item Env:KIMINOLA_EXPECTED_SPEECH_TEXT -ErrorAction SilentlyContinue
+    }
+}
+
+New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
 try {
-    $active = @(Get-Process -Name 'kiminola' -ErrorAction SilentlyContinue)
-    if ($active.Count -gt 0) {
-        throw "Refusing to replace an active Kimi Nola process on the hardware runner: $($active.Id -join ', ')."
-    }
-
-    if (Test-Path -LiteralPath $appRoot -PathType Container) {
-        Move-Item -LiteralPath $appRoot -Destination $appBackup
-        $appWasBackedUp = $true
-    }
-    if (Test-Path -LiteralPath $dataRoot -PathType Container) {
-        Move-Item -LiteralPath $dataRoot -Destination $dataBackup
-        $dataWasBackedUp = $true
-    }
-
+    Copy-Item -LiteralPath $provisionedSpeechFixture -Destination $postInstallSpeechFixture
+    Copy-Item -LiteralPath $provisionedExpectedTranscript -Destination $postInstallExpectedTranscript
     $headers = @{
         Authorization = "Bearer $env:GH_TOKEN"
         Accept = 'application/vnd.github+json'
@@ -112,6 +160,14 @@ try {
     $release = Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $headers
     if ($release.draft -or $release.prerelease) {
         throw "Previous release '$PreviousTag' must be published and stable."
+    }
+    $migrationUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/kiminola/src-tauri/migrations?ref=$encodedTag"
+    $migrationEntries = @(Invoke-RestMethod -Method Get -Uri $migrationUri -Headers $headers)
+    $expectedPreviousMigrationCount = @($migrationEntries | Where-Object {
+        $_.type -eq 'file' -and $_.name -match '^\d+_.+\.sql$'
+    }).Count
+    if ($expectedPreviousMigrationCount -le 0) {
+        throw "Previous release '$PreviousTag' exposes no migration files in tagged source."
     }
     $installerAssets = @($release.assets | Where-Object { $_.name -match "_${Arch}-setup\.exe$" })
     if ($installerAssets.Count -ne 1) {
@@ -145,19 +201,82 @@ try {
     $tauriConfig = Get-Content -Raw -LiteralPath $tauriConfigPath | ConvertFrom-Json
     $publicKeyPath = Join-Path $fixtureRoot 'kiminola-minisign.pub'
     [IO.File]::WriteAllBytes($publicKeyPath, [Convert]::FromBase64String($tauriConfig.plugins.updater.pubkey))
-    & $minisign -V -q -p $publicKeyPath -m $previousInstallerPath -x $previousSignaturePath
+    $rawPreviousSignaturePath = "$previousSignaturePath.raw"
+    [IO.File]::WriteAllBytes(
+        $rawPreviousSignaturePath,
+        [Convert]::FromBase64String((Get-Content -Raw -LiteralPath $previousSignaturePath).Trim())
+    )
+    & $minisign -V -q -p $publicKeyPath -m $previousInstallerPath -x $rawPreviousSignaturePath
     if ($LASTEXITCODE -ne 0) {
         throw "Updater signature verification failed for '$($installerAssets[0].name)'."
     }
-    Remove-Item Env:GH_TOKEN
+} catch {
+    Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+    throw
+}
+Remove-Item Env:GH_TOKEN
+
+New-Item -ItemType Directory -Path $transactionRoot -Force | Out-Null
+Write-HardwareRecoveryJournal `
+    -JournalPath $recoveryJournal `
+    -TransactionId $transactionId `
+    -PathStates $stateSet.PathStates `
+    -RegistryStates $stateSet.RegistryStates
+try {
+    Export-HardwareRegistryKey -State $uninstallRegistryState
+    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    Export-HardwareRegistryKey -State $installRegistryState
+    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+
+    Backup-HardwarePath -State $appState
+    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    Backup-HardwarePath -State $userState
+    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    Backup-HardwarePath -State $startMenuState
+    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    Backup-HardwarePath -State $desktopState
+    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    Start-HardwareRegistryRemoval -State $uninstallRegistryState
+    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    Remove-ExportedHardwareRegistryKey -State $uninstallRegistryState
+    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    Start-HardwareRegistryRemoval -State $installRegistryState
+    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    Remove-ExportedHardwareRegistryKey -State $installRegistryState
+    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+
+    if ($userState.SnapshotComplete) {
+        $backedUpModelRoot = Join-Path $userState.Backup 'models\nemotron'
+        if (Test-Path -LiteralPath $backedUpModelRoot -PathType Container) {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $modelRoot) -Force | Out-Null
+            Copy-Item -LiteralPath $backedUpModelRoot -Destination $modelRoot -Recurse
+        }
+    }
 
     $previousInstall = Start-Process -FilePath $previousInstallerPath -ArgumentList '/S' -PassThru -Wait
     if ($previousInstall.ExitCode -ne 0) { throw "Previous installer exited with $($previousInstall.ExitCode)." }
     if (-not (Test-Path -LiteralPath $installedExecutable -PathType Leaf)) {
         throw "Previous installer did not create $installedExecutable."
     }
+    Assert-InstalledArchitecture
 
-    & (Join-Path $PSScriptRoot 'startup-behavior.test.ps1') -Executable $installedExecutable -TimeoutSeconds $StartupTimeoutSeconds
+    & (Join-Path $PSScriptRoot 'legacy-startup.test.ps1') `
+        -Executable $installedExecutable `
+        -DatabasePath $databasePath `
+        -Target $Target `
+        -CargoManifestPath $cargoManifestFullPath `
+        -ExpectedMigrationCount $expectedPreviousMigrationCount `
+        -TimeoutSeconds $StartupTimeoutSeconds
     if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf) -or (Get-Item -LiteralPath $databasePath).Length -eq 0) {
         throw 'The previous release did not initialize a non-empty SQLite database.'
     }
@@ -167,9 +286,11 @@ try {
 
     $currentInstall = Start-Process -FilePath $currentInstallerPath -ArgumentList '/S' -PassThru -Wait
     if ($currentInstall.ExitCode -ne 0) { throw "Current installer exited with $($currentInstall.ExitCode)." }
+    Assert-InstalledArchitecture
     if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf) -or (Get-Item -LiteralPath $databasePath).Length -eq 0) {
         throw 'SQLite database was lost during update installation.'
     }
+    & (Join-Path $PSScriptRoot 'startup-behavior.test.ps1') -Executable $installedExecutable -TimeoutSeconds $StartupTimeoutSeconds
     Invoke-DatabaseFixture -Mode verify -Marker $databaseMarker
     foreach ($file in $modelHashes.Keys) {
         $path = Join-Path $modelRoot $file
@@ -178,19 +299,33 @@ try {
             throw "ASR model hashes changed during update installation: $file."
         }
     }
+    Invoke-InstalledAsrFixture
 
-    & (Join-Path $PSScriptRoot 'startup-behavior.test.ps1') -Executable $installedExecutable -TimeoutSeconds $StartupTimeoutSeconds
-    Write-Host "PASS: $PreviousTag -> current $Arch installer preserved a real database record and the ASR model pack, then launched successfully."
+    Write-Host "PASS: $PreviousTag -> current $Arch installer preserved the complete regression fixture and model pack, launched, and revalidated ASR."
 } finally {
-    Get-Process -Name 'kiminola' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $appRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $dataRoot -Recurse -Force -ErrorAction SilentlyContinue
-    if ($appWasBackedUp) {
-        Move-Item -LiteralPath $appBackup -Destination $appRoot
+    $restoreErrors = @()
+    try {
+        Restore-KiminolaHardwareStateSet -StateSet $stateSet
+    } catch {
+        $restoreErrors += $_.Exception.Message
     }
-    if ($dataWasBackedUp) {
-        New-Item -ItemType Directory -Path $userRoot -Force | Out-Null
-        Move-Item -LiteralPath $dataBackup -Destination $dataRoot
+    if ($restoreErrors.Count -eq 0) {
+        try {
+            Write-HardwareRecoveryJournal `
+                -JournalPath $recoveryJournal `
+                -TransactionId $transactionId `
+                -PathStates $stateSet.PathStates `
+                -RegistryStates $stateSet.RegistryStates `
+                -RestoreComplete $true
+            Remove-Item -LiteralPath $transactionRoot -Recurse -Force -ErrorAction Stop
+            Remove-Item -LiteralPath $recoveryJournal -Force -ErrorAction Stop
+            Remove-Item -LiteralPath "$recoveryJournal.previous" -Force -ErrorAction SilentlyContinue
+        } catch {
+            $restoreErrors += "remove completed recovery transaction: $($_.Exception.Message)"
+        }
     }
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if ($restoreErrors.Count -gt 0) {
+        throw "Hardware runner restoration failed; recovery data remains under '$recoveryRoot': $($restoreErrors -join '; ')"
+    }
 }

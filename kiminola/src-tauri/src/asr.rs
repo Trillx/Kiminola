@@ -281,8 +281,12 @@ mod tests {
             let actual = normalize(&last_text);
             let expected = normalize(&expected);
             assert!(
-                !expected.is_empty() && actual.contains(&expected),
-                "expected normalized transcript {actual:?} to contain {expected:?}"
+                !expected.is_empty(),
+                "expected transcript must not be empty"
+            );
+            assert_eq!(
+                actual, expected,
+                "normalized deterministic transcript did not match the provisioned fixture"
             );
         }
     }

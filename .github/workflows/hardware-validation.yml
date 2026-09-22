@@ -1,5 +1,7 @@
 name: Hardware validation
 
+run-name: Hardware validation ${{ inputs.release_gate_id || github.ref_name }}
+
 on:
   schedule:
     - cron: '30 7 * * *'
@@ -9,10 +11,8 @@ on:
         description: Previous published version to install before the candidate
         required: false
         type: string
-  workflow_call:
-    inputs:
-      previous_tag:
-        description: Previous published version to install before the candidate
+      release_gate_id:
+        description: Correlation ID supplied by the release workflow
         required: false
         type: string
 
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: hardware-validation
+  group: hardware-validation-${{ inputs.release_gate_id || 'routine' }}
   cancel-in-progress: false
 
 jobs:
@@ -31,6 +31,11 @@ jobs:
     outputs:
       previous_tag: ${{ steps.release.outputs.previous_tag }}
     steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
       - name: Require configured hardware runners and resolve previous release
         id: release
         shell: pwsh
@@ -43,18 +48,63 @@ jobs:
           if ($env:HARDWARE_ENABLED -ne 'true') {
             throw 'Hardware validation is required. Register matching X64 and ARM64 runners, then set KIMINOLA_HARDWARE_CI=true.'
           }
+
+          $package = Get-Content -Raw 'kiminola/package.json' | ConvertFrom-Json
+          $candidateVersion = [version]$package.version
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+
+          function Get-StableVersion([string]$Tag) {
+            if ($Tag -notmatch '^v(\d+\.\d+\.\d+)$') { return $null }
+            return [version]$Matches[1]
+          }
+
+          function Test-UpdaterAssets($Release, [version]$Version) {
+            $assetNames = @($Release.assets | ForEach-Object { $_.name })
+            foreach ($architecture in @('x64', 'arm64')) {
+              $installer = "Kimi.Nola_$Version`_$architecture-setup.exe"
+              if ($installer -notin $assetNames -or "$installer.sig" -notin $assetNames) {
+                return $false
+              }
+            }
+            return $true
+          }
+
+          $releases = @()
+          for ($page = 1; ; $page++) {
+            $uri = "https://api.github.com/repos/$env:RELEASE_REPOSITORY/releases?per_page=100&page=$page"
+            $batch = @(Invoke-RestMethod -Method Get -Uri $uri -Headers $headers)
+            $releases += $batch
+            if ($batch.Count -lt 100) { break }
+          }
+
+          $candidates = @($releases | ForEach-Object {
+            $releaseVersion = Get-StableVersion $_.tag_name
+            if (-not $_.draft -and -not $_.prerelease -and
+                $null -ne $releaseVersion -and $releaseVersion -lt $candidateVersion -and
+                (Test-UpdaterAssets $_ $releaseVersion)) {
+              [pscustomobject]@{ Release = $_; Version = $releaseVersion }
+            }
+          } | Sort-Object Version -Descending)
+          if ($candidates.Count -eq 0) {
+            throw "No stable updater-signed release older than candidate v$candidateVersion is available."
+          }
+
+          $highestEligibleTag = $candidates[0].Release.tag_name
           $tag = $env:REQUESTED_PREVIOUS_TAG
           if ([string]::IsNullOrWhiteSpace($tag)) {
-            $headers = @{
-              Authorization = "Bearer $env:GH_TOKEN"
-              Accept = 'application/vnd.github+json'
-              'X-GitHub-Api-Version' = '2022-11-28'
+            $tag = $highestEligibleTag
+          } else {
+            $releaseVersion = Get-StableVersion $tag
+            if ($null -eq $releaseVersion -or $releaseVersion -ge $candidateVersion) {
+              throw "Previous release '$tag' must be a stable vMAJOR.MINOR.PATCH release older than candidate v$candidateVersion."
             }
-            $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:RELEASE_REPOSITORY/releases/latest" -Headers $headers
-            $tag = $release.tag_name
-          }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Previous release tag '$tag' is not vMAJOR.MINOR.PATCH."
+            if ($tag -ne $highestEligibleTag) {
+              throw "Previous release '$tag' is not the highest eligible baseline '$highestEligibleTag'."
+            }
           }
           "previous_tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
@@ -80,9 +130,16 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+
+      - name: Recover interrupted hardware state
+        working-directory: kiminola
+        shell: pwsh
+        env:
+          KIMINOLA_HARDWARE_RUNNER: '1'
+        run: ./scripts/hardware-recovery.ps1
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -98,7 +155,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Rust dependencies
-        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: kiminola/src-tauri
           shared-key: hardware-${{ matrix.target }}
@@ -137,29 +194,69 @@ jobs:
       - name: Verify physical microphone captures non-silent audio
         working-directory: kiminola
         shell: pwsh
+        env:
+          KIMINOLA_EXPECTED_MICROPHONE_NAME: ${{ matrix.arch == 'x64' && vars.KIMINOLA_X64_HARDWARE_MICROPHONE_NAME || vars.KIMINOLA_ARM64_HARDWARE_MICROPHONE_NAME }}
         run: |
+          Push-Location 'src-tauri'
+          try {
+            cargo test --locked --lib --target '${{ matrix.target }}' --no-run
+            if ($LASTEXITCODE -ne 0) { throw 'Compiling the physical microphone hardware test failed.' }
+          } finally {
+            Pop-Location
+          }
+          $baselineMetricsPath = Join-Path $env:RUNNER_TEMP 'kiminola-microphone-baseline.json'
+          $stimulusMetricsPath = Join-Path $env:RUNNER_TEMP 'kiminola-microphone-stimulus.json'
+          $readyPath = Join-Path $env:RUNNER_TEMP 'microphone-stimulus-ready'
+          Remove-Item -LiteralPath $baselineMetricsPath, $stimulusMetricsPath, $readyPath -Force -ErrorAction SilentlyContinue
+          $env:KIMINOLA_MICROPHONE_CAPTURE_MODE = 'baseline'
+          $env:KIMINOLA_MICROPHONE_METRICS_PATH = $baselineMetricsPath
+          Push-Location 'src-tauri'
+          try {
+            cargo test --locked --lib --target '${{ matrix.target }}' models::tests::physical_microphone_captures_known_tone -- --ignored --exact
+            if ($LASTEXITCODE -ne 0) { throw 'Physical microphone baseline capture failed.' }
+          } finally {
+            Pop-Location
+          }
           $tonePath = Join-Path $env:RUNNER_TEMP 'kiminola-microphone-tone.wav'
           $sourceScript = (Resolve-Path './scripts/hardware-audio-source.ps1').Path
-          $arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$sourceScript`" -OutputPath `"$tonePath`" -DurationSeconds 30"
+          $arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$sourceScript`" -OutputPath `"$tonePath`" -ReadyPath `"$readyPath`" -DurationSeconds 30"
           $audioSource = Start-Process powershell.exe -ArgumentList $arguments -PassThru
           try {
             $deadline = [DateTime]::UtcNow.AddSeconds(15)
-            while (-not (Test-Path -LiteralPath $tonePath) -and [DateTime]::UtcNow -lt $deadline) {
+            while (-not (Test-Path -LiteralPath $readyPath) -and [DateTime]::UtcNow -lt $deadline) {
               Start-Sleep -Milliseconds 200
             }
-            if (-not (Test-Path -LiteralPath $tonePath) -or $audioSource.HasExited) {
+            $audioSource.Refresh()
+            if (-not (Test-Path -LiteralPath $readyPath) -or $audioSource.HasExited) {
               throw 'The physical-microphone stimulus failed to start.'
             }
             Start-Sleep -Seconds 2
+            $audioSource.Refresh()
+            if ($audioSource.HasExited) { throw 'The physical-microphone stimulus stopped before capture.' }
+            $env:KIMINOLA_MICROPHONE_CAPTURE_MODE = 'stimulus'
+            $env:KIMINOLA_MICROPHONE_METRICS_PATH = $stimulusMetricsPath
             Push-Location 'src-tauri'
             try {
-              cargo test --locked --lib --target '${{ matrix.target }}' models::tests::physical_microphone_captures_non_silent_audio -- --ignored --exact
+              cargo test --locked --lib --target '${{ matrix.target }}' models::tests::physical_microphone_captures_known_tone -- --ignored --exact
               if ($LASTEXITCODE -ne 0) { throw 'Physical microphone hardware test failed.' }
             } finally {
               Pop-Location
             }
+            $audioSource.Refresh()
+            if ($audioSource.HasExited) { throw 'The physical-microphone stimulus stopped during capture.' }
+            $baselineMetrics = Get-Content -Raw -LiteralPath $baselineMetricsPath | ConvertFrom-Json
+            $stimulusMetrics = Get-Content -Raw -LiteralPath $stimulusMetricsPath | ConvertFrom-Json
+            $minimumStimulusAmplitude = [Math]::Max(
+              [double]$baselineMetrics.target_amplitude * 3.0,
+              [double]$baselineMetrics.target_amplitude + 0.00075
+            )
+            if ([double]$stimulusMetrics.target_amplitude -lt $minimumStimulusAmplitude) {
+              throw "The captured 440 Hz amplitude did not materially increase over baseline: baseline=$($baselineMetrics.target_amplitude), stimulus=$($stimulusMetrics.target_amplitude)."
+            }
           } finally {
             if (-not $audioSource.HasExited) { Stop-Process -Id $audioSource.Id -Force }
+            Remove-Item Env:KIMINOLA_MICROPHONE_CAPTURE_MODE -ErrorAction SilentlyContinue
+            Remove-Item Env:KIMINOLA_MICROPHONE_METRICS_PATH -ErrorAction SilentlyContinue
           }
 
       - name: Verify classic and process loopback capture
@@ -215,8 +312,11 @@ jobs:
           $env:KIMINOLA_TEST_SPEECH_WAV = $speechFixture
           $env:KIMINOLA_REQUIRE_ASR_FIXTURE = '1'
           $env:KIMINOLA_EXPECTED_SPEECH_TEXT = (Get-Content -Raw $expectedTranscriptPath).Trim()
+          $env:KIMINOLA_ASR_MODEL_DIR = $modelDir
           Push-Location 'src-tauri'
           try {
+            cargo test --locked --lib --target '${{ matrix.target }}' models::tests::production_model_pack_matches_embedded_manifest -- --ignored --exact
+            if ($LASTEXITCODE -ne 0) { throw 'Provisioned model pack failed embedded-manifest validation.' }
             cargo test --locked --lib --target '${{ matrix.target }}' asr::tests::session_transcribes_speech_wav -- --exact
             if ($LASTEXITCODE -ne 0) { throw 'ASR model speech transcription test failed.' }
           } finally {
@@ -224,6 +324,7 @@ jobs:
             Remove-Item Env:KIMINOLA_TEST_SPEECH_WAV -ErrorAction SilentlyContinue
             Remove-Item Env:KIMINOLA_REQUIRE_ASR_FIXTURE -ErrorAction SilentlyContinue
             Remove-Item Env:KIMINOLA_EXPECTED_SPEECH_TEXT -ErrorAction SilentlyContinue
+            Remove-Item Env:KIMINOLA_ASR_MODEL_DIR -ErrorAction SilentlyContinue
           }
 
       - name: Build current unsigned executable

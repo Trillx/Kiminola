@@ -19,9 +19,24 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Require release tag commit on main
+        shell: pwsh
+        run: |
+          git show-ref --verify refs/remotes/origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'The protected origin/main ref is unavailable.' }
+          $tagCommit = (git rev-parse "$env:GITHUB_SHA`^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tagCommit)) {
+            throw 'The release tag does not resolve to a commit.'
+          }
+          git merge-base --is-ancestor $tagCommit refs/remotes/origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag commit '$tagCommit' is not reachable from protected main."
+          }
 
       - name: Verify tag matches all app versions
         shell: pwsh
@@ -41,6 +56,36 @@ jobs:
             throw "Release tag '$env:RELEASE_TAG' does not match app version '$($config.version)'."
           }
 
+      - name: Verify release signing secrets before draft creation
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          SIGNPATH_SIGNER_THUMBPRINT: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT }}
+        run: |
+          foreach ($name in @(
+            'TAURI_SIGNING_PRIVATE_KEY',
+            'TAURI_SIGNING_PRIVATE_KEY_PASSWORD',
+            'SIGNPATH_API_TOKEN',
+            'SIGNPATH_ORGANIZATION_ID',
+            'SIGNPATH_PROJECT_SLUG',
+            'SIGNPATH_SIGNING_POLICY_SLUG',
+            'SIGNPATH_ARTIFACT_CONFIGURATION_SLUG',
+            'SIGNPATH_SIGNER_THUMBPRINT'
+          )) {
+            if ([string]::IsNullOrWhiteSpace((Get-Item "Env:$name").Value)) {
+              throw "$name is not configured for this repository."
+            }
+          }
+          if ($env:SIGNPATH_SIGNER_THUMBPRINT -notmatch '^[0-9A-Fa-f]{40}$') {
+            throw 'SIGNPATH_SIGNER_THUMBPRINT must be the 40-character SHA-1 thumbprint of the approved SignPath certificate.'
+          }
+
       - name: Test release support scripts
         working-directory: kiminola
         shell: pwsh
@@ -48,19 +93,114 @@ jobs:
           ./scripts/generate-updater-manifest.test.ps1
           ./scripts/verify-pe-architecture.test.ps1
           ./scripts/stage-portable-package.test.ps1
+          ./scripts/hardware-runner-state.test.ps1
 
-  hardware-validation:
-    name: Release hardware gate
+  security-gate:
+    name: Release dependency security gate
     needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
-    uses: ./.github/workflows/hardware-validation.yml
+      checks: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: kiminola/package-lock.json
+
+      - name: Audit locked production npm dependencies
+        working-directory: kiminola
+        run: |
+          npm ci --include=dev --no-audit --no-fund
+          npm audit --omit=dev --audit-level=moderate
+
+      - name: Audit locked Rust dependencies
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: kiminola/src-tauri
+
+  hardware-gate:
+    name: Dispatch and verify release hardware gate
+    needs: preflight
+    runs-on: windows-2025
+    timeout-minutes: 220
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Run hardware validation separately from SignPath provenance
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $marker = "release-$env:RELEASE_RUN_ID-$env:RELEASE_RUN_ATTEMPT"
+          $expectedTitle = "Hardware validation $marker"
+          $dispatchUri = "https://api.github.com/repos/$env:RELEASE_REPOSITORY/actions/workflows/hardware-validation.yml/dispatches"
+          $dispatchBody = @{
+            ref = $env:RELEASE_TAG
+            inputs = @{ release_gate_id = $marker }
+          } | ConvertTo-Json -Depth 3
+          Invoke-RestMethod -Method Post -Uri $dispatchUri -Headers $headers -ContentType 'application/json' -Body $dispatchBody
+
+          $runsUri = "https://api.github.com/repos/$env:RELEASE_REPOSITORY/actions/workflows/hardware-validation.yml/runs?event=workflow_dispatch&head_sha=$env:RELEASE_COMMIT&per_page=100"
+          $run = $null
+          $creationDeadline = [DateTime]::UtcNow.AddMinutes(5)
+          while ($null -eq $run -and [DateTime]::UtcNow -lt $creationDeadline) {
+            $runs = Invoke-RestMethod -Method Get -Uri $runsUri -Headers $headers
+            $run = @($runs.workflow_runs | Where-Object {
+              $_.head_sha -eq $env:RELEASE_COMMIT -and $_.display_title -eq $expectedTitle
+            } | Sort-Object created_at -Descending | Select-Object -First 1)
+            if ($run.Count -eq 0) {
+              $run = $null
+              Start-Sleep -Seconds 10
+            } else {
+              $run = $run[0]
+            }
+          }
+          if ($null -eq $run) {
+            throw "The separately dispatched hardware run '$expectedTitle' for $env:RELEASE_COMMIT did not appear."
+          }
+
+          Write-Host "Waiting for hardware validation run $($run.html_url)"
+          $completionDeadline = [DateTime]::UtcNow.AddMinutes(210)
+          do {
+            $run = Invoke-RestMethod -Method Get -Uri $run.url -Headers $headers
+            if ($run.status -eq 'completed') { break }
+            if ([DateTime]::UtcNow -ge $completionDeadline) {
+              throw "Hardware validation run $($run.html_url) did not complete before the release gate timed out."
+            }
+            Start-Sleep -Seconds 20
+          } while ($true)
+          if ($run.conclusion -ne 'success' -or $run.head_sha -ne $env:RELEASE_COMMIT) {
+            throw "Hardware validation failed for the exact release commit: status=$($run.status), conclusion=$($run.conclusion), sha=$($run.head_sha), url=$($run.html_url)."
+          }
 
   create-release:
     name: Create draft release
     needs:
       - preflight
-      - hardware-validation
+      - hardware-gate
+      - security-gate
     runs-on: windows-2025
     permissions:
       contents: write
@@ -117,7 +257,8 @@ jobs:
     needs: create-release
     runs-on: ${{ matrix.runner }}
     permissions:
-      contents: write
+      contents: read
+      actions: read
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -132,7 +273,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -163,7 +304,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Rust dependencies
-        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: kiminola/src-tauri
           shared-key: release-${{ matrix.target }}
@@ -216,6 +357,47 @@ jobs:
           )
           ./scripts/verify-pe-architecture.ps1 -Target '${{ matrix.target }}' -Paths $paths
 
+      - name: Upload release executable for SignPath
+        id: upload-unsigned-executable
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signpath-executable-${{ matrix.arch }}-${{ github.run_id }}
+          path: kiminola/src-tauri/target/${{ matrix.target }}/release/kiminola.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Authenticode-sign release executable with SignPath
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned-executable.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ runner.temp }}/signed-executable
+          skip-decompress: false
+
+      - name: Replace and verify the Authenticode-signed release executable
+        working-directory: kiminola
+        shell: pwsh
+        env:
+          EXPECTED_SIGNER_THUMBPRINT: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT }}
+        run: |
+          $signed = @(Get-ChildItem -LiteralPath '${{ runner.temp }}/signed-executable' -Filter 'kiminola.exe' -File -Recurse)
+          if ($signed.Count -ne 1) { throw "Expected one SignPath-signed executable, found $($signed.Count)." }
+          $executable = 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe'
+          Copy-Item -LiteralPath $signed[0].FullName -Destination $executable -Force
+          $signature = Get-AuthenticodeSignature -FilePath $executable
+          $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
+          if ($signature.Status -ne 'Valid' -or
+              $null -eq $signature.SignerCertificate -or
+              $null -eq $signature.TimeStamperCertificate -or
+              $signature.SignerCertificate.Thumbprint.Trim().ToUpperInvariant() -ne $expectedSignerThumbprint) {
+            throw "Authenticode verification failed for '$executable': $($signature.StatusMessage)"
+          }
+
       - name: Test release executable startup behavior
         working-directory: kiminola
         shell: pwsh
@@ -231,31 +413,123 @@ jobs:
             -NativeDirectory 'src-tauri/target/release' `
             -OutputPath "portable/Kimi-Nola_$($config.version)_${{ matrix.arch }}-portable.zip"
 
-      - name: Bundle the verified executable and create updater signature
+      - name: Bundle the verified executable and create initial updater signature
         working-directory: kiminola
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm.cmd run tauri bundle -- --target '${{ matrix.target }}'
 
-      - name: Record and upload the exact verified release assets
+      - name: Upload installer for SignPath
+        id: upload-unsigned-installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signpath-installer-${{ matrix.arch }}-${{ github.run_id }}
+          path: kiminola/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Authenticode-sign installer with SignPath
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ runner.temp }}/signed-installer
+          skip-decompress: false
+
+      - name: Replace installer, verify Authenticode, and regenerate updater signature
         working-directory: kiminola
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          EXPECTED_SIGNER_THUMBPRINT: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT }}
+        run: |
+          $installers = @(Get-ChildItem -LiteralPath 'src-tauri/target/${{ matrix.target }}/release/bundle/nsis' -Filter '*-setup.exe' -File)
+          $signed = @(Get-ChildItem -LiteralPath '${{ runner.temp }}/signed-installer' -Filter '*-setup.exe' -File -Recurse)
+          if ($installers.Count -ne 1 -or $signed.Count -ne 1) {
+            throw "Expected one local and one SignPath-signed installer; found $($installers.Count) and $($signed.Count)."
+          }
+          $installer = $installers[0]
+          Copy-Item -LiteralPath $signed[0].FullName -Destination $installer.FullName -Force
+          $authenticode = Get-AuthenticodeSignature -FilePath $installer.FullName
+          $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
+          if ($authenticode.Status -ne 'Valid' -or
+              $null -eq $authenticode.SignerCertificate -or
+              $null -eq $authenticode.TimeStamperCertificate -or
+              $authenticode.SignerCertificate.Thumbprint.Trim().ToUpperInvariant() -ne $expectedSignerThumbprint) {
+            throw "Authenticode verification failed for '$($installer.Name)': $($authenticode.StatusMessage)"
+          }
+
+          $initialSignaturePath = "$($installer.FullName).sig"
+          if (-not (Test-Path -LiteralPath $initialSignaturePath -PathType Leaf)) {
+            throw "The initial updater signature is missing for '$($installer.Name)'."
+          }
+          Remove-Item -LiteralPath $initialSignaturePath -Force
+
+          $version = '${{ github.ref_name }}'.Substring(1)
+          $arch = '${{ matrix.arch }}'.ToLowerInvariant()
+          $canonicalInstallerName = "Kimi.Nola_${version}_${arch}-setup.exe"
+          $canonicalInstallerPath = Join-Path $installer.DirectoryName $canonicalInstallerName
+          if (-not [string]::Equals($installer.FullName, $canonicalInstallerPath, [StringComparison]::OrdinalIgnoreCase)) {
+            if (Test-Path -LiteralPath $canonicalInstallerPath) {
+              throw "Canonical installer path already exists: '$canonicalInstallerPath'."
+            }
+            Move-Item -LiteralPath $installer.FullName -Destination $canonicalInstallerPath
+            $installer = Get-Item -LiteralPath $canonicalInstallerPath
+          }
+
+          $signaturePath = "$($installer.FullName).sig"
+          Remove-Item -LiteralPath $signaturePath -Force -ErrorAction SilentlyContinue
+          npm.cmd run tauri -- signer sign $installer.FullName
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw "Regenerating the updater signature failed for '$($installer.Name)'."
+          }
+          $remainingSignatures = @(Get-ChildItem -LiteralPath $installer.DirectoryName -Filter '*.exe.sig' -File)
+          if ($remainingSignatures.Count -ne 1 -or
+              -not [string]::Equals($remainingSignatures[0].FullName, $signaturePath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Expected exactly one canonical updater signature '$signaturePath'; found $($remainingSignatures.Name -join ', ')."
+          }
+
+      - name: Record the exact verified release assets
+        working-directory: kiminola
+        shell: pwsh
+        env:
+          EXPECTED_SIGNER_THUMBPRINT: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT }}
         run: |
           $ErrorActionPreference = 'Stop'
           $installers = @(Get-ChildItem -LiteralPath 'src-tauri/target/${{ matrix.target }}/release/bundle/nsis' -Filter '*-setup.exe' -File)
           if ($installers.Count -ne 1) { throw "Expected one installer, found $($installers.Count)." }
           $installer = $installers[0]
           $signaturePath = "$($installer.FullName).sig"
-          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
-            throw "Updater signature was not created for '$($installer.Name)'."
+          $signatures = @(Get-ChildItem -LiteralPath $installer.DirectoryName -Filter '*.exe.sig' -File)
+          if ($signatures.Count -ne 1 -or
+              -not [string]::Equals($signatures[0].FullName, $signaturePath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Expected exactly one canonical updater signature '$signaturePath'; found $($signatures.Name -join ', ')."
+          }
+          $authenticode = Get-AuthenticodeSignature -FilePath $installer.FullName
+          $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
+          if ($authenticode.Status -ne 'Valid' -or
+              $null -eq $authenticode.SignerCertificate -or
+              $null -eq $authenticode.TimeStamperCertificate -or
+              $authenticode.SignerCertificate.Thumbprint.Trim().ToUpperInvariant() -ne $expectedSignerThumbprint) {
+            throw "Authenticode verification failed for '$($installer.Name)': $($authenticode.StatusMessage)"
           }
           $portable = @(Get-ChildItem -LiteralPath 'portable' -Filter 'Kimi-Nola_*_${{ matrix.arch }}-portable.zip' -File)
           if ($portable.Count -ne 1) { throw "Expected one portable archive, found $($portable.Count)." }
+          $portableExecutable = 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe'
+          $portableAuthenticode = Get-AuthenticodeSignature -FilePath $portableExecutable
+          if ($portableAuthenticode.Status -ne 'Valid' -or
+              $null -eq $portableAuthenticode.SignerCertificate -or
+              $null -eq $portableAuthenticode.TimeStamperCertificate -or
+              $portableAuthenticode.SignerCertificate.Thumbprint.Trim().ToUpperInvariant() -ne $expectedSignerThumbprint) {
+            throw "Authenticode verification failed for portable executable '$portableExecutable': $($portableAuthenticode.StatusMessage)"
+          }
 
           $reportPath = Join-Path 'portable' 'release-verification-${{ matrix.arch }}.json'
           $report = [ordered]@{
@@ -264,6 +538,8 @@ jobs:
             installer = [ordered]@{
               name = $installer.Name
               sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              authenticode_status = $authenticode.Status.ToString()
+              signer_thumbprint = $authenticode.SignerCertificate.Thumbprint.ToLowerInvariant()
             }
             signature = [ordered]@{
               name = [IO.Path]::GetFileName($signaturePath)
@@ -272,27 +548,82 @@ jobs:
             portable = [ordered]@{
               name = $portable[0].Name
               sha256 = (Get-FileHash -LiteralPath $portable[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              executable_sha256 = (Get-FileHash -LiteralPath $portableExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+              authenticode_status = $portableAuthenticode.Status.ToString()
+              signer_thumbprint = $portableAuthenticode.SignerCertificate.Thumbprint.ToLowerInvariant()
             }
           }
           [IO.File]::WriteAllText($reportPath, ($report | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
 
-          foreach ($path in @($installer.FullName, $signaturePath, $portable[0].FullName, (Resolve-Path $reportPath).Path)) {
-            gh release upload $env:RELEASE_TAG $path --clobber --repo $env:RELEASE_REPOSITORY
-            if ($LASTEXITCODE -ne 0) { throw "Uploading '$path' failed." }
-          }
+      - name: Upload verified release assets for the publishing job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets-${{ matrix.arch }}-${{ github.run_id }}
+          path: |
+            kiminola/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
+            kiminola/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe.sig
+            kiminola/portable/Kimi-Nola_*_${{ matrix.arch }}-portable.zip
+            kiminola/portable/release-verification-${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: 1
 
-  manifest:
-    name: Verify assets and generate signed updater manifest
+  publish-assets:
+    name: Publish verified architecture assets
     needs:
       - create-release
       - windows-release
-    if: ${{ needs.windows-release.result == 'success' }}
     runs-on: windows-2025
     permissions:
       contents: write
+      actions: read
+    steps:
+      - name: Download verified architecture artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-assets-*-${{ github.run_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Upload only the verified architecture assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assetDirectory = '${{ runner.temp }}/release-assets'
+          $assetRules = [ordered]@{
+            '*-setup.exe' = 2
+            '*.exe.sig' = 2
+            '*-portable.zip' = 2
+            'release-verification-*.json' = 2
+          }
+          $assets = @()
+          foreach ($rule in $assetRules.GetEnumerator()) {
+            $matches = @(Get-ChildItem -LiteralPath $assetDirectory -Filter $rule.Key -File -Recurse)
+            if ($matches.Count -ne $rule.Value) {
+              throw "Expected $($rule.Value) '$($rule.Key)' artifacts, found $($matches.Count)."
+            }
+            $assets += $matches
+          }
+          foreach ($asset in $assets) {
+            gh release upload $env:RELEASE_TAG $asset.FullName --clobber --repo $env:RELEASE_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw "Uploading '$($asset.FullName)' failed." }
+          }
+
+  manifest:
+    name: Verify assets and generate updater manifest
+    needs:
+      - create-release
+      - publish-assets
+    if: ${{ needs.publish-assets.result == 'success' }}
+    runs-on: windows-2025
+    permissions:
+      contents: read
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -303,6 +634,7 @@ jobs:
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          EXPECTED_SIGNER_THUMBPRINT: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT }}
         run: |
           $ErrorActionPreference = 'Stop'
           $config = Get-Content -Raw 'kiminola/src-tauri/tauri.conf.json' | ConvertFrom-Json
@@ -379,8 +711,23 @@ jobs:
             }
 
             $installerPath = Join-Path $downloadDirectory $report.installer.name
+            $authenticode = Get-AuthenticodeSignature -FilePath $installerPath
+            $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
+            if ($report.installer.authenticode_status -ne 'Valid' -or
+                $authenticode.Status -ne 'Valid' -or
+                $null -eq $authenticode.SignerCertificate -or
+                $null -eq $authenticode.TimeStamperCertificate -or
+                $report.installer.signer_thumbprint -ne $expectedSignerThumbprint.ToLowerInvariant() -or
+                $authenticode.SignerCertificate.Thumbprint.ToLowerInvariant() -ne $report.installer.signer_thumbprint) {
+              throw "Authenticode verification failed for downloaded installer '$($report.installer.name)'."
+            }
             $signaturePath = Join-Path $downloadDirectory $report.signature.name
-            & $minisign -V -q -p $publicKeyPath -m $installerPath -x $signaturePath
+            $rawSignaturePath = "$signaturePath.raw"
+            [IO.File]::WriteAllBytes(
+              $rawSignaturePath,
+              [Convert]::FromBase64String((Get-Content -Raw $signaturePath).Trim())
+            )
+            & $minisign -V -q -p $publicKeyPath -m $installerPath -x $rawSignaturePath
             if ($LASTEXITCODE -ne 0) {
               throw "Updater signature verification failed for '$($report.installer.name)'."
             }
@@ -401,6 +748,24 @@ jobs:
             ) | Sort-Object
             if (Compare-Object -ReferenceObject $expectedEntries -DifferenceObject $portableEntries) {
               throw "Portable archive '$($report.portable.name)' is incomplete."
+            }
+            $portableExtract = Join-Path $env:RUNNER_TEMP "portable-$architecture"
+            Expand-Archive -LiteralPath $portablePath -DestinationPath $portableExtract -Force
+            $portablePePaths = @($expectedEntries | ForEach-Object { Join-Path $portableExtract $_ })
+            & .\kiminola\scripts\verify-pe-architecture.ps1 `
+              -Target $expected[$architecture] `
+              -Paths $portablePePaths
+            $portableExecutablePath = Join-Path $portableExtract 'kiminola.exe'
+            $portableExecutableHash = (Get-FileHash -LiteralPath $portableExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $portableAuthenticode = Get-AuthenticodeSignature -FilePath $portableExecutablePath
+            if ($portableExecutableHash -ne $report.portable.executable_sha256 -or
+                $report.portable.authenticode_status -ne 'Valid' -or
+                $portableAuthenticode.Status -ne 'Valid' -or
+                $null -eq $portableAuthenticode.SignerCertificate -or
+                $null -eq $portableAuthenticode.TimeStamperCertificate -or
+                $report.portable.signer_thumbprint -ne $expectedSignerThumbprint.ToLowerInvariant() -or
+                $portableAuthenticode.SignerCertificate.Thumbprint.ToLowerInvariant() -ne $report.portable.signer_thumbprint) {
+              throw "Authenticode verification failed for downloaded portable executable '$($report.portable.name)'."
             }
             $reports[$architecture] = $report
           }
@@ -443,7 +808,41 @@ jobs:
             }
           }
 
-          gh release upload $env:RELEASE_TAG "$outputPath#latest.json" --clobber --repo $env:RELEASE_REPOSITORY
+      - name: Upload verified updater manifest for the publishing job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-manifest-${{ github.run_id }}
+          path: ${{ runner.temp }}/latest.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-manifest:
+    name: Publish and read back the updater manifest
+    needs:
+      - create-release
+      - publish-assets
+      - manifest
+    runs-on: windows-2025
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download verified updater manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-manifest-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-manifest
+
+      - name: Publish manifest and verify the exact draft asset set
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifestPath = Join-Path '${{ runner.temp }}/release-manifest' 'latest.json'
+          gh release upload $env:RELEASE_TAG "$manifestPath#latest.json" --clobber --repo $env:RELEASE_REPOSITORY
           if ($LASTEXITCODE -ne 0) { throw 'Uploading latest.json failed.' }
 
           $uploadedManifestDirectory = Join-Path $env:RUNNER_TEMP 'uploaded-manifest'
@@ -451,28 +850,36 @@ jobs:
           gh release download $env:RELEASE_TAG `
             --repo $env:RELEASE_REPOSITORY `
             --dir $uploadedManifestDirectory `
-            --pattern 'latest.json'
-          if ($LASTEXITCODE -ne 0) { throw 'Downloading uploaded latest.json failed.' }
+            --pattern 'latest.json' `
+            --pattern 'release-verification-*.json'
+          if ($LASTEXITCODE -ne 0) { throw 'Downloading the published manifest and reports failed.' }
           $uploadedManifestPath = Join-Path $uploadedManifestDirectory 'latest.json'
-          $generatedHash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash
+          $generatedHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
           $uploadedHash = (Get-FileHash -LiteralPath $uploadedManifestPath -Algorithm SHA256).Hash
           if ($uploadedHash -ne $generatedHash) {
             throw 'The uploaded latest.json differs from the verified generated manifest.'
           }
           $uploadedManifest = Get-Content -Raw $uploadedManifestPath | ConvertFrom-Json
-          if ($uploadedManifest.version -ne $config.version) {
-            throw "The uploaded latest.json version '$($uploadedManifest.version)' does not match '$($config.version)'."
+          if ("v$($uploadedManifest.version)" -ne $env:RELEASE_TAG) {
+            throw "The uploaded latest.json version '$($uploadedManifest.version)' does not match '$env:RELEASE_TAG'."
           }
 
           $release = gh release view $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY --json isDraft,isPrerelease,assets | ConvertFrom-Json
           if (-not $release.isDraft -or $release.isPrerelease) {
-            throw 'The updater manifest must be generated against a draft, non-prerelease release.'
+            throw 'The updater manifest must be published to a draft, non-prerelease release.'
           }
           $expectedAssetNames = @('latest.json')
-          foreach ($report in $reports.Values) {
-            $expectedAssetNames += @($report.installer.name, $report.signature.name, $report.portable.name)
+          $reportFiles = @(Get-ChildItem -LiteralPath $uploadedManifestDirectory -Filter 'release-verification-*.json' -File)
+          if ($reportFiles.Count -ne 2) { throw "Expected two release verification reports, found $($reportFiles.Count)." }
+          foreach ($reportFile in $reportFiles) {
+            $report = Get-Content -Raw -LiteralPath $reportFile.FullName | ConvertFrom-Json
+            $expectedAssetNames += @(
+              $report.installer.name,
+              $report.signature.name,
+              $report.portable.name,
+              $reportFile.Name
+            )
           }
-          $expectedAssetNames += @(Get-ChildItem -LiteralPath $downloadDirectory -Filter 'release-verification-*.json' -File | ForEach-Object Name)
           $actualAssetNames = @($release.assets | ForEach-Object name)
           if (Compare-Object -ReferenceObject ($expectedAssetNames | Sort-Object) -DifferenceObject ($actualAssetNames | Sort-Object)) {
             throw "The draft release asset set does not exactly match the verified files. Expected: $($expectedAssetNames -join ', '). Actual: $($actualAssetNames -join ', ')."
