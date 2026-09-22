@@ -8,6 +8,22 @@
   const meetings = [summary(1, 'Alpha planning'), summary(2, 'Beta launch')];
   const transcript = [{ id: 11, channel: 'you', text: 'Original transcript sentence.', start_ms: 0, end_ms: 1000 }];
   const presence = { enabled: false, paused: false, start_with_windows: false, mode: 'off', hint: null, prompt: null };
+  const windowLabel = new URLSearchParams(location.search).get('window') === 'meeting-prompt' ? 'meeting-prompt' : 'main';
+  const drafts = new Map();
+  function createDraft() {
+    const id = nextDraftId++;
+    drafts.set(id, { id, title: 'Synthetic meeting notes', created_at: '2026-09-21T15:00:00Z', updated_at: '2026-09-21T15:00:00Z', raw_markdown: '', meeting_id: null, recovery_duration_seconds: 0, recovery_location: null, recovery_transcript: [] });
+    return id;
+  }
+  function claimPrompt(promptId, cmd) {
+    // Match the backend's single-use claim: stale IDs must never consume a replacement.
+    if (!presence.prompt) throw new Error('meeting prompt is no longer active');
+    if (presence.prompt.id !== promptId) throw new Error('meeting prompt is stale');
+    if (window.audit.failPresenceAction === cmd) throw new Error('Fixture: meeting prompt action failed');
+    presence.prompt = null;
+    presence.hint = null;
+    window.audit.emit('meeting-presence:state', structuredClone(presence));
+  }
   let config = { kind: 'open_ai', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', has_api_key: true };
   // Presence flags only: fixture credentials never contain secret values.
   const savedIdentities = new Set([
@@ -17,13 +33,25 @@
   window.audit = {
     calls: [], failConfig: false, failShortcut: false, failSegment: false, failSearch: false,
     slowSearch: false, modelDelay: 0, treeCount: 2, failRecovery: false, recovery: null,
+    failPresenceAction: null, failPresenceState: false,
+    windows: { main: { visible: windowLabel === 'main', focused: false }, 'meeting-prompt': { visible: windowLabel === 'meeting-prompt', focused: false } },
+    hasListener(event) { return [...listeners.values()].some(item => item.event === event); },
+    seedNoteDraft(draft) { drafts.set(draft.id, structuredClone(draft)); },
     emit(event, payload) {
+      if (event === 'meeting-presence:prompt') {
+        presence.enabled = true;
+        presence.mode = 'detecting';
+        presence.prompt = structuredClone(payload);
+        if (windowLabel === 'meeting-prompt') window.audit.windows['meeting-prompt'].visible = true;
+      } else if (event === 'meeting-presence:state') {
+        Object.assign(presence, structuredClone(payload));
+      }
       for (const [id, item] of listeners) if (item.event === event) callbacks.get(item.handler)?.({ event, id, payload });
     },
   };
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener(event, id) { listeners.delete(id); } };
   window.__TAURI_INTERNALS__ = {
-    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    metadata: { currentWindow: { label: windowLabel }, currentWebview: { label: windowLabel } },
     transformCallback(fn) { const id = ++serial; callbacks.set(id, fn); return id; },
     unregisterCallback(id) { callbacks.delete(id); },
     async invoke(cmd, args = {}) {
@@ -34,15 +62,42 @@
       switch (cmd) {
         case 'plugin:event|listen': { const id = ++serial; listeners.set(id, args); return id; }
         case 'plugin:event|unlisten': listeners.delete(args.eventId); return;
+        case 'plugin:window|get_all_windows': return ['main', 'meeting-prompt'];
+        case 'plugin:window|hide':
+        case 'plugin:window|show':
+        case 'plugin:window|set_focus': {
+          const target = window.audit.windows[args.label];
+          if (!target) throw new Error(`Fixture: unknown window ${args.label}`);
+          if (cmd === 'plugin:window|set_focus') target.focused = true;
+          else target.visible = cmd === 'plugin:window|show';
+          return;
+        }
+        case 'plugin:event|emit_to':
+          if (!window.audit.sendTo) throw new Error('Fixture: no cross-window event transport installed');
+          return window.audit.sendTo(args);
         case 'is_onboarding_complete': return true;
         case 'set_onboarding_complete': return;
         case 'check_microphone_permission': return 'Granted';
         case 'plugin:app|version': return '0.1.4';
-        case 'get_meeting_presence_state': return { ...presence };
+        case 'get_meeting_presence_state': {
+          if (window.audit.failPresenceState) throw new Error('Fixture: meeting presence state unavailable');
+          const snapshot = structuredClone(presence);
+          if (new URLSearchParams(location.search).has('holdPresenceSnapshot') && !window.audit.initialPresenceSnapshot) {
+            const gate = window.audit.initialPresenceSnapshot = {};
+            await new Promise(resolve => gate.release = resolve);
+          }
+          return snapshot;
+        }
+        case 'jot_notes_from_meeting_prompt': claimPrompt(args.promptId, cmd); return createDraft();
+        case 'start_recording_from_meeting_prompt':
+        case 'dismiss_meeting_prompt': claimPrompt(args.promptId, cmd); return;
         case 'list_meetings': return structuredClone(meetings);
-        case 'list_note_drafts': return [];
+        case 'list_note_drafts': return [...drafts.values()].map(({ id, title, created_at, updated_at }) => ({ id, title, created_at, updated_at }));
         case 'list_library_tree': return [{ kind: 'space', id: 1, name: 'Personal', children: window.audit.treeCount > 2 ? Array.from({ length: window.audit.treeCount }, (_, i) => ({ ...summary(i + 1, `Meeting ${i + 1}`), kind: 'meeting', children: [] })) : meetings.map(m => ({ ...m, kind: 'meeting', children: [] })) }];
-        case 'get_note_draft': return { id: 100, title: 'Recovery fixture', created_at: '2026-09-21T15:00:00Z', updated_at: '2026-09-21T15:00:00Z', raw_markdown: 'Recovered notes', meeting_id: null, recovery_duration_seconds: 60, recovery_location: null, recovery_transcript: Array.from({ length: 3 }, (_, i) => ({ channel: 'you', text: `Recovered sentence ${i + 1}`, start_ms: i * 2000, end_ms: i * 2000 + 1000 })) };
+        case 'get_note_draft':
+          if (drafts.has(args.id)) return structuredClone(drafts.get(args.id));
+          if (args.id !== 100) throw new Error('Fixture: note draft not found');
+          return { id: 100, title: 'Recovery fixture', created_at: '2026-09-21T15:00:00Z', updated_at: '2026-09-21T15:00:00Z', raw_markdown: 'Recovered notes', meeting_id: null, recovery_duration_seconds: 60, recovery_location: null, recovery_transcript: Array.from({ length: 3 }, (_, i) => ({ channel: 'you', text: `Recovered sentence ${i + 1}`, start_ms: i * 2000, end_ms: i * 2000 + 1000 })) };
         case 'get_meeting': return { ...meetings.find(m => m.id === args.id), notepad: 'Sample meeting notes.', enhanced_markdown: '## Summary\n\nFixture summary.', transcript: structuredClone(transcript) };
         case 'get_llm_config': if (window.audit.failConfig) throw new Error('Fixture: config database unavailable'); return structuredClone(config);
         case 'set_llm_config':
@@ -67,7 +122,7 @@
         case 'delete_segment': return;
         case 'update_notes': return;
         case 'rename_meeting': meetings.find(m => m.id === args.meetingId).title = args.title; return;
-        case 'create_note_draft': return nextDraftId++;
+        case 'create_note_draft': return createDraft();
         case 'update_note_draft_recovery':
           if (window.audit.failRecovery) throw new Error('Fixture: recovery write rejected');
           window.audit.recovery = structuredClone(args); return;

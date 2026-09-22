@@ -20,6 +20,7 @@
   let prompt = $state<MeetingPrompt | null>(null);
   let busy = $state(false);
   let error = $state("");
+  let promptVersion = 0;
 
   onMount(() => {
     const previousRootBackground = overlay ? document.documentElement.style.background : "";
@@ -34,11 +35,13 @@
     let unlistenAction: (() => void) | undefined;
 
     onMeetingPresencePrompt((next) => {
+      promptVersion += 1;
       prompt = next;
       error = "";
     }).then((fn) => (unlistenPrompt = fn));
 
     onMeetingPresenceState((state: MeetingPresenceState) => {
+      promptVersion += 1;
       prompt = state.prompt;
       if (overlay && !state.prompt) {
         void hideOverlay();
@@ -46,9 +49,13 @@
     }).then((fn) => (unlistenState = fn));
 
     onMeetingPresenceAction(async (action) => {
-      prompt = null;
+      // Handoffs carry no prompt ID. Read the claimed backend state instead of
+      // clearing whichever (possibly newer) prompt is currently displayed.
+      const actionVersion = promptVersion;
+      const state = await getMeetingPresenceState().catch(() => null);
+      if (state && actionVersion === promptVersion) prompt = state.prompt;
       if (overlay) {
-        await hideOverlay();
+        if (!prompt) await hideOverlay();
         return;
       }
       if (action.action === "notes" && action.draft_id !== undefined) {
@@ -58,8 +65,11 @@
       }
     }).then((fn) => (unlistenAction = fn));
 
+    const initialVersion = promptVersion;
     getMeetingPresenceState()
-      .then((state) => (prompt = state.prompt))
+      .then((state) => {
+        if (initialVersion === promptVersion) prompt = state.prompt;
+      })
       .catch((err) => console.error("Failed to load meeting prompt state:", err));
 
     return () => {
@@ -80,7 +90,7 @@
   }
 
   async function handoffToMain(action: { action: "notes" | "start"; draft_id?: number }) {
-    await hideOverlay();
+    if (!prompt) await hideOverlay();
     const main = await WebviewWindow.getByLabel("main");
     await main?.show();
     await main?.setFocus();
@@ -95,7 +105,7 @@
     try {
       if (action === "notes") {
         const draftId = await jotNotesFromMeetingPrompt(promptId);
-        prompt = null;
+        if (prompt?.id === promptId) prompt = null;
         if (overlay) {
           await handoffToMain({ action: "notes", draft_id: draftId });
         } else {
@@ -111,13 +121,19 @@
         }
       } else {
         await dismissMeetingPrompt(promptId);
-        prompt = null;
-        await hideOverlay();
+        if (prompt?.id === promptId) prompt = null;
+        if (!prompt) await hideOverlay();
       }
     } catch (err) {
-      error = "That prompt is no longer active.";
+      const refreshVersion = promptVersion;
+      error = prompt?.id === promptId ? "That prompt is no longer active." : "";
       const state = await getMeetingPresenceState().catch(() => null);
-      prompt = state?.prompt ?? null;
+      // Events delivered during the refresh are newer than its snapshot. A
+      // failed refresh is not evidence that the current prompt disappeared.
+      if (state && refreshVersion === promptVersion) {
+        prompt = state.prompt;
+        if (prompt?.id !== promptId) error = "";
+      }
       console.error("Meeting prompt action failed:", err);
     } finally {
       busy = false;

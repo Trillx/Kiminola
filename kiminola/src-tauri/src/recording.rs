@@ -78,6 +78,7 @@ const PENDING_LOOPBACK_TARGET_TTL: Duration = Duration::from_secs(60);
 
 struct PendingLoopbackTarget {
     process_id: u32,
+    process_started_at: u64,
     queued_at: Instant,
 }
 
@@ -105,13 +106,23 @@ impl RecordingState {
         self.active.load(Ordering::Acquire)
     }
 
-    fn take_loopback_target(&self) -> Option<u32> {
-        self.pending_loopback_target
+    fn take_loopback_target(
+        &self,
+        is_current: impl FnOnce(u32, u64) -> bool,
+    ) -> Result<Option<u32>, String> {
+        let target = self
+            .pending_loopback_target
             .lock()
             .unwrap()
             .take()
-            .filter(|target| target.queued_at.elapsed() <= PENDING_LOOPBACK_TARGET_TTL)
-            .map(|target| target.process_id)
+            .filter(|target| target.queued_at.elapsed() <= PENDING_LOOPBACK_TARGET_TTL);
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        if !is_current(target.process_id, target.process_started_at) {
+            return Err("The detected app closed or changed before recording started. Please start a new recording.".into());
+        }
+        Ok(Some(target.process_id))
     }
 }
 
@@ -126,10 +137,11 @@ pub fn is_recording_active(app: &AppHandle) -> bool {
 /// Carries the detected meeting PID across the prompt-to-recording navigation.
 /// It is consumed once by `start_recording` and expires quickly so a later
 /// manual meeting can never inherit a stale capture target.
-pub fn queue_process_loopback_target(app: &AppHandle, process_id: u32) {
+pub fn queue_process_loopback_target(app: &AppHandle, process_id: u32, process_started_at: u64) {
     if let Some(state) = app.try_state::<RecordingState>() {
         *state.pending_loopback_target.lock().unwrap() = Some(PendingLoopbackTarget {
             process_id,
+            process_started_at,
             queued_at: Instant::now(),
         });
     }
@@ -223,7 +235,14 @@ pub async fn start_recording(
         eprintln!("ASR model not found; no transcript text will be produced");
     }
 
-    let target_process_id = state.take_loopback_target();
+    let target_process_id =
+        match state.take_loopback_target(crate::meeting_presence::process_instance_is_current) {
+            Ok(target) => target,
+            Err(error) => {
+                state.set_active_for_app(&app, false);
+                return Err(error);
+            }
+        };
     let audio_source: Arc<dyn AudioSource> =
         Arc::new(DefaultAudioSource::for_process(target_process_id));
     let transcript_store = Arc::new(TranscriptEventStore::default());
@@ -427,16 +446,37 @@ mod tests {
         let state = RecordingState::new();
         *state.pending_loopback_target.lock().unwrap() = Some(PendingLoopbackTarget {
             process_id: 42,
+            process_started_at: 1,
             queued_at: Instant::now(),
         });
-        assert_eq!(state.take_loopback_target(), Some(42));
-        assert_eq!(state.take_loopback_target(), None);
+        assert_eq!(state.take_loopback_target(|_, _| true), Ok(Some(42)));
+        assert_eq!(state.take_loopback_target(|_, _| true), Ok(None));
 
         *state.pending_loopback_target.lock().unwrap() = Some(PendingLoopbackTarget {
             process_id: 99,
+            process_started_at: 1,
             queued_at: Instant::now() - PENDING_LOOPBACK_TARGET_TTL - Duration::from_secs(1),
         });
-        assert_eq!(state.take_loopback_target(), None);
+        assert_eq!(state.take_loopback_target(|_, _| true), Ok(None));
+    }
+
+    #[test]
+    fn replaced_process_target_errors_instead_of_capturing_another_app() {
+        let state = RecordingState::new();
+        *state.pending_loopback_target.lock().unwrap() = Some(PendingLoopbackTarget {
+            process_id: 42,
+            process_started_at: 7,
+            queued_at: Instant::now(),
+        });
+        let result = state.take_loopback_target(|pid, started_at| {
+            assert_eq!((pid, started_at), (42, 7));
+            false
+        });
+        assert!(
+            result.is_err(),
+            "a stale target must not fall back to system-wide audio"
+        );
+        assert!(state.pending_loopback_target.lock().unwrap().is_none());
     }
 
     #[test]

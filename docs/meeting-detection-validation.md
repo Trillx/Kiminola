@@ -1,5 +1,46 @@
 # Meeting detection validation
 
+## Balanced cross-app revision
+
+Verified on 2026-09-21 on Windows ARM64:
+
+- Native library: 155 passed, four ignored live/child-process fixtures.
+- Detector/prompt subset: 42 passed; its live probe is normally ignored.
+- Read-only Windows collector probe: passed when explicitly run, idle state only.
+- Frontend unit tests: 147 passed.
+- Browser suite: 60 passed, including 32 prompt cases, plus five sidebar tests.
+- `cargo check`, `npm run check`, and `npm run build`: passed. Svelte reported
+  zero errors and zero warnings.
+
+The generic fallback now requires a visible app family with active input and
+output streams for two consecutive successful polls. The detector checks about
+every four seconds. Recognized native meeting apps retain their targeted rule.
+Browsers follow the balanced rule, even when a meeting title supplies a label.
+Input and output can come from different helpers or devices, but not unrelated
+applications. Generic same-executable helpers require matching full paths and ancestry;
+embedded WebViews require an identified owner. System sounds and cross-process
+sessions without a single owner do not qualify.
+
+The revision fixes generic prompts blocking a later Teams prompt, unanswered
+prompts disappearing after pause/resume, and old frontend snapshots/actions
+clearing newer prompts. Pausing hides prompts but continues local metadata
+observation. Disabling detection stops observation. Dismissals remain effective
+until an episode ends, including while paused.
+
+Creation times distinguish reused process IDs, and recording revalidates the
+target before queuing and consuming it. Hidden windows and incomplete scans
+cannot reset a dismissed episode. Browser-title matching cannot turn playback
+alone into an immediate meeting prompt.
+
+The Windows metadata collector has been exercised without a call: it returned
+a complete scan, no active audio processes, and no fullscreen/presentation deferral. This is an
+idle-state smoke check only. The installed application has not been replaced.
+See the [research note](research/cross-app-meeting-presence.md) for Windows API
+contracts and limits. Live Teams, toast delivery, and device changes remain
+unverified for this revision.
+
+## Earlier validation
+
 Validation on 2026-09-06:
 
 These results cover the detector revision tested in this task. The concurrent
@@ -42,11 +83,17 @@ inputs to detection. A headset is optional.
   prompts. Opening or closing full-screen mode updates the prompt overlay.
 
 The browser signal remains coarse: a Google Meet title plus browser-family
-audio is not proof that the audio belongs to that tab. The spec's generic
-visible-app/audio fallback can also match non-meeting audio. Detection does not
-start recording automatically.
+audio is not proof that the audio belongs to that tab. Generic bidirectional
+activity can also match a game, audio workstation, or microphone test.
+Listen-only calls can be missed. Detection does not start recording automatically.
 
 ## Automated checks
+
+From `kiminola/`, run `npm run check`, `npm test`, `npm run test:ui`, and
+`npm run build`. Browser regressions render the actual main-window and overlay
+prompt, with synthetic IPC. They cover no automatic capture, all three actions,
+single-use/stale claims, delayed completions, startup snapshots, refresh failure,
+and cross-window handoff. They do not prove native toast presentation.
 
 Run from `kiminola/src-tauri` in PowerShell with prepared native dependencies:
 
@@ -93,6 +140,12 @@ explicitly selected non-default device when one is available.
 | End one meeting while full-screen and join another | The new episode can prompt after full-screen ends |
 | Choose Start recording from the prompt | Correct meeting window arranged; the meeting's audio captured |
 | Run another app using WebView audio alongside idle Teams | Unrelated helper audio must not activate a Teams prompt |
+| Play music or use dictation in an unknown app | No popup from one-direction audio alone |
+| Use input and playback in separate unknown apps | Do not combine their signals into a prompt |
+| Join a call in an unknown app with input and playback | One uncertain prompt after two eligible polls |
+| Leave an unanswered generic popup, then join Teams | Teams replaces the generic popup; old actions are rejected |
+| Pause with an unanswered prompt, then resume | Prompt can return with a fresh action ID; no automatic recording |
+| Dismiss, pause, leave for two polls, rejoin, then resume | New episode can prompt; resuming the same dismissed episode stays quiet |
 
 Mute does not necessarily close an audio session. Windows audio-session state,
 not microphone amplitude or a vendor's call status API, defines activity here.
