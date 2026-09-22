@@ -430,6 +430,7 @@ pub async fn open_model_folder(app: AppHandle) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::Mutex;
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -634,5 +635,111 @@ mod tests {
         assert!(!is_model_file_present_async(path, file).await.unwrap());
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a physical microphone and audible runner stimulus"]
+    fn physical_microphone_captures_non_silent_audio() {
+        fn record_samples<I>(samples: I, frames: &AtomicU64, peak: &Mutex<f32>)
+        where
+            I: Iterator<Item = f32>,
+        {
+            let mut count = 0_u64;
+            let mut observed_peak = 0.0_f32;
+            for sample in samples {
+                count += 1;
+                observed_peak = observed_peak.max(sample.abs());
+            }
+            frames.fetch_add(count, AtomicOrdering::Relaxed);
+            let mut current_peak = peak.lock().expect("microphone peak lock");
+            *current_peak = current_peak.max(observed_peak);
+        }
+
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .expect("the hardware runner must expose a default input device");
+        let supported = device
+            .default_input_config()
+            .expect("the default microphone must expose an input format");
+        let minimum_frames = u64::from(supported.sample_rate().0);
+        let sample_format = supported.sample_format();
+        let config = supported.config();
+        let frames = Arc::new(AtomicU64::new(0));
+        let peak = Arc::new(Mutex::new(0.0_f32));
+        let stream_failed = Arc::new(AtomicBool::new(false));
+
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => {
+                let frames = Arc::clone(&frames);
+                let peak = Arc::clone(&peak);
+                let stream_failed = Arc::clone(&stream_failed);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[f32], _| {
+                        record_samples(data.iter().copied(), &frames, &peak);
+                    },
+                    move |_| stream_failed.store(true, AtomicOrdering::Relaxed),
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let frames = Arc::clone(&frames);
+                let peak = Arc::clone(&peak);
+                let stream_failed = Arc::clone(&stream_failed);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[i16], _| {
+                        record_samples(
+                            data.iter()
+                                .map(|sample| f32::from(*sample) / f32::from(i16::MAX)),
+                            &frames,
+                            &peak,
+                        );
+                    },
+                    move |_| stream_failed.store(true, AtomicOrdering::Relaxed),
+                    None,
+                )
+            }
+            cpal::SampleFormat::U16 => {
+                let frames = Arc::clone(&frames);
+                let peak = Arc::clone(&peak);
+                let stream_failed = Arc::clone(&stream_failed);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[u16], _| {
+                        record_samples(
+                            data.iter()
+                                .map(|sample| (f32::from(*sample) - 32_768.0) / 32_768.0),
+                            &frames,
+                            &peak,
+                        );
+                    },
+                    move |_| stream_failed.store(true, AtomicOrdering::Relaxed),
+                    None,
+                )
+            }
+            other => panic!("unsupported hardware microphone sample format: {other:?}"),
+        }
+        .expect("the hardware runner microphone stream must open");
+
+        stream.play().expect("the microphone stream must start");
+        std::thread::sleep(Duration::from_secs(3));
+        drop(stream);
+
+        let captured_frames = frames.load(AtomicOrdering::Relaxed);
+        let captured_peak = *peak.lock().expect("microphone peak lock");
+        assert!(
+            !stream_failed.load(AtomicOrdering::Relaxed),
+            "the physical microphone stream reported an asynchronous error"
+        );
+        assert!(
+            captured_frames >= minimum_frames,
+            "the physical microphone captured only {captured_frames} frames"
+        );
+        assert!(
+            captured_peak >= 0.005,
+            "the physical microphone was silent (normalized peak {captured_peak})"
+        );
     }
 }

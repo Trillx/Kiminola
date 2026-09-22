@@ -178,10 +178,24 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   password exist only in GitHub Actions secrets and an offline maintainer
   backup.
 - **Auto-update**: Tauri built-in updater + GitHub Releases JSON manifest. Tag
-  pushes create a draft, build x64 and ARM64 assets in parallel, then generate
-  `latest.json` in a serialized validation job before manual publication.
+  pushes first validate the tag and synchronized application versions, then
+  pass the physical x64 + ARM64 hardware workflow before creating a draft.
+  Native release jobs bundle the already architecture-checked executable,
+  publish complete portable archives, and record SHA-256 provenance for the
+  exact uploaded assets. A serialized final job checks those hashes, verifies
+  both updater signatures cryptographically against the embedded public key,
+  generates `latest.json`, uploads it, and downloads it again for byte-for-byte
+  verification before manual publication.
 - **Channels**: GitHub Releases primary; winget secondary; Microsoft Store post-MVP.
-- **CI**: GitHub Actions — x64 native on `windows-latest`; ARM64 cross-compiled to `aarch64-pc-windows-msvc` from x64 runner. Fallback: manual/self-hosted ARM64 builds on Snapdragon X Elite.
+- **CI**: GitHub Actions uses explicit Windows runners: x64 on `windows-2025`
+  and native ARM64 on `windows-11-arm`. Every pull request and `main` push runs
+  frontend checks and browser regressions once, Rust formatting/clippy/full
+  tests on x64, security audits, and native x64 + ARM64 unsigned package/startup
+  validation. Unsigned installers and complete portable archives (the executable
+  plus all four native runtime DLLs) are retained for seven days; updater signing
+  is available only to the tag release workflow. Production npm dependencies
+  are audited at moderate severity or higher in addition to Cargo and dependency
+  review gates.
 
 ## 10. Privacy & telemetry
 
@@ -192,10 +206,24 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 ## 11. Hardware targets & testing
 
 - **Targets**: Windows x64 (`x86_64-pc-windows-msvc`) and ARM64 (`aarch64-pc-windows-msvc`).
-- **Validation**: Snapdragon X Elite Copilot+ PC (32 GB) for ARM64; GitHub Actions for x64 CI.
+- **Validation**: GitHub-hosted x64 and ARM64 runners cover native compilation,
+  installer creation, PE-architecture checks, and executable startup on every
+  pull request and `main` push. Dedicated self-hosted x64 and Snapdragon X
+  Elite ARM64 runners, labeled `kiminola-hardware`, run nightly/manual physical
+  microphone capture under a known stimulus, WASAPI loopback, deterministic
+  installed-model speech transcription, installer, and
+  previous-version preservation checks, and the same workflow is a required
+  pre-draft tag-release gate. A missing runner configuration fails visibly rather
+  than producing a green no-op. Hardware runs are serialized across refs, verify
+  native OS/process/LLVM architecture, back up and restore pre-existing app/data
+  directories, and authenticate the previous installer before execution. Signed
+  in-app update acceptance on both
+  architectures remains a manual gate before publishing the draft release.
 - **Spike results**: native ARM64 WASAPI loopback delivered non-silent packets; sherpa-onnx v1.13.5 Nemotron INT8 ran at 0.14 weighted RTF, 865 MiB peak working set, 2.6% normalized WER.
 - **Transcript regression matrix**: remote-only playback is `Others`; local-only mic speech is `You`; double-talk retains both lanes; speaker bleed does not create a duplicate `You` line; short acknowledgements are not over-suppressed; and stop waits for finalized text with monotonic audio-relative timing.
 - **Update regression**: on both x64 and ARM64, install a prior stable build,
-  preserve a meeting/database marker and the downloaded model, accept a signed
-  update, and verify the new app launches once with both data locations intact.
-  A green CI build is not runtime proof of updater safety.
+  insert a unique real meeting-and-note record, preserve the downloaded model,
+  install the candidate, and verify the new app launches once with the exact
+  database record and model hashes intact. Also accept the signed update through
+  the app before publication. A green CI build is not runtime proof of updater
+  safety.

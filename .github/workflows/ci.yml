@@ -15,97 +15,260 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows-build:
-    name: Windows ${{ matrix.arch }}
-    runs-on: windows-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            target: x86_64-pc-windows-msvc
-          - arch: ARM64
-            target: aarch64-pc-windows-msvc
-
+  frontend-quality:
+    name: Frontend quality
+    runs-on: windows-2025
+    timeout-minutes: 20
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: kiminola/package-lock.json
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache Rust dependencies
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: kiminola/src-tauri
-          shared-key: ${{ matrix.target }}
-
-      - name: Install LLVM
-        shell: pwsh
-        run: choco install llvm --yes --no-progress
-
       - name: Install frontend dependencies
         working-directory: kiminola
-        run: npm.cmd ci
+        run: npm.cmd ci --include=dev --no-audit --no-fund
 
-      - name: Check frontend
+      - name: Audit production frontend dependencies
+        working-directory: kiminola
+        run: npm.cmd audit --omit=dev --audit-level=moderate
+
+      - name: Check Svelte and TypeScript
         working-directory: kiminola
         run: npm.cmd run check
 
-      - name: Test frontend update safety
+      - name: Run frontend regression tests
         working-directory: kiminola
         run: npm.cmd test
+
+      - name: Build production frontend
+        working-directory: kiminola
+        run: npm.cmd run build
+
+      - name: Run all browser regression tests
+        working-directory: kiminola
+        env:
+          PLAYWRIGHT_CHANNEL: chrome
+          KIMINOLA_BROWSER_CHANNEL: chrome
+          KIMINOLA_SCREENSHOT_DIR: ${{ runner.temp }}/kiminola-browser-artifacts
+        run: npm.cmd run test:browser
+
+      - name: Test release support scripts
+        working-directory: kiminola
+        shell: pwsh
+        run: |
+          ./scripts/generate-updater-manifest.test.ps1
+          ./scripts/verify-pe-architecture.test.ps1
+          ./scripts/stage-portable-package.test.ps1
+
+      - name: Upload browser diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-diagnostics
+          path: ${{ runner.temp }}/kiminola-browser-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
+  rust-quality:
+    name: Rust quality
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Set up pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        with:
+          workspaces: kiminola/src-tauri
+          shared-key: quality-x86_64-pc-windows-msvc
+
+      - name: Configure hosted LLVM
+        shell: pwsh
+        run: |
+          $llvmBin = 'C:\Program Files\LLVM\bin'
+          $llvmPaths = @("$llvmBin\clang.exe", "$llvmBin\libclang.dll")
+          ./kiminola/scripts/verify-pe-architecture.ps1 -Target 'x86_64-pc-windows-msvc' -Paths $llvmPaths
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Prepare x64 native dependencies
+        working-directory: kiminola
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/prepare-native-deps.ps1 -Target 'x86_64-pc-windows-msvc' -WriteGithubEnv
+
+      - name: Check Rust formatting
+        working-directory: kiminola/src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Lint all Rust targets
+        working-directory: kiminola/src-tauri
+        run: cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+
+      - name: Run all-target Rust tests
+        working-directory: kiminola/src-tauri
+        run: cargo test --locked --all-targets --target x86_64-pc-windows-msvc
+
+      - name: Run Rust documentation tests
+        working-directory: kiminola/src-tauri
+        run: cargo test --locked --doc --target x86_64-pc-windows-msvc
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Reject vulnerable dependency changes
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.7.0
+
+  cargo-audit:
+    name: Cargo security audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Audit locked Rust dependencies
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: kiminola/src-tauri
+
+  package-windows:
+    name: Package Windows ${{ matrix.arch }}
+    needs:
+      - frontend-quality
+      - rust-quality
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: kiminola-windows-x64-unsigned
+          - arch: ARM64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: kiminola-windows-arm64-unsigned
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: kiminola/package-lock.json
+
+      - name: Set up pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        with:
+          workspaces: kiminola/src-tauri
+          shared-key: package-${{ matrix.target }}
+
+      - name: Configure native hosted LLVM
+        shell: pwsh
+        run: |
+          $llvmBin = 'C:\Program Files\LLVM\bin'
+          $llvmPaths = @("$llvmBin\clang.exe", "$llvmBin\libclang.dll")
+          ./kiminola/scripts/verify-pe-architecture.ps1 -Target '${{ matrix.target }}' -Paths $llvmPaths
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install frontend dependencies
+        working-directory: kiminola
+        run: npm.cmd ci --include=dev --no-audit --no-fund
 
       - name: Prepare native dependencies
         working-directory: kiminola
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: .\scripts\prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
+        run: ./scripts/prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
 
-      - name: Test database upgrade and recovery
-        if: matrix.arch == 'x64'
-        working-directory: kiminola/src-tauri
-        shell: pwsh
-        run: |
-          $env:PATH = "$env:SHERPA_ONNX_LIB_DIR;$env:PATH"
-          cargo test --lib --target '${{ matrix.target }}' db
-          if ($LASTEXITCODE -ne 0) { throw 'Database safety tests failed.' }
-
-      # Hosted windows-latest is x64, so execute the native process tests there.
-      # The ARM64 matrix still compiles the same code in the installer build below;
-      # runtime evidence for ARM64 must come from a native ARM64 runner.
-      - name: Test startup coordination and activation
-        if: matrix.arch == 'x64'
-        working-directory: kiminola/src-tauri
-        run: |
-          $env:PATH = "$env:SHERPA_ONNX_LIB_DIR;$env:PATH"
-          cargo test --target '${{ matrix.target }}' --lib startup_coordination
-          if ($LASTEXITCODE -ne 0) { throw 'Startup coordination tests failed.' }
-          cargo test --target '${{ matrix.target }}' --lib startup_wiring_tests
-          if ($LASTEXITCODE -ne 0) { throw 'Startup activation tests failed.' }
-
-      - name: Build unsigned CI installer
+      - name: Build unsigned CI executable
         working-directory: kiminola
         run: |
-          # Pull-request CI validates the installer without exposing the updater
-          # private key. The tag-based release workflow performs signed builds.
           npm.cmd run tauri build -- `
             --target '${{ matrix.target }}' `
-            --config src-tauri/tauri.ci.conf.json
+            --config src-tauri/tauri.ci.conf.json `
+            --no-bundle
+
+      - name: Verify executable and bundled DLL architecture
+        working-directory: kiminola
+        shell: pwsh
+        run: |
+          $paths = @(
+            'src-tauri/target/${{ matrix.target }}/release/kiminola.exe',
+            'src-tauri/target/release/onnxruntime.dll',
+            'src-tauri/target/release/onnxruntime_providers_shared.dll',
+            'src-tauri/target/release/sherpa-onnx-c-api.dll',
+            'src-tauri/target/release/sherpa-onnx-cxx-api.dll'
+          )
+          ./scripts/verify-pe-architecture.ps1 -Target '${{ matrix.target }}' -Paths $paths
 
       - name: Test startup PID and window behavior
-        if: matrix.arch == 'x64'
         working-directory: kiminola
         shell: pwsh
         run: ./scripts/startup-behavior.test.ps1 -Executable 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe' -TimeoutSeconds 30
+
+      - name: Stage complete portable package
+        working-directory: kiminola
+        shell: pwsh
+        run: |
+          ./scripts/stage-portable-package.ps1 `
+            -Executable 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe' `
+            -NativeDirectory 'src-tauri/target/release' `
+            -OutputPath 'portable/Kimi-Nola-${{ matrix.arch }}-portable.zip'
+
+      - name: Bundle the verified unsigned CI executable
+        working-directory: kiminola
+        run: |
+          npm.cmd run tauri bundle -- `
+            --target '${{ matrix.target }}' `
+            --config src-tauri/tauri.ci.conf.json `
+            --no-sign
+
+      - name: Upload unsigned installer and portable package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            kiminola/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            kiminola/portable/Kimi-Nola-${{ matrix.arch }}-portable.zip
+          if-no-files-found: error
+          retention-days: 7

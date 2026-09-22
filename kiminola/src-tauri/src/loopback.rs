@@ -472,14 +472,12 @@ mod tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut peak = 0.0f32;
         while tokio::time::Instant::now() < deadline && peak <= 0.001 {
-            if let Ok(Some(buffer)) =
+            if let Ok(Some(AudioBuffer::Loopback(samples))) =
                 tokio::time::timeout(std::time::Duration::from_millis(500), audio_rx.recv()).await
             {
-                if let AudioBuffer::Loopback(samples) = buffer {
-                    peak = samples
-                        .iter()
-                        .fold(peak, |current, sample| current.max(sample.abs()));
-                }
+                peak = samples
+                    .iter()
+                    .fold(peak, |current, sample| current.max(sample.abs()));
             }
         }
 

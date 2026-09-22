@@ -907,6 +907,7 @@ fn build_meeting_node(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_space_node(
     id: i64,
     spaces: &HashMap<i64, SpaceLocationRow>,
@@ -1683,6 +1684,49 @@ mod tests {
             .to_string_lossy()
             .starts_with("kiminola-upgrade-regression-"));
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "mutates the provisioned user database on a dedicated hardware runner"]
+    async fn hardware_update_database_record_survives() {
+        assert_eq!(
+            std::env::var("KIMINOLA_HARDWARE_RUNNER").as_deref(),
+            Ok("1"),
+            "refusing to touch the user database outside a dedicated hardware runner"
+        );
+        let mode = std::env::var("KIMINOLA_HARDWARE_UPDATE_MODE")
+            .expect("KIMINOLA_HARDWARE_UPDATE_MODE must be seed or verify");
+        let marker = std::env::var("KIMINOLA_HARDWARE_UPDATE_MARKER")
+            .expect("KIMINOLA_HARDWARE_UPDATE_MARKER must identify this upgrade run");
+        let note = format!("hardware update fixture {marker}");
+        let path = db_path().expect("resolve the production database path");
+        let pool = init_pool(&path)
+            .await
+            .expect("open the production database");
+
+        match mode.as_str() {
+            "seed" => {
+                save_meeting_impl(&pool, &marker, 1, &note, &[])
+                    .await
+                    .expect("seed a real meeting record before the update");
+            }
+            "verify" => {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM meetings m
+                     JOIN notes n ON n.meeting_id = m.id
+                     WHERE m.title = ? AND n.raw_markdown = ?",
+                )
+                .bind(&marker)
+                .bind(&note)
+                .fetch_one(&pool)
+                .await
+                .expect("query the pre-update meeting record");
+                assert_eq!(count, 1, "the pre-update meeting record was not preserved");
+            }
+            _ => panic!("KIMINOLA_HARDWARE_UPDATE_MODE must be seed or verify"),
+        }
+
+        pool.close().await;
     }
 
     async fn test_pool(name: &str) -> (SqlitePool, PathBuf) {

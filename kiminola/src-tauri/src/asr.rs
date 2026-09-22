@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
@@ -22,7 +22,7 @@ pub struct AsrLane {
 }
 
 impl AsrEngine {
-    pub fn new(model_dir: &PathBuf) -> Option<Self> {
+    pub fn new(model_dir: &Path) -> Option<Self> {
         let (encoder, decoder, joiner, tokens) = model_files(model_dir)?;
 
         let mut config = OnlineRecognizerConfig::default();
@@ -119,7 +119,7 @@ impl AsrLane {
 
 /// Known model layouts, most-preferred first: the production Nemotron export,
 /// then the small zipformer used during early bring-up.
-fn model_files(dir: &PathBuf) -> Option<(PathBuf, PathBuf, PathBuf, PathBuf)> {
+fn model_files(dir: &Path) -> Option<(PathBuf, PathBuf, PathBuf, PathBuf)> {
     const LAYOUTS: &[(&str, &str, &str, &str)] = &[
         (
             "encoder.int8.onnx",
@@ -198,18 +198,32 @@ mod tests {
     /// recognizer in 100 ms chunks and expect non-empty text out.
     #[test]
     fn session_transcribes_speech_wav() {
-        let wav_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(".scratch")
-            .join("speech-test.wav");
+        let fixture_required = std::env::var("KIMINOLA_REQUIRE_ASR_FIXTURE").as_deref() == Ok("1");
+        let wav_path = std::env::var_os("KIMINOLA_TEST_SPEECH_WAV")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join(".scratch")
+                    .join("speech-test.wav")
+            });
         if !wav_path.exists() {
+            assert!(
+                !fixture_required,
+                "required ASR speech fixture does not exist: {}",
+                wav_path.display()
+            );
             eprintln!("speech-test.wav not found; skipping");
             return;
         }
 
-        let Some(model_dir) = resolve_asr_model_dir() else {
-            eprintln!("ASR model dir not found; skipping");
-            return;
+        let model_dir = match resolve_asr_model_dir() {
+            Some(model_dir) => model_dir,
+            None if fixture_required => panic!("required ASR model dir not found"),
+            None => {
+                eprintln!("ASR model dir not found; skipping");
+                return;
+            }
         };
         let engine = Arc::new(
             AsrEngine::new(&model_dir).expect("recognizer should build from the model dir"),
@@ -246,6 +260,31 @@ mod tests {
             !last_text.trim().is_empty(),
             "expected non-empty transcript for speech input"
         );
+        if fixture_required {
+            let expected = std::env::var("KIMINOLA_EXPECTED_SPEECH_TEXT")
+                .expect("KIMINOLA_EXPECTED_SPEECH_TEXT is required in hardware mode");
+            let normalize = |text: &str| {
+                text.to_lowercase()
+                    .chars()
+                    .map(|character| {
+                        if character.is_alphanumeric() {
+                            character
+                        } else {
+                            ' '
+                        }
+                    })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let actual = normalize(&last_text);
+            let expected = normalize(&expected);
+            assert!(
+                !expected.is_empty() && actual.contains(&expected),
+                "expected normalized transcript {actual:?} to contain {expected:?}"
+            );
+        }
     }
 
     /// Replay a live mic dump (raw f32le at 16 kHz, written by the recording
@@ -268,8 +307,10 @@ mod tests {
 
         let bytes = std::fs::read(&dump_path).expect("dump should be readable");
         let samples: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
             .collect();
         eprintln!(
             "replaying {:.1}s of mic audio",
@@ -324,8 +365,10 @@ mod tests {
 
         let bytes = std::fs::read(&dump_path).expect("dump should be readable");
         let samples: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
             .collect();
 
         let mut fed_secs = 0.0f32;
@@ -360,8 +403,10 @@ mod tests {
             if tag == b"data" {
                 let data = &bytes[pos + 8..(pos + 8 + size).min(bytes.len())];
                 return data
-                    .chunks_exact(2)
-                    .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / i16::MAX as f32)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|bytes| i16::from_le_bytes(*bytes) as f32 / i16::MAX as f32)
                     .collect();
             }
             pos += 8 + size + (size % 2);

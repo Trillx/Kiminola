@@ -78,7 +78,10 @@ impl VadSession {
             .map_err(|e| format!("failed to create VAD c tensor: {e}"))
             .unwrap();
 
-        let outputs = match self.session.run(ort::inputs![input_value, h_value, c_value]) {
+        let outputs = match self
+            .session
+            .run(ort::inputs![input_value, h_value, c_value])
+        {
             Ok(o) => o,
             Err(e) => {
                 eprintln!("VAD inference failed: {e}");
@@ -92,10 +95,14 @@ impl VadSession {
             .unwrap_or(0.0);
 
         if let Ok((_shape, h_next)) = outputs[1].try_extract_tensor::<f32>() {
-            self.h.assign(&Array3::from_shape_vec((NUM_LAYERS, 1, HIDDEN_SIZE), h_next.to_vec()).unwrap());
+            self.h.assign(
+                &Array3::from_shape_vec((NUM_LAYERS, 1, HIDDEN_SIZE), h_next.to_vec()).unwrap(),
+            );
         }
         if let Ok((_shape, c_next)) = outputs[2].try_extract_tensor::<f32>() {
-            self.c.assign(&Array3::from_shape_vec((NUM_LAYERS, 1, HIDDEN_SIZE), c_next.to_vec()).unwrap());
+            self.c.assign(
+                &Array3::from_shape_vec((NUM_LAYERS, 1, HIDDEN_SIZE), c_next.to_vec()).unwrap(),
+            );
         }
 
         prob

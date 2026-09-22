@@ -6,16 +6,64 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Release preflight
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Verify tag matches all app versions
+        shell: pwsh
+        working-directory: kiminola
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $config = Get-Content -Raw 'src-tauri/tauri.conf.json' | ConvertFrom-Json
+          $package = Get-Content -Raw 'package.json' | ConvertFrom-Json
+          $cargoVersion = [regex]::Match((Get-Content -Raw 'src-tauri/Cargo.toml'), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          $versions = @($config.version, $package.version, $cargoVersion)
+          if (($versions | Select-Object -Unique).Count -ne 1) {
+            throw "App versions are not synchronized: $($versions -join ', ')."
+          }
+          $expectedTag = "v$($config.version)"
+          if ($expectedTag -ne $env:RELEASE_TAG) {
+            throw "Release tag '$env:RELEASE_TAG' does not match app version '$($config.version)'."
+          }
+
+      - name: Test release support scripts
+        working-directory: kiminola
+        shell: pwsh
+        run: |
+          ./scripts/generate-updater-manifest.test.ps1
+          ./scripts/verify-pe-architecture.test.ps1
+          ./scripts/stage-portable-package.test.ps1
+
+  hardware-validation:
+    name: Release hardware gate
+    needs: preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/hardware-validation.yml
+
   create-release:
     name: Create draft release
-    runs-on: windows-latest
+    needs:
+      - preflight
+      - hardware-validation
+    runs-on: windows-2025
+    permissions:
+      contents: write
     outputs:
       release_id: ${{ steps.release.outputs.release_id }}
     steps:
@@ -65,40 +113,28 @@ jobs:
           "release_id=$($release.id)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   windows-release:
-    name: Build Windows ${{ matrix.arch }}
+    name: Build Windows ${{ matrix.arch }} release
     needs: create-release
-    runs-on: windows-latest
-    timeout-minutes: 45
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
+            runner: windows-2025
             target: x86_64-pc-windows-msvc
           - arch: ARM64
+            runner: windows-11-arm
             target: aarch64-pc-windows-msvc
 
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Verify tag matches all app versions
-        shell: pwsh
-        working-directory: kiminola
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          $config = Get-Content -Raw 'src-tauri/tauri.conf.json' | ConvertFrom-Json
-          $package = Get-Content -Raw 'package.json' | ConvertFrom-Json
-          $cargoVersion = [regex]::Match((Get-Content -Raw 'src-tauri/Cargo.toml'), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
-          $versions = @($config.version, $package.version, $cargoVersion)
-          if (($versions | Select-Object -Unique).Count -ne 1) {
-            throw "App versions are not synchronized: $($versions -join ', ')."
-          }
-          $expectedTag = "v$($config.version)"
-          if ($expectedTag -ne $env:RELEASE_TAG) {
-            throw "Release tag '$env:RELEASE_TAG' does not match app version '$($config.version)'."
-          }
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Verify updater signing secret
         shell: pwsh
@@ -114,87 +150,153 @@ jobs:
           }
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: kiminola/package-lock.json
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
+          toolchain: 1.98.1
           targets: ${{ matrix.target }}
 
       - name: Cache Rust dependencies
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
         with:
           workspaces: kiminola/src-tauri
-          shared-key: ${{ matrix.target }}
+          shared-key: release-${{ matrix.target }}
 
-      - name: Install LLVM
+      - name: Configure native hosted LLVM
         shell: pwsh
-        run: choco install llvm --yes --no-progress
+        run: |
+          $llvmBin = 'C:\Program Files\LLVM\bin'
+          $llvmPaths = @("$llvmBin\clang.exe", "$llvmBin\libclang.dll")
+          ./kiminola/scripts/verify-pe-architecture.ps1 -Target '${{ matrix.target }}' -Paths $llvmPaths
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Install frontend dependencies
         working-directory: kiminola
-        run: npm.cmd ci
-
-      - name: Check frontend
-        working-directory: kiminola
-        run: npm.cmd run check
-
-      - name: Run frontend tests
-        working-directory: kiminola
-        run: npm.cmd test
+        run: npm.cmd ci --include=dev --no-audit --no-fund
 
       - name: Prepare native dependencies
         working-directory: kiminola
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: .\scripts\prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
+        run: ./scripts/prepare-native-deps.ps1 -Target '${{ matrix.target }}' -WriteGithubEnv
 
-      - name: Test database upgrade and recovery
-        if: matrix.arch == 'x64'
+      - name: Run all-target Rust tests natively
         working-directory: kiminola/src-tauri
+        run: cargo test --locked --all-targets --target '${{ matrix.target }}'
+
+      - name: Run Rust documentation tests natively
+        working-directory: kiminola/src-tauri
+        run: cargo test --locked --doc --target '${{ matrix.target }}'
+
+      - name: Build release executable before packaging
+        working-directory: kiminola
+        run: |
+          npm.cmd run tauri build -- `
+            --target '${{ matrix.target }}' `
+            --no-bundle
+
+      - name: Verify executable and bundled DLL architecture
+        working-directory: kiminola
         shell: pwsh
         run: |
-          $env:PATH = "$env:SHERPA_ONNX_LIB_DIR;$env:PATH"
-          cargo test --lib --target '${{ matrix.target }}' db
-          if ($LASTEXITCODE -ne 0) { throw 'Database safety tests failed.' }
+          $paths = @(
+            'src-tauri/target/${{ matrix.target }}/release/kiminola.exe',
+            'src-tauri/target/release/onnxruntime.dll',
+            'src-tauri/target/release/onnxruntime_providers_shared.dll',
+            'src-tauri/target/release/sherpa-onnx-c-api.dll',
+            'src-tauri/target/release/sherpa-onnx-cxx-api.dll'
+          )
+          ./scripts/verify-pe-architecture.ps1 -Target '${{ matrix.target }}' -Paths $paths
 
-      - name: Build and upload draft release assets
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+      - name: Test release executable startup behavior
+        working-directory: kiminola
+        shell: pwsh
+        run: ./scripts/startup-behavior.test.ps1 -Executable 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe' -TimeoutSeconds 30
+
+      - name: Stage complete portable package
+        working-directory: kiminola
+        shell: pwsh
+        run: |
+          $config = Get-Content -Raw 'src-tauri/tauri.conf.json' | ConvertFrom-Json
+          ./scripts/stage-portable-package.ps1 `
+            -Executable 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe' `
+            -NativeDirectory 'src-tauri/target/release' `
+            -OutputPath "portable/Kimi-Nola_$($config.version)_${{ matrix.arch }}-portable.zip"
+
+      - name: Bundle the verified executable and create updater signature
+        working-directory: kiminola
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: kiminola
-          releaseId: ${{ needs.create-release.outputs.release_id }}
-          tagName: ${{ github.ref_name }}
-          releaseDraft: true
-          prerelease: false
-          uploadUpdaterJson: false
-          uploadUpdaterSignatures: true
-          args: --target ${{ matrix.target }}
+        run: npm.cmd run tauri bundle -- --target '${{ matrix.target }}'
+
+      - name: Record and upload the exact verified release assets
+        working-directory: kiminola
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem -LiteralPath 'src-tauri/target/${{ matrix.target }}/release/bundle/nsis' -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw "Expected one installer, found $($installers.Count)." }
+          $installer = $installers[0]
+          $signaturePath = "$($installer.FullName).sig"
+          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw "Updater signature was not created for '$($installer.Name)'."
+          }
+          $portable = @(Get-ChildItem -LiteralPath 'portable' -Filter 'Kimi-Nola_*_${{ matrix.arch }}-portable.zip' -File)
+          if ($portable.Count -ne 1) { throw "Expected one portable archive, found $($portable.Count)." }
+
+          $reportPath = Join-Path 'portable' 'release-verification-${{ matrix.arch }}.json'
+          $report = [ordered]@{
+            architecture = '${{ matrix.arch }}'.ToLowerInvariant()
+            target = '${{ matrix.target }}'
+            installer = [ordered]@{
+              name = $installer.Name
+              sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            signature = [ordered]@{
+              name = [IO.Path]::GetFileName($signaturePath)
+              sha256 = (Get-FileHash -LiteralPath $signaturePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            portable = [ordered]@{
+              name = $portable[0].Name
+              sha256 = (Get-FileHash -LiteralPath $portable[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          }
+          [IO.File]::WriteAllText($reportPath, ($report | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
+
+          foreach ($path in @($installer.FullName, $signaturePath, $portable[0].FullName, (Resolve-Path $reportPath).Path)) {
+            gh release upload $env:RELEASE_TAG $path --clobber --repo $env:RELEASE_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw "Uploading '$path' failed." }
+          }
 
   manifest:
-    name: Generate signed updater manifest
+    name: Verify assets and generate signed updater manifest
     needs:
       - create-release
       - windows-release
     if: ${{ needs.windows-release.result == 'success' }}
-    runs-on: windows-latest
+    runs-on: windows-2025
+    permissions:
+      contents: write
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
 
-      - name: Test updater manifest generator
-        shell: pwsh
-        run: .\kiminola\scripts\generate-updater-manifest.test.ps1
-
-      - name: Generate and upload latest.json
+      - name: Verify exact assets, signatures, and latest.json
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -204,6 +306,105 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $config = Get-Content -Raw 'kiminola/src-tauri/tauri.conf.json' | ConvertFrom-Json
+          $downloadDirectory = Join-Path $env:RUNNER_TEMP 'release-assets'
+          New-Item -ItemType Directory -Path $downloadDirectory -Force | Out-Null
+          gh release download $env:RELEASE_TAG `
+            --repo $env:RELEASE_REPOSITORY `
+            --dir $downloadDirectory `
+            --pattern '*-setup.exe' `
+            --pattern '*.exe.sig' `
+            --pattern '*-portable.zip' `
+            --pattern 'release-verification-*.json'
+          if ($LASTEXITCODE -ne 0) { throw 'Downloading release assets for final verification failed.' }
+
+          $assetRules = [ordered]@{
+            '*-setup.exe' = 2
+            '*.exe.sig' = 2
+            '*-portable.zip' = 2
+            'release-verification-*.json' = 2
+          }
+          foreach ($rule in $assetRules.GetEnumerator()) {
+            $actualCount = @(Get-ChildItem -LiteralPath $downloadDirectory -Filter $rule.Key -File).Count
+            if ($actualCount -ne $rule.Value) {
+              throw "Expected $($rule.Value) '$($rule.Key)' assets, found $actualCount."
+            }
+          }
+
+          $minisignArchive = Join-Path $env:RUNNER_TEMP 'minisign-0.12-win64.zip'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip' `
+            -OutFile $minisignArchive
+          $minisignHash = (Get-FileHash -LiteralPath $minisignArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($minisignHash -ne '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479') {
+            throw "Minisign archive hash mismatch: $minisignHash."
+          }
+          $minisignDirectory = Join-Path $env:RUNNER_TEMP 'minisign-0.12'
+          Expand-Archive -LiteralPath $minisignArchive -DestinationPath $minisignDirectory -Force
+          $minisign = Join-Path $minisignDirectory 'minisign-win64\x86_64\minisign.exe'
+          if (-not (Test-Path -LiteralPath $minisign -PathType Leaf)) { throw "Missing $minisign." }
+          $publicKeyPath = Join-Path $env:RUNNER_TEMP 'kiminola-minisign.pub'
+          [IO.File]::WriteAllBytes($publicKeyPath, [Convert]::FromBase64String($config.plugins.updater.pubkey))
+
+          $expected = [ordered]@{
+            x64 = 'x86_64-pc-windows-msvc'
+            arm64 = 'aarch64-pc-windows-msvc'
+          }
+          $reports = @{}
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          foreach ($architecture in $expected.Keys) {
+            $reportPath = Join-Path $downloadDirectory "release-verification-$architecture.json"
+            if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) { throw "Missing $reportPath." }
+            $report = Get-Content -Raw $reportPath | ConvertFrom-Json
+            if ($report.architecture -ne $architecture -or $report.target -ne $expected[$architecture]) {
+              throw "Release report '$architecture' has the wrong architecture or Rust target."
+            }
+
+            foreach ($kind in @('installer', 'signature', 'portable')) {
+              $metadata = $report.$kind
+              $assetPath = Join-Path $downloadDirectory $metadata.name
+              if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+                throw "Release report '$architecture' references missing $kind '$($metadata.name)'."
+              }
+              $actualHash = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actualHash -ne $metadata.sha256) {
+                throw "Release $kind hash mismatch for '$($metadata.name)'."
+              }
+            }
+
+            if ($report.installer.name -notmatch "_$architecture-setup\.exe$") {
+              throw "Installer '$($report.installer.name)' does not identify $architecture."
+            }
+            if ($report.signature.name -ne "$($report.installer.name).sig") {
+              throw "Signature '$($report.signature.name)' does not match '$($report.installer.name)'."
+            }
+
+            $installerPath = Join-Path $downloadDirectory $report.installer.name
+            $signaturePath = Join-Path $downloadDirectory $report.signature.name
+            & $minisign -V -q -p $publicKeyPath -m $installerPath -x $signaturePath
+            if ($LASTEXITCODE -ne 0) {
+              throw "Updater signature verification failed for '$($report.installer.name)'."
+            }
+
+            $portablePath = Join-Path $downloadDirectory $report.portable.name
+            $archive = [IO.Compression.ZipFile]::OpenRead($portablePath)
+            try {
+              $portableEntries = @($archive.Entries | ForEach-Object FullName | Sort-Object)
+            } finally {
+              $archive.Dispose()
+            }
+            $expectedEntries = @(
+              'kiminola.exe',
+              'onnxruntime.dll',
+              'onnxruntime_providers_shared.dll',
+              'sherpa-onnx-c-api.dll',
+              'sherpa-onnx-cxx-api.dll'
+            ) | Sort-Object
+            if (Compare-Object -ReferenceObject $expectedEntries -DifferenceObject $portableEntries) {
+              throw "Portable archive '$($report.portable.name)' is incomplete."
+            }
+            $reports[$architecture] = $report
+          }
+
           $outputPath = Join-Path $env:RUNNER_TEMP 'latest.json'
           & .\kiminola\scripts\generate-updater-manifest.ps1 `
             -Repository $env:RELEASE_REPOSITORY `
@@ -212,20 +413,67 @@ jobs:
             -Version $config.version `
             -OutputPath $outputPath
 
+          $manifest = Get-Content -Raw $outputPath | ConvertFrom-Json
+          $expectedPrefix = "https://github.com/$env:RELEASE_REPOSITORY/releases/download/$env:RELEASE_TAG/"
+          $platformArchitectures = [ordered]@{
+            'windows-x86_64' = 'x64'
+            'windows-aarch64' = 'arm64'
+            'windows-x86_64-nsis' = 'x64'
+            'windows-aarch64-nsis' = 'arm64'
+          }
+          foreach ($platform in $platformArchitectures.Keys) {
+            $architecture = $platformArchitectures[$platform]
+            $entry = $manifest.platforms.PSObject.Properties[$platform].Value
+            if ($null -eq $entry -or [string]::IsNullOrWhiteSpace($entry.url) -or [string]::IsNullOrWhiteSpace($entry.signature)) {
+              throw "Updater manifest is missing a complete '$platform' entry."
+            }
+            if (-not $entry.url.StartsWith($expectedPrefix) -or $entry.url -match 'untagged') {
+              throw "Updater manifest '$platform' URL is not permanent and tag-versioned: $($entry.url)"
+            }
+            if ($entry.signature -match '^https?://') {
+              throw "Updater manifest '$platform' signature must be literal signature content."
+            }
+            $installerName = [IO.Path]::GetFileName(([uri]$entry.url).AbsolutePath)
+            if ($installerName -ne $reports[$architecture].installer.name) {
+              throw "Updater manifest '$platform' points at '$installerName' instead of the verified installer."
+            }
+            $signaturePath = Join-Path $downloadDirectory $reports[$architecture].signature.name
+            if ($entry.signature -ne (Get-Content -Raw $signaturePath).Trim()) {
+              throw "Updater manifest '$platform' does not contain the verified signature."
+            }
+          }
+
           gh release upload $env:RELEASE_TAG "$outputPath#latest.json" --clobber --repo $env:RELEASE_REPOSITORY
           if ($LASTEXITCODE -ne 0) { throw 'Uploading latest.json failed.' }
+
+          $uploadedManifestDirectory = Join-Path $env:RUNNER_TEMP 'uploaded-manifest'
+          New-Item -ItemType Directory -Path $uploadedManifestDirectory -Force | Out-Null
+          gh release download $env:RELEASE_TAG `
+            --repo $env:RELEASE_REPOSITORY `
+            --dir $uploadedManifestDirectory `
+            --pattern 'latest.json'
+          if ($LASTEXITCODE -ne 0) { throw 'Downloading uploaded latest.json failed.' }
+          $uploadedManifestPath = Join-Path $uploadedManifestDirectory 'latest.json'
+          $generatedHash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash
+          $uploadedHash = (Get-FileHash -LiteralPath $uploadedManifestPath -Algorithm SHA256).Hash
+          if ($uploadedHash -ne $generatedHash) {
+            throw 'The uploaded latest.json differs from the verified generated manifest.'
+          }
+          $uploadedManifest = Get-Content -Raw $uploadedManifestPath | ConvertFrom-Json
+          if ($uploadedManifest.version -ne $config.version) {
+            throw "The uploaded latest.json version '$($uploadedManifest.version)' does not match '$($config.version)'."
+          }
 
           $release = gh release view $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY --json isDraft,isPrerelease,assets | ConvertFrom-Json
           if (-not $release.isDraft -or $release.isPrerelease) {
             throw 'The updater manifest must be generated against a draft, non-prerelease release.'
           }
-          if (-not ($release.assets | Where-Object { $_.name -eq 'latest.json' })) {
-            throw 'latest.json was not found in the draft release after upload.'
+          $expectedAssetNames = @('latest.json')
+          foreach ($report in $reports.Values) {
+            $expectedAssetNames += @($report.installer.name, $report.signature.name, $report.portable.name)
           }
-          $manifest = Get-Content -Raw $outputPath | ConvertFrom-Json
-          foreach ($platform in @('windows-x86_64', 'windows-aarch64', 'windows-x86_64-nsis', 'windows-aarch64-nsis')) {
-            $entry = $manifest.platforms.PSObject.Properties[$platform].Value
-            if ($null -eq $entry -or [string]::IsNullOrWhiteSpace($entry.url) -or [string]::IsNullOrWhiteSpace($entry.signature)) {
-              throw "Updater manifest is missing a complete '$platform' entry."
-            }
+          $expectedAssetNames += @(Get-ChildItem -LiteralPath $downloadDirectory -Filter 'release-verification-*.json' -File | ForEach-Object Name)
+          $actualAssetNames = @($release.assets | ForEach-Object name)
+          if (Compare-Object -ReferenceObject ($expectedAssetNames | Sort-Object) -DifferenceObject ($actualAssetNames | Sort-Object)) {
+            throw "The draft release asset set does not exactly match the verified files. Expected: $($expectedAssetNames -join ', '). Actual: $($actualAssetNames -join ', ')."
           }

@@ -20,9 +20,10 @@ const KEYRING_SERVICE: &str = "kiminola";
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models?limit=1000";
 
 /// Supported OpenAI-compatible providers.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
+    #[default]
     OpenAi,
     OpenRouter,
     Ollama,
@@ -46,12 +47,6 @@ impl ProviderKind {
             ProviderKind::Ollama => "llama3.1",
             ProviderKind::LmStudio => "default",
         }
-    }
-}
-
-impl Default for ProviderKind {
-    fn default() -> Self {
-        ProviderKind::OpenAi
     }
 }
 
@@ -375,8 +370,10 @@ fn normalized_base_url(config: &ProviderConfig) -> Result<String, String> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("Base URL must be an absolute HTTP or HTTPS URL".into());
     }
-    if !url.username().is_empty() || url.password().is_some()
-        || url.query().is_some() || url.fragment().is_some()
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
     {
         return Err("Base URL cannot contain credentials, a query, or a fragment".into());
     }
@@ -388,7 +385,10 @@ fn credential_account(config: &ProviderConfig) -> Result<String, String> {
         .map_err(|_| "invalid provider identity".to_string())?;
     // A versioned, bounded account name avoids delimiter collisions and keyring
     // account-length limits without storing endpoint text in account metadata.
-    Ok(format!("provider_api_key_v2_{}", hex::encode(Sha256::digest(identity))))
+    Ok(format!(
+        "provider_api_key_v2_{}",
+        hex::encode(Sha256::digest(identity))
+    ))
 }
 
 // A narrow seam keeps native credential IO out of synthetic regression tests.
@@ -410,7 +410,9 @@ impl ApiKeyStore for OsApiKeyStore {
         match keyring_entry(account)?.get_password() {
             Ok(key) => Ok(Some(key)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err("Could not read the provider API key from Windows Credential Manager".into()),
+            Err(_) => {
+                Err("Could not read the provider API key from Windows Credential Manager".into())
+            }
         }
     }
 
@@ -419,19 +421,28 @@ impl ApiKeyStore for OsApiKeyStore {
         match key {
             None => entry.delete_credential().or_else(|e| match e {
                 keyring::Error::NoEntry => Ok(()),
-                _ => Err("Could not delete the provider API key from Windows Credential Manager".to_string()),
+                _ => Err(
+                    "Could not delete the provider API key from Windows Credential Manager"
+                        .to_string(),
+                ),
             }),
-            Some(key) => entry.set_password(key)
-                .map_err(|_| "Could not save the provider API key to Windows Credential Manager".to_string()),
+            Some(key) => entry.set_password(key).map_err(|_| {
+                "Could not save the provider API key to Windows Credential Manager".to_string()
+            }),
         }
     }
 }
 
-fn load_api_key(config: &ProviderConfig, store: &impl ApiKeyStore) -> Result<Option<String>, String> {
+fn load_api_key(
+    config: &ProviderConfig,
+    store: &impl ApiKeyStore,
+) -> Result<Option<String>, String> {
     // Deliberately never read/migrate the old unscoped account. Its provenance
     // cannot be inferred from mutable saved config after a prior provider switch.
     // Leave it untouched; the user must re-enter a key for this exact identity.
-    Ok(store.read(&credential_account(config)?)?.filter(|key| !key.trim().is_empty()))
+    Ok(store
+        .read(&credential_account(config)?)?
+        .filter(|key| !key.trim().is_empty()))
 }
 
 fn save_api_key(
@@ -484,7 +495,9 @@ fn build_provider_with_store(
 ) -> Result<OpenAiCompatibleProvider, String> {
     let key = load_api_key(config, store)?;
     if key.is_none() && matches!(config.kind, ProviderKind::OpenAi | ProviderKind::OpenRouter) {
-        return Err("Enter an API key for this provider and Base URL in AI provider settings".into());
+        return Err(
+            "Enter an API key for this provider and Base URL in AI provider settings".into(),
+        );
     }
     OpenAiCompatibleProvider::new(config, key.unwrap_or_default())
 }
@@ -689,23 +702,35 @@ mod credential_tests {
     impl ApiKeyStore for MemoryKeys {
         fn read(&self, account: &str) -> Result<Option<String>, String> {
             self.reads.lock().unwrap().push(account.to_owned());
-            if self.fail_read { return Err("synthetic credential read failure".into()); }
+            if self.fail_read {
+                return Err("synthetic credential read failure".into());
+            }
             Ok(self.values.lock().unwrap().get(account).cloned())
         }
 
         fn write(&self, account: &str, key: Option<&str>) -> Result<(), String> {
-            if self.fail_write { return Err("synthetic credential write failure".into()); }
+            if self.fail_write {
+                return Err("synthetic credential write failure".into());
+            }
             let mut values = self.values.lock().unwrap();
             match key {
-                Some(key) => { values.insert(account.to_owned(), key.to_owned()); }
-                None => { values.remove(account); }
+                Some(key) => {
+                    values.insert(account.to_owned(), key.to_owned());
+                }
+                None => {
+                    values.remove(account);
+                }
             }
             Ok(())
         }
     }
 
     fn config(kind: ProviderKind, base_url: &str) -> ProviderConfig {
-        ProviderConfig { kind, base_url: base_url.into(), model: "synthetic-model".into() }
+        ProviderConfig {
+            kind,
+            base_url: base_url.into(),
+            model: "synthetic-model".into(),
+        }
     }
 
     #[test]
@@ -713,11 +738,17 @@ mod credential_tests {
         let store = MemoryKeys::default();
         let original = ProviderConfig::default();
         save_api_key(&original, Some("synthetic-cloud-key".into()), &store).unwrap();
-        assert_eq!(load_api_key(&original, &store).unwrap().as_deref(), Some("synthetic-cloud-key"));
+        assert_eq!(
+            load_api_key(&original, &store).unwrap().as_deref(),
+            Some("synthetic-cloud-key")
+        );
         for other in [
             config(ProviderKind::OpenRouter, &original.base_url),
             config(ProviderKind::OpenAi, "https://other.example.invalid/v1"),
-            config(ProviderKind::OpenAi, "https://api.openai.com/other-tenant/v1"),
+            config(
+                ProviderKind::OpenAi,
+                "https://api.openai.com/other-tenant/v1",
+            ),
             config(ProviderKind::OpenAi, "http://api.openai.com/v1"),
             config(ProviderKind::OpenAi, "https://api.openai.com:8443/v1"),
             config(ProviderKind::Ollama, "http://localhost:11434/v1"),
@@ -725,10 +756,19 @@ mod credential_tests {
         ] {
             assert!(load_api_key(&other, &store).unwrap().is_none());
         }
-        let changed_model = ProviderConfig { model: "another-model".into(), ..original.clone() };
-        assert_eq!(load_api_key(&changed_model, &store).unwrap(), load_api_key(&original, &store).unwrap());
+        let changed_model = ProviderConfig {
+            model: "another-model".into(),
+            ..original.clone()
+        };
+        assert_eq!(
+            load_api_key(&changed_model, &store).unwrap(),
+            load_api_key(&original, &store).unwrap()
+        );
         let equivalent = config(ProviderKind::OpenAi, "https://API.OPENAI.COM:443/v1/");
-        assert_eq!(credential_account(&equivalent).unwrap(), credential_account(&original).unwrap());
+        assert_eq!(
+            credential_account(&equivalent).unwrap(),
+            credential_account(&original).unwrap()
+        );
         let provider = build_provider_with_store(&equivalent, &store).unwrap();
         assert_eq!(provider.base_url, original.base_url);
     }
@@ -736,12 +776,24 @@ mod credential_tests {
     #[test]
     fn legacy_unscoped_key_is_never_read_or_migrated() {
         let store = MemoryKeys::default();
-        store.write("provider_api_key", Some("synthetic-legacy-key")).unwrap();
-        for kind in [ProviderKind::OpenAi, ProviderKind::OpenRouter, ProviderKind::Ollama, ProviderKind::LmStudio] {
+        store
+            .write("provider_api_key", Some("synthetic-legacy-key"))
+            .unwrap();
+        for kind in [
+            ProviderKind::OpenAi,
+            ProviderKind::OpenRouter,
+            ProviderKind::Ollama,
+            ProviderKind::LmStudio,
+        ] {
             let destination = config(kind, kind.default_base_url());
             assert!(load_api_key(&destination, &store).unwrap().is_none());
         }
-        assert!(store.reads.lock().unwrap().iter().all(|account| account != "provider_api_key"));
+        assert!(store
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|account| account != "provider_api_key"));
         assert_eq!(store.values.lock().unwrap().len(), 1);
     }
 
@@ -749,37 +801,70 @@ mod credential_tests {
     fn omission_and_deletion_affect_only_the_destination_credential() {
         let store = MemoryKeys::default();
         let a = ProviderConfig::default();
-        let b = config(ProviderKind::OpenRouter, ProviderKind::OpenRouter.default_base_url());
+        let b = config(
+            ProviderKind::OpenRouter,
+            ProviderKind::OpenRouter.default_base_url(),
+        );
         save_api_key(&a, Some("synthetic-a".into()), &store).unwrap();
         save_api_key(&b, None, &store).unwrap();
         assert!(load_api_key(&b, &store).unwrap().is_none());
         save_api_key(&b, Some("synthetic-b".into()), &store).unwrap();
         save_api_key(&b, None, &store).unwrap();
-        assert_eq!(load_api_key(&b, &store).unwrap().as_deref(), Some("synthetic-b"));
+        assert_eq!(
+            load_api_key(&b, &store).unwrap().as_deref(),
+            Some("synthetic-b")
+        );
         save_api_key(&b, Some("  ".into()), &store).unwrap();
         assert!(load_api_key(&b, &store).unwrap().is_none());
-        assert_eq!(load_api_key(&a, &store).unwrap().as_deref(), Some("synthetic-a"));
+        assert_eq!(
+            load_api_key(&a, &store).unwrap().as_deref(),
+            Some("synthetic-a")
+        );
     }
 
     #[test]
     fn cloud_requires_its_own_key_while_local_can_be_unauthenticated() {
         let store = MemoryKeys::default();
-        save_api_key(&ProviderConfig::default(), Some("synthetic-cloud-key".into()), &store).unwrap();
-        let cloud = config(ProviderKind::OpenRouter, ProviderKind::OpenRouter.default_base_url());
+        save_api_key(
+            &ProviderConfig::default(),
+            Some("synthetic-cloud-key".into()),
+            &store,
+        )
+        .unwrap();
+        let cloud = config(
+            ProviderKind::OpenRouter,
+            ProviderKind::OpenRouter.default_base_url(),
+        );
         assert!(build_provider_with_store(&cloud, &store).is_err());
-        let local = config(ProviderKind::Ollama, ProviderKind::Ollama.default_base_url());
+        let local = config(
+            ProviderKind::Ollama,
+            ProviderKind::Ollama.default_base_url(),
+        );
         assert!(build_provider_with_store(&local, &store).is_ok());
         save_api_key(&local, Some("synthetic-local-key".into()), &store).unwrap();
-        assert_eq!(load_api_key(&local, &store).unwrap().as_deref(), Some("synthetic-local-key"));
+        assert_eq!(
+            load_api_key(&local, &store).unwrap().as_deref(),
+            Some("synthetic-local-key")
+        );
         assert!(build_provider_with_store(&local, &store).is_ok());
-        let failed_store = MemoryKeys { fail_read: true, ..Default::default() };
+        let failed_store = MemoryKeys {
+            fail_read: true,
+            ..Default::default()
+        };
         assert!(build_provider_with_store(&local, &failed_store).is_err());
     }
 
     #[test]
     fn ambiguous_or_credential_bearing_urls_are_rejected_before_key_lookup() {
         let store = MemoryKeys::default();
-        for url in ["", "relative/v1", "ftp://example.invalid/v1", "https://user:password@example.invalid/v1", "https://example.invalid/v1?key=secret", "https://example.invalid/v1#fragment"] {
+        for url in [
+            "",
+            "relative/v1",
+            "ftp://example.invalid/v1",
+            "https://user:password@example.invalid/v1",
+            "https://example.invalid/v1?key=secret",
+            "https://example.invalid/v1#fragment",
+        ] {
             let invalid = config(ProviderKind::OpenAi, url);
             assert!(load_api_key(&invalid, &store).is_err());
             assert!(save_api_key(&invalid, Some("synthetic-key".into()), &store).is_err());
@@ -790,29 +875,56 @@ mod credential_tests {
 
     #[tokio::test]
     async fn key_write_failure_keeps_saved_config_unchanged() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
-            .connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         let original = ProviderConfig::default();
         save_config(&pool, &original).await.unwrap();
-        let next = config(ProviderKind::OpenRouter, ProviderKind::OpenRouter.default_base_url());
-        let failed_store = MemoryKeys { fail_write: true, ..Default::default() };
-        assert!(set_llm_config_impl(&pool, &next, Some("synthetic-new-key".into()), &failed_store).await.is_err());
+        let next = config(
+            ProviderKind::OpenRouter,
+            ProviderKind::OpenRouter.default_base_url(),
+        );
+        let failed_store = MemoryKeys {
+            fail_write: true,
+            ..Default::default()
+        };
+        assert!(set_llm_config_impl(
+            &pool,
+            &next,
+            Some("synthetic-new-key".into()),
+            &failed_store
+        )
+        .await
+        .is_err());
         assert_eq!(load_config(&pool).await.unwrap().kind, original.kind);
         let store = MemoryKeys::default();
-        store.write("provider_api_key", Some("synthetic-legacy-key")).unwrap();
-        set_llm_config_impl(&pool, &next, None, &store).await.unwrap();
+        store
+            .write("provider_api_key", Some("synthetic-legacy-key"))
+            .unwrap();
+        set_llm_config_impl(&pool, &next, None, &store)
+            .await
+            .unwrap();
         let view = get_llm_config_impl(&pool, &store).await.unwrap();
         assert_eq!(view.config.kind, next.kind);
         assert!(!view.has_api_key);
-        set_llm_config_impl(&pool, &next, Some("synthetic-scoped-key".into()), &store).await.unwrap();
+        set_llm_config_impl(&pool, &next, Some("synthetic-scoped-key".into()), &store)
+            .await
+            .unwrap();
         let view = get_llm_config_impl(&pool, &store).await.unwrap();
         assert!(view.has_api_key);
         assert!(serde_json::to_value(view).unwrap().get("api_key").is_none());
         // Pre-upgrade configurations may have URLs that new saves reject. Keep
         // them editable without attempting any credential lookup for that URL.
-        let invalid_legacy = config(ProviderKind::OpenAi, "https://example.invalid/v1?old=setting");
+        let invalid_legacy = config(
+            ProviderKind::OpenAi,
+            "https://example.invalid/v1?old=setting",
+        );
         save_config(&pool, &invalid_legacy).await.unwrap();
         let reads_before = store.reads.lock().unwrap().len();
         let view = get_llm_config_impl(&pool, &store).await.unwrap();

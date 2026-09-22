@@ -11,7 +11,7 @@ test("all backend key reads are scoped and have no global-account fallback", () 
   assert.doesNotMatch(production, /const KEYRING_ACCOUNT:/);
   assert.doesNotMatch(production, /load_api_key\(\)/);
   assert.match(production, /keyring::Entry::new\(KEYRING_SERVICE, account\)/);
-  assert.match(production, /store\.read\(&credential_account\(config\)\?\)/);
+  assert.match(production, /store\s*\.read\(\s*&credential_account\(config\)\?\s*\)/);
   assert.match(production, /load_api_key\(config, store\)/);
   assert.match(production, /load_api_key\(&config, store\)/);
 });
