@@ -4,14 +4,14 @@ export async function runBoardsTests({ check, open }) {
   await check('Boards dashboard creates boards and custom columns', async page => {
     await open(page, '/boards');
     await page.getByRole('heading', { name: 'Boards', exact: true }).waitFor();
-    await page.getByText("Your To-Do's board is ready.", { exact: false }).waitFor();
-
+    await page.locator('summary').filter({ hasText: 'New board' }).click();
     await page.getByLabel('New board name', { exact: true }).fill('Project follow-ups');
-    await page.getByRole('button', { name: 'New board', exact: true }).click();
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
     await page.locator('.board-list-item').filter({ hasText: 'Project follow-ups' }).waitFor();
 
+    await page.locator('summary').filter({ hasText: 'Add column' }).click();
     await page.getByLabel('New column name', { exact: true }).fill('Review');
-    await page.getByRole('button', { name: 'Add column', exact: true }).click();
+    await page.getByRole('button', { name: 'Add', exact: true }).click();
     await page.locator('.kanban-column').filter({ hasText: 'Review' }).waitFor();
 
     const boards = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('list_boards'));
@@ -65,7 +65,7 @@ export async function runBoardsTests({ check, open }) {
     assert.equal(await move.inputValue(), '1');
   });
 
-  await check('Boards reserves gold for the selected board', async page => {
+  await check('Boards keeps source links neutral', async page => {
     await open(page, '/boards');
     const resolveColor = async token => page.evaluate(tokenName => {
       const probe = document.createElement('span');
@@ -76,9 +76,7 @@ export async function runBoardsTests({ check, open }) {
       return value;
     }, token);
     const muted = await resolveColor('--text-muted');
-    const inkStrong = await resolveColor('--ink-strong');
-    const home = await page.locator('.board-home-link').evaluate(element => getComputedStyle(element).color);
-    const welcome = await page.locator('.board-welcome strong').evaluate(element => getComputedStyle(element).color);
+
 
     await page.evaluate(async () => {
       await window.__TAURI_INTERNALS__.invoke('add_board_card', {
@@ -92,8 +90,45 @@ export async function runBoardsTests({ check, open }) {
     await page.getByText('Check the source link', { exact: true }).waitFor();
     const source = await page.locator('.card-source').evaluate(element => getComputedStyle(element).color);
 
-    assert.equal(home, muted);
     assert.equal(source, muted);
-    assert.equal(welcome, inkStrong);
+  });
+
+  await check('Boards uses the workspace width and contains narrow-screen scrolling', async page => {
+    await open(page, '/boards');
+    await page.locator('.kanban-column').first().waitFor();
+    assert.equal(await page.getByLabel('New board name', { exact: true }).isVisible(), false);
+    assert.equal(await page.getByLabel('New column name', { exact: true }).isVisible(), false);
+    for (const width of [1756, 1200, 800, 560, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      const geometry = await page.evaluate(() => {
+        const main = document.querySelector('.main').getBoundingClientRect();
+        const grid = document.querySelector('.kanban-grid').getBoundingClientRect();
+        const column = document.querySelector('.kanban-column').getBoundingClientRect();
+        return { mainWidth: main.width, gridWidth: grid.width, left: grid.left - main.left, top: grid.top,
+          columnWidth: column.width, overflow: document.documentElement.scrollWidth > innerWidth };
+      });
+      assert.ok(geometry.left <= 28, JSON.stringify(geometry));
+      assert.ok(geometry.gridWidth >= geometry.mainWidth - 56, JSON.stringify(geometry));
+      assert.ok(geometry.top < 350, JSON.stringify(geometry));
+      assert.ok(geometry.columnWidth >= 220, JSON.stringify(geometry));
+      assert.equal(geometry.overflow, false, `No document overflow at ${width}`);
+    }
+    await page.locator('summary').filter({ hasText: 'New board' }).focus();
+    await page.keyboard.press('Enter');
+    await page.getByLabel('New board name', { exact: true }).fill('Discard this');
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    assert.equal(await page.getByLabel('New board name', { exact: true }).isVisible(), false);
+    assert.equal(await page.evaluate(() => window.audit.calls.some(call => call.cmd === 'create_board')), false);
+    assert.equal(await page.locator('summary').filter({ hasText: 'New board' }).evaluate(element => element === document.activeElement), true);
+    await page.locator('summary').filter({ hasText: 'Add column' }).click();
+    await page.getByLabel('New column name', { exact: true }).fill('Discard column');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    assert.equal(await page.locator('summary').filter({ hasText: 'Add column' }).evaluate(element => element === document.activeElement), true);
+    if (process.env.BOARDS_SCREENSHOT) {
+      await page.setViewportSize({ width: 1756, height: 1189 });
+      await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
+      await page.screenshot({ path: process.env.BOARDS_SCREENSHOT });
+    }
   });
 }

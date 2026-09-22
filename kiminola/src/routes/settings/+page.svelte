@@ -44,6 +44,7 @@
   } from "$lib/settings-ui";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import Check from "@lucide/svelte/icons/check";
+  import Copy from "@lucide/svelte/icons/copy";
   import Moon from "@lucide/svelte/icons/moon";
   import Plus from "@lucide/svelte/icons/plus";
   import Sun from "@lucide/svelte/icons/sun";
@@ -98,6 +99,15 @@
     templateStatusTimer = setTimeout(() => {
       templateStatus = null;
     }, 4000);
+  }
+
+  async function copyPlaceholder(placeholder: "{transcript}" | "{notes}") {
+    try {
+      await navigator.clipboard.writeText(placeholder);
+      flashTemplateStatus(`${placeholder} copied to clipboard.`);
+    } catch (err) {
+      flashTemplateStatus(`Could not copy ${placeholder}: ${String(err)}`, true);
+    }
   }
 
   function validateTemplatePrompt(prompt: string): string | null {
@@ -661,9 +671,42 @@
           </header>
 
           <div class="template-requirements">
-            <span>Keep these placeholders in your prompt:</span>
-            <code>{`{transcript}`}</code>
-            <code>{`{notes}`}</code>
+            <div class="template-requirements-copy">
+              <span class="template-requirements-label">Required placeholders</span>
+              <span>Keep both tokens in custom prompts so Kimi Nola can read the meeting.</span>
+            </div>
+            <div class="template-placeholder-actions">
+              <Button
+                class="placeholder-copy-button"
+                variant="outline"
+                size="sm"
+                aria-label="Copy {`{transcript}`} placeholder"
+                title="Copy {`{transcript}`} to clipboard"
+                onclick={() => void copyPlaceholder("{transcript}")}
+              >
+                {#if templateStatus?.message === "{transcript} copied to clipboard."}
+                  <Check aria-hidden="true" />
+                {:else}
+                  <Copy aria-hidden="true" />
+                {/if}
+                <code>{`{transcript}`}</code>
+              </Button>
+              <Button
+                class="placeholder-copy-button"
+                variant="outline"
+                size="sm"
+                aria-label="Copy {`{notes}`} placeholder"
+                title="Copy {`{notes}`} to clipboard"
+                onclick={() => void copyPlaceholder("{notes}")}
+              >
+                {#if templateStatus?.message === "{notes} copied to clipboard."}
+                  <Check aria-hidden="true" />
+                {:else}
+                  <Copy aria-hidden="true" />
+                {/if}
+                <code>{`{notes}`}</code>
+              </Button>
+            </div>
           </div>
 
           {#if templatesLoading}

@@ -238,6 +238,38 @@ try {
     assert.doesNotMatch(await page.locator('.model-status').innerText(), /â€¦/);
   });
 
+  await check('Settings meeting switches persist and visibly reflect their state', async page => {
+    await open(page, '/settings');
+    const detection = page.getByRole('switch', { name: 'Meeting detection', exact: true });
+    const startup = page.getByRole('switch', { name: 'Start with Windows', exact: true });
+    const visualState = switchControl => switchControl.evaluate(element => ({
+      dataState: element.getAttribute('data-state'),
+      background: getComputedStyle(element).backgroundColor,
+      thumbTranslate: getComputedStyle(element.querySelector('[data-slot="switch-thumb"]')).translate,
+    }));
+
+    const detectionOff = await visualState(detection);
+    await detection.click();
+    await eventually(() => detection.getAttribute('aria-checked'), value => value === 'true', 'Detection switch checked state');
+    await eventually(() => visualState(detection), value =>
+      value.thumbTranslate !== detectionOff.thumbTranslate,
+    'Detection switch thumb visibly moves');
+    await page.getByRole('button', { name: 'Pause detection', exact: true }).waitFor();
+
+    const startupOff = await visualState(startup);
+    await startup.click();
+    await eventually(() => startup.getAttribute('aria-checked'), value => value === 'true', 'Startup switch checked state');
+    await eventually(() => visualState(startup), value =>
+      value.thumbTranslate !== startupOff.thumbTranslate,
+    'Startup switch thumb visibly moves');
+
+    const writes = await page.evaluate(() => window.audit.calls.filter(call => call.cmd.startsWith('set_meeting_presence_')));
+    assert.deepEqual(writes, [
+      { cmd: 'set_meeting_presence_enabled', args: { enabled: true } },
+      { cmd: 'set_meeting_presence_start_with_windows', args: { enabled: true } },
+    ]);
+  });
+
   await check('UI-03 Failed recovery blocks leaving and retains work until durable retry', async page => {
     await record(page);
     await page.evaluate(() => window.audit.failRecovery = true);

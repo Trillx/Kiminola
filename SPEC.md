@@ -40,6 +40,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Recording view: full-screen notepad; live transcript pill bottom-left; stop button reads "Stop meeting".
 - Post-meeting view: pill tabs **My notes** / **Enhance Notes** / **Transcript**. Default tab: **My notes**.
 - Boards view: user-created Boards with customizable ordered columns and movable action-item cards.
+  - The board uses the available workspace width, with a horizontal board switcher above the columns. Board and column creation forms expand on demand. Narrow windows scroll columns inside the board rather than overflowing the page.
 - Updates: after the main app launches, Kimi Nola performs one non-blocking
   check against the published stable GitHub Release feed. A visible update
   notice offers release details, but download and installation always require

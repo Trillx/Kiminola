@@ -121,6 +121,15 @@
           }
           return snapshot;
         }
+        case 'set_meeting_presence_enabled':
+          presence.enabled = args.enabled;
+          presence.mode = args.enabled ? (presence.paused ? 'paused' : 'detecting') : 'off';
+          window.audit.emit('meeting-presence:state', structuredClone(presence));
+          return;
+        case 'set_meeting_presence_start_with_windows':
+          presence.start_with_windows = args.enabled;
+          window.audit.emit('meeting-presence:state', structuredClone(presence));
+          return;
         case 'jot_notes_from_meeting_prompt': claimPrompt(args.promptId, cmd); return createDraft();
         case 'start_recording_from_meeting_prompt':
         case 'dismiss_meeting_prompt': claimPrompt(args.promptId, cmd); return;

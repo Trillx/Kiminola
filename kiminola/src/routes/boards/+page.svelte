@@ -14,6 +14,10 @@
 
   let newBoardName = $state("");
   let newColumnName = $state("");
+  let creatingBoard = $state(false);
+  let creatingColumn = $state(false);
+  let newBoardTrigger = $state<HTMLElement>();
+  let newColumnTrigger = $state<HTMLElement>();
   let editingBoard = $state(false);
   let boardNameDraft = $state("");
   let editingColumnId = $state<number | null>(null);
@@ -53,6 +57,8 @@
     try {
       const id = await createBoard(name);
       newBoardName = "";
+      creatingBoard = false;
+      newBoardTrigger?.focus();
       await loadBoards();
       activeBoardId = id;
     } catch (cause) {
@@ -102,6 +108,8 @@
     try {
       await createBoardColumn(activeBoard.id, name);
       newColumnName = "";
+      creatingColumn = false;
+      newColumnTrigger?.focus();
       await loadBoards();
     } catch (cause) {
       error = errorMessage(cause);
@@ -164,22 +172,17 @@
 <div class="main-content boards-page">
   <header class="boards-header">
     <div>
-      <span class="eyebrow">Action items</span>
       <h1 class="display">Boards</h1>
-      <p class="boards-copy">Keep meeting follow-ups visible, organized, and moving.</p>
     </div>
+    <details bind:open={creatingBoard}>
+      <summary bind:this={newBoardTrigger}><Plus size={15} aria-hidden="true" /> New board</summary>
     <form class="new-board-form" onsubmit={(event) => { event.preventDefault(); void createNewBoard(); }}>
       <Input bind:value={newBoardName} aria-label="New board name" placeholder="New board name" disabled={busy} />
-      <Button type="submit" disabled={!newBoardName.trim() || busy}><Plus size={15} aria-hidden="true" /> New board</Button>
+      <Button type="submit" size="sm" disabled={!newBoardName.trim() || busy}>Create</Button>
+      <Button type="button" size="sm" variant="ghost" disabled={busy} onclick={() => { creatingBoard = false; newBoardName = ""; newBoardTrigger?.focus(); }}>Cancel</Button>
     </form>
+    </details>
   </header>
-
-  {#if snapshot?.created_default}
-    <div class="board-welcome" role="status">
-      <strong>Your To-Do's board is ready.</strong>
-      <span>You can create boards to track these actions here.</span>
-    </div>
-  {/if}
 
   {#if error}
     <div class="board-error" role="alert">
@@ -192,11 +195,7 @@
     <div class="empty-state" role="status">Loading boards…</div>
   {:else if snapshot}
     <div class="boards-layout">
-      <aside class="board-list" aria-label="Boards">
-        <div class="board-list-heading">
-          <span>Your boards</span>
-          <span class="mono">{snapshot.boards.length}</span>
-        </div>
+      <nav class="board-list" aria-label="Boards">
         <div class="board-list-items">
           {#each snapshot.boards as board (board.id)}
             <button
@@ -204,14 +203,15 @@
               class:active={board.id === activeBoardId}
               class="board-list-item"
               aria-current={board.id === activeBoardId ? "page" : undefined}
-              onclick={() => { activeBoardId = board.id; cancelBoardRename(); cancelColumnRename(); }}
+              disabled={busy}
+              onclick={() => { activeBoardId = board.id; cancelBoardRename(); cancelColumnRename(); creatingColumn = false; newColumnName = ""; }}
             >
               <span>{board.name}</span>
               <small>{board.columns.reduce((total, column) => total + column.cards.length, 0)}</small>
             </button>
           {/each}
         </div>
-      </aside>
+      </nav>
 
       {#if activeBoard}
         <section class="board-workspace" aria-label={`${activeBoard.name} board`}>
@@ -231,15 +231,19 @@
               {/if}
               <p>{activeBoard.columns.length} {activeBoard.columns.length === 1 ? "column" : "columns"} · {activeBoard.columns.reduce((total, column) => total + column.cards.length, 0)} action items</p>
             </div>
-            <a class="board-home-link" href="/">Back to meetings</a>
-          </header>
-
-          <div class="column-toolbar">
+            <details bind:open={creatingColumn}>
+              <summary bind:this={newColumnTrigger}><Plus size={14} aria-hidden="true" /> Add column</summary>
             <form class="new-column-form" onsubmit={(event) => { event.preventDefault(); void addColumn(); }}>
               <Input bind:value={newColumnName} aria-label="New column name" placeholder="New column name" disabled={busy} />
-              <Button type="submit" variant="outline" disabled={!newColumnName.trim() || busy}><Plus size={14} aria-hidden="true" /> Add column</Button>
+              <Button type="submit" size="sm" disabled={!newColumnName.trim() || busy}>Add</Button>
+              <Button type="button" size="sm" variant="ghost" disabled={busy} onclick={() => { creatingColumn = false; newColumnName = ""; newColumnTrigger?.focus(); }}>Cancel</Button>
             </form>
-          </div>
+            </details>
+          </header>
+
+          {#if activeBoard.columns.every(column => column.cards.length === 0)}
+            <p class="board-hint">Add action items from a meeting's enhanced notes to this board.</p>
+          {/if}
 
           <div class="kanban-grid" aria-label="Kanban columns">
             {#each activeBoard.columns as column (column.id)}
@@ -285,7 +289,7 @@
                       </label>
                     </article>
                   {:else}
-                    <div class="column-empty">No action items here yet.</div>
+                    <div class="column-empty">No items</div>
                   {/each}
                 </div>
               </article>
@@ -301,34 +305,28 @@
 
 <style>
   .boards-page {
-    padding-bottom: 72px;
+    max-width: none;
+    min-width: 0;
+    padding: 24px 28px 28px;
   }
 
   .boards-header {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
-    gap: 24px;
-    margin-bottom: 24px;
-  }
-
-  .eyebrow {
-    display: block;
-    margin-bottom: 8px;
-    color: var(--text-muted);
-    font: 500 10px/1.2 var(--font-mono);
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
+    gap: 16px;
+    margin-bottom: 16px;
   }
 
   .boards-header h1 {
     margin: 0;
+    font-size: 28px;
   }
 
-  .boards-copy {
-    margin: 8px 0 0;
+  .board-hint {
+    margin: 0 0 16px;
     color: var(--text-muted);
-    font-size: 14px;
+    font-size: 12px;
   }
 
   .new-board-form,
@@ -340,16 +338,30 @@
     gap: 8px;
   }
 
-  .new-board-form {
-    width: min(360px, 100%);
+  details { min-width: 0; }
+  summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: fit-content;
+    margin-left: auto;
+    padding: 7px 10px;
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: 13px;
+    cursor: pointer;
+    list-style: none;
   }
+  summary::-webkit-details-marker { display: none; }
+  summary:hover { background: var(--surface-soft); color: var(--ink); }
+  summary:focus-visible, .board-list-item:focus-visible, .board-title-button:focus-visible, .column-title-button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  .new-board-form, .new-column-form { width: min(400px, 100%); margin-top: 8px; }
 
   .new-board-form :global(input),
   .new-column-form :global(input) {
     min-width: 0;
   }
 
-  .board-welcome,
   .board-error {
     display: flex;
     align-items: center;
@@ -363,13 +375,6 @@
     font-size: 13px;
   }
 
-  .board-welcome {
-    color: var(--ink-strong);
-  }
-
-  .board-welcome span {
-    color: var(--text-muted);
-  }
 
   .board-error {
     background: var(--danger-soft);
@@ -378,37 +383,22 @@
 
   .boards-layout {
     display: grid;
-    grid-template-columns: 220px minmax(0, 1fr);
-    gap: 22px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
     min-width: 0;
   }
 
   .board-list {
-    align-self: start;
-    padding: 14px 10px;
-    background: var(--surface-soft);
-    border: 1px solid var(--hairline-soft);
-    border-radius: var(--radius-card);
-  }
-
-  .board-list-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 8px 10px;
-    color: var(--text-muted);
-    font: 500 10px/1.2 var(--font-mono);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-  }
-
-  .mono {
-    font-family: var(--font-mono);
+    min-width: 0;
+    border-bottom: 1px solid var(--hairline);
   }
 
   .board-list-items {
-    display: grid;
-    gap: 3px;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 8px;
+    scrollbar-width: thin;
   }
 
   .board-list-item {
@@ -416,8 +406,9 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    width: 100%;
-    padding: 9px 8px;
+    flex: 0 0 auto;
+    max-width: 260px;
+    padding: 8px 12px;
     border: 0;
     border-radius: var(--radius-input);
     background: transparent;
@@ -440,6 +431,7 @@
     color: var(--text-muted);
     font: 10px/1.2 var(--font-mono);
   }
+  .board-list-item > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .board-workspace {
     min-width: 0;
@@ -456,7 +448,8 @@
   .board-workspace-header h2 {
     margin: 0;
     color: var(--ink-strong);
-    font: 700 28px/1.2 var(--font-display);
+    font: 400 24px/1.2 var(--font-display);
+    overflow-wrap: anywhere;
   }
 
   .board-workspace-header p {
@@ -483,45 +476,35 @@
     color: var(--text-muted);
   }
 
-  .board-home-link,
   .card-source {
     color: var(--text-muted);
     font-size: 12px;
     text-decoration: none;
   }
 
-  .board-home-link:hover,
   .card-source:hover {
     text-decoration: underline;
     text-underline-offset: 2px;
   }
 
-  .column-toolbar {
-    display: flex;
-    justify-content: flex-end;
-    margin-bottom: 12px;
-  }
-
-  .new-column-form {
-    width: min(320px, 100%);
-  }
-
   .kanban-grid {
     display: flex;
-    align-items: flex-start;
+    align-items: stretch;
     gap: 12px;
     max-width: 100%;
     padding-bottom: 12px;
     overflow-x: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--hairline) transparent;
   }
 
   .kanban-column {
-    flex: 0 0 260px;
-    min-height: 310px;
+    flex: 1 0 220px;
+    min-width: 0;
+    min-height: 260px;
     padding: 12px;
     background: var(--surface-soft);
-    border: 1px solid var(--hairline-soft);
-    border-radius: var(--radius-card);
+    border-radius: 8px;
   }
 
   .column-header {
@@ -537,6 +520,7 @@
     margin: 0;
     color: var(--ink-strong);
     font: 600 14px/1.3 var(--font-body);
+    overflow-wrap: anywhere;
   }
 
   .column-count {
@@ -578,6 +562,7 @@
     color: var(--ink);
     font-size: 13px;
     line-height: 1.45;
+    overflow-wrap: anywhere;
   }
 
   .card-source {
@@ -614,37 +599,12 @@
     text-align: center;
   }
 
-  @media (max-width: 860px) {
-    .boards-header {
-      align-items: stretch;
-      flex-direction: column;
-    }
-
-    .new-board-form {
-      width: min(420px, 100%);
-    }
-
-    .boards-layout {
-      grid-template-columns: 1fr;
-    }
-
-    .board-list-items {
-      display: flex;
-      gap: 4px;
-      max-width: 100%;
-      overflow-x: auto;
-    }
-
-    .board-list-item {
-      flex: 0 0 auto;
-      width: auto;
-      min-width: 130px;
-    }
-  }
-
   @media (max-width: 560px) {
+    .boards-page { padding: 20px 16px; }
+    .boards-header { flex-wrap: wrap; }
+    details[open] { width: 100%; }
     .board-workspace-header {
-      flex-direction: column;
+      flex-wrap: wrap;
     }
 
     .new-column-form {

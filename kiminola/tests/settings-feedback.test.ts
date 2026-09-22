@@ -63,6 +63,24 @@ test("dismissing the discard dialog clears abandoned template and section action
   });
 });
 
+test("template placeholder controls copy the exact token and confirm it", async () => {
+  const copied: string[] = [];
+  const ui = controller("settings", {
+    navigator: { clipboard: { writeText: async (text: string) => { copied.push(text); } } },
+  }, `{
+    copyPlaceholder,
+    state() { return templateStatus; }
+  }`);
+
+  await ui.copyPlaceholder("{transcript}");
+  assert.deepEqual(ui.state(), { message: "{transcript} copied to clipboard.", error: false });
+
+  await ui.copyPlaceholder("{notes}");
+
+  assert.deepEqual(copied, ["{transcript}", "{notes}"]);
+  assert.deepEqual(ui.state(), { message: "{notes} copied to clipboard.", error: false });
+});
+
 test("microphone permission success does not invent an audio-level test", async () => {
   let intervals = 0;
   const ui = controller("onboarding", {
