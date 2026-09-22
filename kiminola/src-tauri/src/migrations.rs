@@ -9,7 +9,9 @@ use std::collections::HashMap;
 pub(crate) async fn run(pool: &SqlitePool) -> Result<(), String> {
     compatible(pool, &sqlx::migrate!("./migrations"))
         .await?
-        .run(pool).await.map_err(|e| e.to_string())
+        .run(pool)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub(crate) async fn compatible(pool: &SqlitePool, source: &Migrator) -> Result<Migrator, String> {

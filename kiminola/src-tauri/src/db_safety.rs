@@ -343,6 +343,7 @@ impl Database {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use sqlx::migrate::{Migration, MigrationType};
@@ -650,15 +651,21 @@ mod tests {
         let sql = MIGRATIONS.iter().next().unwrap().sql.replace("\r\n", "\n");
         let checksum = Sha384::digest(sql.replace('\n', "\r\n").as_bytes()).to_vec();
         sqlx::query("UPDATE _sqlx_migrations SET checksum=? WHERE version=1")
-            .bind(&checksum).execute(&legacy).await.unwrap();
+            .bind(&checksum)
+            .execute(&legacy)
+            .await
+            .unwrap();
         legacy.close().await;
         init_pool(&fixture.path).await.unwrap().close().await;
         let names = list_backups(&fixture.path).unwrap();
         restore_backup(&fixture.path, &names[0]).await.unwrap();
         let restored = init_pool(&fixture.path).await.unwrap();
         assert_eq!(marker(&restored).await, "before upgrade");
-        let stored: Vec<u8> = sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version=1")
-            .fetch_one(&restored).await.unwrap();
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version=1")
+                .fetch_one(&restored)
+                .await
+                .unwrap();
         assert_eq!(stored, checksum);
         restored.close().await;
     }

@@ -6,8 +6,8 @@ mod export;
 mod llm;
 mod loopback;
 mod meeting_presence;
-mod models;
 mod migrations;
+mod models;
 mod recording;
 mod recording_session;
 mod resampler;
@@ -29,7 +29,7 @@ use tauri::{Emitter, Manager};
 
 // The real-process harness opts into this PID file so it can wait for `.setup()`
 // deterministically before sending native window messages.
-fn signal_startup_test_ready() {
+pub(crate) fn signal_startup_test_ready() {
     let Some(path) = std::env::var_os("KIMINOLA_STARTUP_TEST_READY_FILE") else {
         return;
     };
@@ -140,7 +140,7 @@ pub fn run() {
         )
         .setup(|app| {
             recording::setup(app);
-            db::setup(app);
+            let database = db::setup(app);
             if let Err(error) = shortcuts::setup(app) {
                 eprintln!("[shortcuts] startup settings unavailable: {error}");
             }
@@ -153,7 +153,12 @@ pub fn run() {
             if app.state::<ActivationState>().finish_setup() {
                 meeting_presence::show_main_window(app.handle());
             }
-            signal_startup_test_ready();
+            tauri::async_runtime::spawn(async move {
+                match db::ensure_pool(&database).await {
+                    Ok(_) => signal_startup_test_ready(),
+                    Err(error) => eprintln!("[db] warm-up failed: {error}"),
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| match event {

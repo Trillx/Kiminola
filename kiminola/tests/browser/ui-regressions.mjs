@@ -64,6 +64,16 @@ try {
     ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH, headless: true }
     : { channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true });
 
+  // Vite transforms routes lazily. Warm the first route outside the assertions
+  // so a cold hosted runner cannot consume a test's seven-second interaction
+  // budget while compiling the onboarding bundle.
+  const warmContext = await browser.newContext();
+  await warmContext.addInitScript({ path: fileURLToPath(new URL('./fixture.mjs', import.meta.url)) });
+  const warmPage = await warmContext.newPage();
+  await warmPage.goto(origin + '/onboarding');
+  await warmPage.getByRole('button', { name: 'Allow microphone', exact: true }).waitFor({ timeout: 30000 });
+  await warmContext.close();
+
   await runOnboardingProviderTests({ check, open, eventually, origin });
   await runMeetingPresenceTests({ check, open, eventually, origin });
   await runBoardsTests({ check, open, origin });

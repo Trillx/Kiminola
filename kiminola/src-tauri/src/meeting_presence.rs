@@ -923,10 +923,8 @@ fn update_detections(
                 prompt_to_emit = Some(prompt);
                 changed = true;
             }
-        } else if data.prompt.is_some() {
-            if data.hint.take().is_some() {
-                changed = true;
-            }
+        } else if data.prompt.is_some() && data.hint.take().is_some() {
+            changed = true;
         }
     }
 
@@ -1816,16 +1814,15 @@ fn friendly_app_label(process_name: &str, window_titles: &[String]) -> &'static 
         "zoom" | "zoomphone" => "Zoom",
         "teams" | "ms-teams" | "msteams" => "Microsoft Teams",
         "webex" | "webexmta" | "webexhost" => "Webex",
-        "chrome" | "msedge" | "firefox" | "brave" => {
+        "chrome" | "msedge" | "firefox" | "brave"
             if window_titles.iter().any(|title| {
                 let title = title.to_ascii_lowercase();
                 title.contains("google meet") || title.contains("meet.google.com")
-            }) {
-                "Google Meet"
-            } else {
-                "another app"
-            }
+            }) =>
+        {
+            "Google Meet"
         }
+        "chrome" | "msedge" | "firefox" | "brave" => "another app",
         _ => "another app",
     }
 }
@@ -1889,8 +1886,10 @@ fn enumerate_processes() -> Result<HashMap<u32, ProcessInfo>, String> {
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
             .map_err(|e| format!("process snapshot failed: {e}"))?;
-        let mut entry = PROCESSENTRY32W::default();
-        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
         let mut processes = HashMap::new();
         let first = Process32FirstW(snapshot, &mut entry);
         if first.is_ok() {

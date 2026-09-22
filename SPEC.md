@@ -204,12 +204,36 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - **Signing**: SignPath.io OSS Authenticode signing is separate from the Tauri
   updater signing key. The updater public key is committed; its private key and
   password exist only in GitHub Actions secrets and an offline maintainer
-  backup.
+  backup. Tag jobs submit the release executable and final installer to SignPath,
+  require a valid Authenticode chain, then generate the updater signature over the
+  final Authenticode-signed installer bytes. Final verification downloads the
+  exact assets and re-checks both signature systems.
 - **Auto-update**: Tauri built-in updater + GitHub Releases JSON manifest. Tag
-  pushes create a draft, build x64 and ARM64 assets in parallel, then generate
-  `latest.json` in a serialized validation job before manual publication.
+  pushes first validate the tag and synchronized application versions, then
+  use a GitHub-hosted gate to dispatch the physical x64 + ARM64 checks in a
+  separate workflow and verify success for the exact tag commit before creating a
+  draft. This keeps self-hosted jobs outside SignPath's trusted-build dependency
+  graph. Native release jobs bundle the already architecture-checked executable,
+  pass complete portable archives and SHA-256 provenance through short-lived
+  workflow artifacts, and keep repository-write access in minimal publishing
+  jobs. Signed installers use the canonical
+  `Kimi.Nola_<version>_<arch>-setup.exe` asset name. Read-only final verification
+  checks downloaded hashes, installer and extracted portable-executable
+  Authenticode, updater signatures, and the actual PE architecture of every
+  portable executable and native DLL. It generates `latest.json`; a publishing job uploads and
+  downloads it again for byte-for-byte and exact-asset verification before manual
+  publication.
 - **Channels**: GitHub Releases primary; winget secondary; Microsoft Store post-MVP.
-- **CI**: GitHub Actions — x64 native on `windows-latest`; ARM64 cross-compiled to `aarch64-pc-windows-msvc` from x64 runner. Fallback: manual/self-hosted ARM64 builds on Snapdragon X Elite.
+- **CI**: GitHub Actions uses explicit Windows runners: x64 on `windows-2025`
+  and native ARM64 on `windows-11-arm`. Every pull request and `main` push runs
+  frontend checks and browser regressions once, Rust formatting/clippy/full
+  tests on x64, security audits, and native x64 + ARM64 unsigned package/startup
+  validation. Version tags also run both unsigned package jobs. Unsigned
+  installers and complete portable archives (the executable
+  plus all four native runtime DLLs) are retained for seven days; updater signing
+  is available only to the tag release workflow. Production npm dependencies
+  are audited at moderate severity or higher in addition to Cargo and dependency
+  review gates.
 
 ## 10. Privacy & telemetry
 
@@ -220,10 +244,42 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 ## 11. Hardware targets & testing
 
 - **Targets**: Windows x64 (`x86_64-pc-windows-msvc`) and ARM64 (`aarch64-pc-windows-msvc`).
-- **Validation**: Snapdragon X Elite Copilot+ PC (32 GB) for ARM64; GitHub Actions for x64 CI.
+- **Validation**: GitHub-hosted x64 and ARM64 runners cover native compilation,
+  installer creation, PE-architecture checks, and executable startup on every
+  pull request and `main` push. Dedicated self-hosted x64 and Snapdragon X
+  Elite ARM64 runners, labeled `kiminola-hardware`, run nightly/manual physical
+  microphone capture of a known 440 Hz stimulus on an explicitly provisioned
+  non-virtual input device, requiring a material increase over a matched
+  stimulus-off baseline while the source remains live, WASAPI loopback, deterministic
+  installed-model speech transcription, installer, and
+  previous-version preservation checks, and the same workflow is a required
+  pre-draft tag-release gate. A missing runner configuration fails visibly rather
+  than producing a green no-op. The update baseline is the highest updater-signed
+  stable release strictly older than the candidate; explicit baselines must meet
+  the same rule. Routine and release-correlated hardware runs use distinct
+  concurrency keys so a scheduled run cannot replace a pending release gate;
+  dedicated single-job runner services serialize destructive work on each
+  physical machine. Hardware validation verifies native OS/process/LLVM
+  architecture, backs up the pre-existing application directory, complete
+  persistent user root, installer registry keys, and desktop and Start Menu
+  shortcuts under a same-volume persistent recovery root, and records each
+  destructive transition in an atomic journal, including registry export before
+  live-key removal. A later run recovers or halts on that journal immediately after
+  checkout and before tool setup or fixture access, and recovery data is deleted
+  only after complete restoration. The workflow also authenticates the previous
+  installer, verifies the installed executable and native-DLL architecture, and
+  waits for a semantically complete legacy migration history before seeding upgrade
+  data. The pre-publication gate upgrades by executing the
+  verified candidate installer directly because the app's stable feed excludes
+  drafts; in-app updater discovery and installation are smoke-tested on both
+  architectures immediately after publication.
 - **Spike results**: native ARM64 WASAPI loopback delivered non-silent packets; sherpa-onnx v1.13.5 Nemotron INT8 ran at 0.14 weighted RTF, 865 MiB peak working set, 2.6% normalized WER.
 - **Transcript regression matrix**: remote-only playback is `Others`; local-only mic speech is `You`; double-talk retains both lanes; speaker bleed does not create a duplicate `You` line; short acknowledgements are not over-suppressed; and stop waits for finalized text with monotonic audio-relative timing.
 - **Update regression**: on both x64 and ARM64, install a prior stable build,
-  preserve a meeting/database marker and the downloaded model, accept a signed
-  update, and verify the new app launches once with both data locations intact.
-  A green CI build is not runtime proof of updater safety.
+  insert a complete semantic fixture into its untouched database, preserve the
+  downloaded model, install and launch the candidate so it applies any pending
+  current migrations, and verify complete migration history plus the exact meeting,
+  notes, transcript, template, setting, recovery draft, library destination, and
+  model hashes remain intact. When no migration is pending, the same gate verifies
+  the unchanged history and data. After publication, also accept the signed update through the app
+  on both architectures. A green CI build is not runtime proof of updater safety.

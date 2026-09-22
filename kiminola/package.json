@@ -10,6 +10,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "test:ui": "node tests/browser/ui-regressions.mjs",
+    "test:browser": "npm run test:ui && node tests/window-resize.browser.mjs && node tests/sidebar-tree.browser.mjs",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri"
   },

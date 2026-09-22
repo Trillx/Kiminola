@@ -90,7 +90,12 @@ function Get-ExpectedArchiveHash {
 }
 
 function Download-NativeArchive {
-    if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
+    $tarPath = Join-Path $env:SystemRoot 'System32\tar.exe'
+    if (-not (Test-Path -LiteralPath $tarPath -PathType Leaf)) {
+        $tarCommand = Get-Command tar.exe -ErrorAction SilentlyContinue
+        $tarPath = if ($null -ne $tarCommand) { $tarCommand.Source } else { $null }
+    }
+    if ([string]::IsNullOrWhiteSpace($tarPath)) {
         throw 'tar.exe is required to extract the sherpa-onnx release archive.'
     }
 
@@ -110,7 +115,9 @@ function Download-NativeArchive {
     }
 
     Write-Host "Verified $assetName ($actualHash)"
-    & tar.exe -xjf $archivePath -C $tauriRoot
+    # Prefer Windows' native bsdtar. An MSYS tar earlier on PATH interprets
+    # drive-letter paths as remote host syntax ("Cannot connect to C:").
+    & $tarPath -xjf $archivePath -C $tauriRoot
     if ($LASTEXITCODE -ne 0) {
         throw "tar.exe failed while extracting $assetName (exit code $LASTEXITCODE)."
     }
@@ -150,6 +157,10 @@ foreach ($runtimeName in $runtimeNames) {
         throw "The extracted sherpa-onnx package is missing $runtimeName."
     }
 }
+
+# Native test executables load these DLLs before Cargo can copy them beside
+# every generated harness, so expose the selected architecture explicitly.
+Add-BuildPath -Path $libDir
 
 # tauri.conf.json intentionally stages these four runtime DLLs from target/release
 # so cross-target bundles receive the DLLs for the selected architecture.

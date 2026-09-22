@@ -1137,8 +1137,10 @@ mod tests {
             if tag == b"data" {
                 let data = &bytes[pos + 8..(pos + 8 + size).min(bytes.len())];
                 return data
-                    .chunks_exact(2)
-                    .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / i16::MAX as f32)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|bytes| i16::from_le_bytes(*bytes) as f32 / i16::MAX as f32)
                     .collect();
             }
             pos += 8 + size + (size % 2);
