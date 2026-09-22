@@ -21,6 +21,8 @@
     type TranscriptLine,
   } from "$lib/tauri";
   import { renderMarkdown } from "$lib/markdown";
+  import { extractActionItems } from "$lib/action-items";
+  import BoardQuickAdd from "$lib/components/BoardQuickAdd.svelte";
   import ProviderConfigForm from "$lib/components/ProviderConfigForm.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -582,6 +584,7 @@
                   <a class="manage-templates" href={settingsSectionHref("templates")}>Manage templates</a>
                 </div>
                 <div class="tool-actions">
+                  <BoardQuickAdd meetingId={meeting.id} actionItems={extractActionItems(enhancedMd)} />
                   <Button
                     variant="outline"
                     size="sm"

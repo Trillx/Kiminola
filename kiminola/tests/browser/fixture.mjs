@@ -10,6 +10,33 @@
   const presence = { enabled: false, paused: false, start_with_windows: false, mode: 'off', hint: null, prompt: null };
   const windowLabel = new URLSearchParams(location.search).get('window') === 'meeting-prompt' ? 'meeting-prompt' : 'main';
   const drafts = new Map();
+  const defaultBoards = [{
+    id: 1,
+    name: "To-Do's",
+    created_at: '2026-09-21T15:00:00Z',
+    columns: [
+      { id: 1, name: 'Backlog', position: 0, cards: [] },
+      { id: 2, name: 'To Do', position: 1, cards: [] },
+      { id: 3, name: 'Working', position: 2, cards: [] },
+      { id: 4, name: 'Update', position: 3, cards: [] },
+      { id: 5, name: 'Done', position: 4, cards: [] },
+    ],
+  }];
+  const storedBoards = localStorage.getItem('kiminola-test-boards');
+  const boards = storedBoards ? JSON.parse(storedBoards) : defaultBoards;
+  const persistBoards = () => localStorage.setItem('kiminola-test-boards', JSON.stringify(boards));
+  let nextBoardId = Math.max(0, ...boards.map(board => board.id)) + 1;
+  let nextColumnId = Math.max(0, ...boards.flatMap(board => board.columns.map(column => column.id))) + 1;
+  let nextCardId = Math.max(0, ...boards.flatMap(board => board.columns.flatMap(column => column.cards.map(card => card.id)))) + 1;
+  let boardListFirstRead = localStorage.getItem('kiminola-test-boards-read') !== '1';
+  const boardSnapshot = () => {
+    const createdDefault = boardListFirstRead;
+    boardListFirstRead = false;
+    localStorage.setItem('kiminola-test-boards-read', '1');
+    return { boards: structuredClone(boards), created_default: createdDefault };
+  };
+  const boardById = id => boards.find(board => board.id === id);
+  const columnById = id => boards.flatMap(board => board.columns).find(column => column.id === id);
   function createDraft() {
     const id = nextDraftId++;
     drafts.set(id, { id, title: 'Synthetic meeting notes', created_at: '2026-09-21T15:00:00Z', updated_at: '2026-09-21T15:00:00Z', raw_markdown: '', meeting_id: null, recovery_duration_seconds: 0, recovery_location: null, recovery_transcript: [] });
@@ -97,6 +124,55 @@
         case 'jot_notes_from_meeting_prompt': claimPrompt(args.promptId, cmd); return createDraft();
         case 'start_recording_from_meeting_prompt':
         case 'dismiss_meeting_prompt': claimPrompt(args.promptId, cmd); return;
+        case 'list_boards': return boardSnapshot();
+        case 'create_board': {
+          const id = nextBoardId++;
+          boards.push({ id, name: args.name, created_at: '2026-09-21T15:00:00Z', columns: [{ id: nextColumnId++, name: 'To Do', position: 0, cards: [] }] });
+          persistBoards();
+          return id;
+        }
+        case 'rename_board': {
+          const board = boardById(args.boardId);
+          if (!board) throw new Error('Fixture: board not found');
+          board.name = args.name;
+          persistBoards();
+          return;
+        }
+        case 'create_board_column': {
+          const board = boardById(args.boardId);
+          if (!board) throw new Error('Fixture: board not found');
+          board.columns.push({ id: nextColumnId++, name: args.name, position: board.columns.length, cards: [] });
+          persistBoards();
+          return board.columns.at(-1).id;
+        }
+        case 'rename_board_column': {
+          const column = columnById(args.columnId);
+          if (!column) throw new Error('Fixture: column not found');
+          column.name = args.name;
+          persistBoards();
+          return;
+        }
+        case 'add_board_card': {
+          const board = boardById(args.boardId);
+          const column = board?.columns.find(item => item.id === args.columnId);
+          if (!column) throw new Error('Fixture: column does not belong to board');
+          const meeting = meetings.find(item => item.id === args.meetingId);
+          const card = { id: nextCardId++, title: args.title, position: column.cards.length, meeting_id: args.meetingId ?? null, meeting_title: meeting?.title ?? null };
+          column.cards.push(card);
+          persistBoards();
+          return structuredClone(card);
+        }
+        case 'move_board_card': {
+          const target = columnById(args.columnId);
+          const source = boards.flatMap(board => board.columns).find(column => column.cards.some(card => card.id === args.cardId));
+          const index = source?.cards.findIndex(card => card.id === args.cardId) ?? -1;
+          if (!source || !target || index < 0) throw new Error('Fixture: board card move failed');
+          const [card] = source.cards.splice(index, 1);
+          card.position = target.cards.length;
+          target.cards.push(card);
+          persistBoards();
+          return;
+        }
         case 'list_meetings': return structuredClone(meetings);
         case 'list_note_drafts': return [...drafts.values()].map(({ id, title, created_at, updated_at }) => ({ id, title, created_at, updated_at }));
         case 'list_library_tree': return [{ kind: 'space', id: 1, name: 'Personal', children: window.audit.treeCount > 2 ? Array.from({ length: window.audit.treeCount }, (_, i) => ({ ...summary(i + 1, `Meeting ${i + 1}`), kind: 'meeting', children: [] })) : meetings.map(m => ({ ...m, kind: 'meeting', children: [] })) }];
@@ -104,7 +180,7 @@
           if (drafts.has(args.id)) return structuredClone(drafts.get(args.id));
           if (args.id !== 100) throw new Error('Fixture: note draft not found');
           return { id: 100, title: 'Recovery fixture', created_at: '2026-09-21T15:00:00Z', updated_at: '2026-09-21T15:00:00Z', raw_markdown: 'Recovered notes', meeting_id: null, recovery_duration_seconds: 60, recovery_location: null, recovery_transcript: Array.from({ length: 3 }, (_, i) => ({ channel: 'you', text: `Recovered sentence ${i + 1}`, start_ms: i * 2000, end_ms: i * 2000 + 1000 })) };
-        case 'get_meeting': return { ...meetings.find(m => m.id === args.id), notepad: 'Sample meeting notes.', enhanced_markdown: '## Summary\n\nFixture summary.', transcript: structuredClone(transcript) };
+        case 'get_meeting': return { ...meetings.find(m => m.id === args.id), notepad: 'Sample meeting notes.', enhanced_markdown: '## Summary\n\nFixture summary.\n\n## Action items\n\n- Follow up with the team.', transcript: structuredClone(transcript) };
         case 'get_llm_config': if (window.audit.failConfig) throw new Error('Fixture: config database unavailable'); return structuredClone(config);
         case 'set_llm_config':
           config = { ...args.config, has_api_key: savedIdentities.has(JSON.stringify([args.config.kind, args.config.base_url])) };

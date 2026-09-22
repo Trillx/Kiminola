@@ -141,6 +141,71 @@ export type LibraryNode =
       duration_seconds: number;
       children: LibraryNode[];
     };
+export interface BoardCard {
+  id: number;
+  title: string;
+  position: number;
+  meeting_id: number | null;
+  meeting_title: string | null;
+}
+
+export interface BoardColumn {
+  id: number;
+  name: string;
+  position: number;
+  cards: BoardCard[];
+}
+
+export interface Board {
+  id: number;
+  name: string;
+  created_at: string;
+  columns: BoardColumn[];
+}
+
+export interface BoardsSnapshot {
+  boards: Board[];
+  created_default: boolean;
+}
+
+export async function listBoards(): Promise<BoardsSnapshot> {
+  return invoke("list_boards");
+}
+
+export async function createBoard(name: string): Promise<number> {
+  return invoke("create_board", { name });
+}
+
+export async function renameBoard(boardId: number, name: string): Promise<void> {
+  await invoke("rename_board", { boardId, name });
+}
+
+export async function createBoardColumn(boardId: number, name: string): Promise<number> {
+  return invoke("create_board_column", { boardId, name });
+}
+
+export async function renameBoardColumn(columnId: number, name: string): Promise<void> {
+  await invoke("rename_board_column", { columnId, name });
+}
+
+export async function addBoardCard(input: {
+  boardId: number;
+  columnId: number;
+  title: string;
+  meetingId?: number | null;
+}): Promise<BoardCard> {
+  return invoke("add_board_card", {
+    boardId: input.boardId,
+    columnId: input.columnId,
+    title: input.title,
+    meetingId: input.meetingId ?? null,
+  });
+}
+
+export async function moveBoardCard(cardId: number, columnId: number): Promise<void> {
+  await invoke("move_board_card", { cardId, columnId });
+}
+
 
 export async function saveMeeting(input: {
   title: string;

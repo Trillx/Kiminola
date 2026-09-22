@@ -12,10 +12,10 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 ## 2. Core loop
 
-1. **Idle / library** — sidebar shows Spaces tree and recent meetings; "New meeting" starts capture.
+1. **Idle / library** — sidebar shows Spaces tree, Boards, and recent meetings; "New meeting" starts capture.
 2. **Recording** — the full screen is a notes-first sketch notepad. A subtle **Live transcript** pill sits bottom-left; clicking it opens a floating square that pushes the notepad right. Mic and loopback channels transcribe in parallel, labeled **You** / **Others**. Concurrent partial utterances remain independent; finalized cross-source copies caused by laptop-speaker bleed are conservatively reconciled in favor of the clean loopback result.
 3. **Stop** — "Stop meeting" ends capture. Post-meeting defaults to the **My notes** tab with pills: **My notes → Enhance Notes → Transcript**.
-4. **Enhance (optional)** — user clicks **Enhance Notes**, picks a template, and gets a read-only AI artifact generated from their raw notes + transcript. Raw notes are never overwritten; re-enhance overwrites the AI artifact.
+4. **Enhance (optional)** — user clicks **Enhance Notes**, picks a template, and gets a read-only AI artifact generated from their raw notes + transcript. Raw notes are never overwritten; re-enhance overwrites the AI artifact. Action items in enhanced notes can be copied to a selected Board column.
 
 ## 3. Stack
 
@@ -34,12 +34,12 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 ### 4.1 Frontend (Svelte + TypeScript)
 
-- Three screens: **Library/Idle**, **Recording**, **Post-meeting**.
+- Four primary surfaces: **Library/Idle**, **Recording**, **Post-meeting**, and **Boards**.
 - Fully collapsible sidebar via floating edge button; state persists in `localStorage`.
 - Top bar: "New meeting" primary action + light/dark theme toggle.
 - Recording view: full-screen notepad; live transcript pill bottom-left; stop button reads "Stop meeting".
 - Post-meeting view: pill tabs **My notes** / **Enhance Notes** / **Transcript**. Default tab: **My notes**.
-- Theme: light/dark; dark mode uses warm amber accent on deep charcoal canvas.
+- Boards view: user-created Boards with customizable ordered columns and movable action-item cards.
 - Updates: after the main app launches, Kimi Nola performs one non-blocking
   check against the published stable GitHub Release feed. A visible update
   notice offers release details, but download and installation always require
@@ -52,7 +52,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - **Audio pipeline**: WASAPI process-tree loopback when a meeting prompt supplies a PID, with classic default-output fallback, plus cpal mic → independent resampling → 16 kHz mono → sherpa-onnx streaming ASR per lane. The lanes are never mixed before ASR.
 - **Transcript events**: each lane emits stable utterance IDs, monotonically increasing revisions, partial/final state, and audio-relative segment timing. On stop, capture queues drain, both ASR lanes flush, and the backend returns an authoritative final snapshot before persistence.
 - **Echo reconciliation**: finalized mic/system segments are compared only when their audio windows overlap. High-confidence text matches retain the system (`Others`) copy; short acknowledgements and non-overlapping repetition are never automatically suppressed. This is a local transcript correction, not speaker diarization or audio retention.
-- **Persistence**: sqlx + SQLite; tables for meetings, timestamped transcript segments, notes, spaces, templates, settings. Each Meeting has exactly one direct container (`space_id` or `parent_meeting_id`), and recursive location paths are computed for library views and exports.
+- **Persistence**: sqlx + SQLite; tables for meetings, timestamped transcript segments, notes, spaces, templates, settings, boards, board columns, and board cards. Each Meeting has exactly one direct container (`space_id` or `parent_meeting_id`), and recursive location paths are computed for library views and exports.
 - **LLM enhancement**: ChatProvider trait with streaming SSE; sends transcript text + raw notes + template prompt to the configured cloud provider.
 - **Model manager**: downloads ASR model on first run from Hugging Face; verifies SHA-256; stores in `%LOCALAPPDATA%\Kiminola\models`.
 - **Updater**: Tauri updater plugin with one embedded public key and the stable
@@ -64,7 +64,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 ## 5. UI/UX decisions
 
-- Sidebar navigation: **Home** only; Spaces is a recursive tree. Spaces may contain nested Spaces and Meetings, and Meetings may contain child Meetings at arbitrary depth. Context menus and drag-and-drop use the same validated move operation; sibling ordering is not user-controlled in this pass.
+- Sidebar navigation: **Home** and **Boards**; Spaces is a recursive tree. Spaces may contain nested Spaces and Meetings, and Meetings may contain child Meetings at arbitrary depth. Context menus and drag-and-drop use the same validated move operation; sibling ordering is not user-controlled in this pass.
 - At compact widths (760 CSS pixels or less), navigation opens as a modal drawer with keyboard focus containment, Escape dismissal, and focus restoration. Desktop collapse preference remains independent. Long libraries scroll within the navigation area while Settings stays visible.
 - Space and parent-Meeting branches expand independently, with consistent indentation and hairline connectors. Open/closed state persists locally; navigating to a Meeting reveals its ancestors. Disclosure arrows point right when closed and down when open. Branch height and arrows transition over 180 ms, with no motion when reduced motion is enabled. Enter/Space activate the focused control; Left/Right close/open branches and move between parent and child controls.
 - New meetings inherit an explicit Space or Meeting destination from the action that started them. Global New meeting and the shortcut use the last explicit destination, falling back to Personal. The destination is captured when recording starts.
@@ -96,6 +96,9 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   - `templates` — id, name, prompt, is_builtin
   - `settings` — key, value
   - `search_index` — FTS5 virtual table over meeting titles, notes, transcript segments
+  - `boards` — id, name, created_at
+  - `board_columns` — id, board_id, name, position
+  - `board_cards` — id, column_id, nullable meeting_id, title, position, created_at
 - **Export**: Markdown rendered from DB with YAML frontmatter (title, date, space, duration).
 
 ## 7. Model management
@@ -115,6 +118,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Summary templates: general default + built-in library (1:1, hiring, weekly team, customer discovery, VC pitch) + user-created custom templates
 - Inline transcript editing
 - Configurable global hotkey
+- User-created Boards with customizable columns and action-item cards linked back to Meetings
 - Minimal first-run wizard
 
 **OUT:**

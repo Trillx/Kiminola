@@ -1,4 +1,5 @@
 mod asr;
+mod boards;
 mod db;
 mod db_safety;
 mod export;
@@ -203,6 +204,13 @@ pub fn run() {
             db::create_space,
             db::rename_space,
             db::move_library_node,
+            boards::list_boards,
+            boards::create_board,
+            boards::rename_board,
+            boards::create_board_column,
+            boards::rename_board_column,
+            boards::add_board_card,
+            boards::move_board_card,
             db::update_notes,
             db::update_segment_text,
             db::delete_segment,
