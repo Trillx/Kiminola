@@ -1914,7 +1914,7 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
   box-shadow: inset 0 0 0 1px var(--hairline-soft);
 }
 
-.settings-row [data-slot="switch"][data-checked] {
+.settings-row [data-slot="switch"][data-state="checked"] {
   background: var(--ink);
   border-color: var(--ink);
 }

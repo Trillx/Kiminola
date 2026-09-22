@@ -252,16 +252,18 @@ try {
     await detection.click();
     await eventually(() => detection.getAttribute('aria-checked'), value => value === 'true', 'Detection switch checked state');
     await eventually(() => visualState(detection), value =>
-      value.thumbTranslate !== detectionOff.thumbTranslate,
-    'Detection switch thumb visibly moves');
+      value.background !== detectionOff.background
+        && value.thumbTranslate !== detectionOff.thumbTranslate,
+    'Detection switch track and thumb visibly change');
     await page.getByRole('button', { name: 'Pause detection', exact: true }).waitFor();
 
     const startupOff = await visualState(startup);
     await startup.click();
     await eventually(() => startup.getAttribute('aria-checked'), value => value === 'true', 'Startup switch checked state');
     await eventually(() => visualState(startup), value =>
-      value.thumbTranslate !== startupOff.thumbTranslate,
-    'Startup switch thumb visibly moves');
+      value.background !== startupOff.background
+        && value.thumbTranslate !== startupOff.thumbTranslate,
+    'Startup switch track and thumb visibly change');
 
     const writes = await page.evaluate(() => window.audit.calls.filter(call => call.cmd.startsWith('set_meeting_presence_')));
     assert.deepEqual(writes, [
