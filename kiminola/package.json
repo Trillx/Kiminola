@@ -24,7 +24,7 @@
     "clsx": "^2.1.1",
     "isomorphic-dompurify": "^3.19.0",
     "marked": "^18.0.9",
-    "tailwind-merge": "^3.6.0"
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
     "@internationalized/date": "^3.12.3",
