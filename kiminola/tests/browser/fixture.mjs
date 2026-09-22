@@ -22,6 +22,12 @@
     if (window.audit.failPresenceAction === cmd) throw new Error('Fixture: meeting prompt action failed');
     presence.prompt = null;
     presence.hint = null;
+    if (window.audit.consumeAndFailPresenceAction === cmd) {
+      const message = 'The detected app is no longer available. Please start a new recording manually.';
+      window.audit.emit('meeting-presence:error', { prompt_id: promptId, message });
+      window.audit.emit('meeting-presence:state', structuredClone(presence));
+      throw new Error(message);
+    }
     window.audit.emit('meeting-presence:state', structuredClone(presence));
   }
   let config = { kind: 'open_ai', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', has_api_key: true };
@@ -33,7 +39,7 @@
   window.audit = {
     calls: [], failConfig: false, failShortcut: false, failSegment: false, failSearch: false,
     slowSearch: false, modelDelay: 0, treeCount: 2, failRecovery: false, recovery: null,
-    failPresenceAction: null, failPresenceState: false,
+    failPresenceAction: null, consumeAndFailPresenceAction: null, failPresenceState: false,
     windows: { main: { visible: windowLabel === 'main', focused: false }, 'meeting-prompt': { visible: windowLabel === 'meeting-prompt', focused: false } },
     hasListener(event) { return [...listeners.values()].some(item => item.event === event); },
     seedNoteDraft(draft) { drafts.set(draft.id, structuredClone(draft)); },

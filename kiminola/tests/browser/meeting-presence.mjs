@@ -23,7 +23,7 @@ const captureCalls = page => page.evaluate(() => window.audit.calls.filter(c => 
 ].includes(c.cmd)));
 
 async function ready(page) {
-  await page.waitForFunction(() => ['prompt', 'state', 'action'].every(name =>
+  await page.waitForFunction(() => ['prompt', 'state', 'error', 'action'].every(name =>
     window.audit?.hasListener(`meeting-presence:${name}`)));
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
 }
@@ -235,6 +235,37 @@ export async function runMeetingPresenceTests({ check, open, eventually, origin 
         await assertConsumed(page, 'presence-1');
       });
     }
+
+    await check(`MP ${surface}: consumed start validation failure remains visible`, async page => {
+      await openSurface(page);
+      await publish(page);
+      await page.evaluate(cmd => window.audit.consumeAndFailPresenceAction = cmd, commands.start);
+      await card(page).getByRole('button', { name: buttons.start, exact: true }).click();
+      await card(page).locator('.prompt-error').waitFor();
+      assert.match(
+        await card(page).locator('.prompt-error').innerText(),
+        /start a new recording manually/i,
+      );
+      assert.equal(await page.evaluate(async () =>
+        (await window.__TAURI_INTERNALS__.invoke('get_meeting_presence_state')).prompt), null);
+      assert.equal(new URL(page.url()).pathname, '/');
+      await assertNotCapturing(page);
+      if (surface === 'overlay') {
+        assert.equal(await page.evaluate(() => window.audit.windows['meeting-prompt'].visible), true);
+      }
+    });
+
+    await check(`MP ${surface}: stale validation failure cannot annotate a replacement prompt`, async page => {
+      await openSurface(page);
+      await publish(page, makePrompt('replacement', 'Replacement call'));
+      await page.evaluate(() => window.audit.emit('meeting-presence:error', {
+        prompt_id: 'consumed-prompt',
+        message: 'The detected app is no longer available. Please start a new recording manually.',
+      }));
+      assert.equal(await card(page).locator('.prompt-kicker').textContent(), 'Replacement call');
+      assert.equal(await card(page).locator('.prompt-error').count(), 0);
+      await assertNotCapturing(page);
+    });
 
     for (const failRefresh of [false, true]) {
       await check(`MP ${surface}: failed action's late ${failRefresh ? 'failed' : 'stale'} refresh cannot discard a newer prompt`, async page => {

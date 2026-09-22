@@ -20,6 +20,7 @@ const START_WITH_WINDOWS_KEY: &str = "meeting_presence_start_with_windows";
 const EVENT_STATE: &str = "meeting-presence:state";
 const EVENT_PROMPT: &str = "meeting-presence:prompt";
 const EVENT_ACTION: &str = "meeting-presence:action";
+const EVENT_ERROR: &str = "meeting-presence:error";
 #[cfg(desktop)]
 const EVENT_RECORDING_QUIT_BLOCKED: &str = "recording:quit-blocked";
 #[cfg(desktop)]
@@ -481,28 +482,64 @@ fn start_recording_from_prompt(
     prompt_id: &str,
 ) -> Result<(), String> {
     let prompt = state.claim_prompt(prompt_id)?;
+    let target = match validated_capture_target(&prompt, process_instance_is_current) {
+        Ok(target) => target,
+        Err(error) => {
+            // The prompt has been consumed, so surface the returned explanation
+            // independently of the card that represented it.
+            #[cfg(desktop)]
+            show_main_window(app);
+            let _ = app.emit(
+                EVENT_ERROR,
+                serde_json::json!({ "prompt_id": prompt.id, "message": error }),
+            );
+            emit_state(app, state);
+            return Err(error);
+        }
+    };
     emit_state(app, state);
-    let started_at = prompt
-        .process_started_at
-        .filter(|&started_at| process_instance_is_current(prompt.process_id, started_at))
-        .ok_or_else(|| {
-            "The detected app is no longer available. Please start a new recording manually."
-                .to_string()
-        })?;
-    crate::recording::queue_process_loopback_target(app, prompt.process_id, started_at);
+    if let Some((process_id, started_at)) = target {
+        crate::recording::queue_process_loopback_target(app, process_id, started_at);
+    } else {
+        crate::recording::clear_process_loopback_target(app);
+    }
     #[cfg(desktop)]
     {
-        if let Err(error) =
-            crate::window_layout::apply(app, prompt.window_process_id.unwrap_or(prompt.process_id))
-        {
-            // Window arrangement is a convenience around the explicit start
-            // action; a platform window quirk must never block recording.
-            eprintln!("[window-layout] companion layout unavailable: {error}");
+        if target.is_some() {
+            if let Err(error) = crate::window_layout::apply(
+                app,
+                prompt.window_process_id.unwrap_or(prompt.process_id),
+            ) {
+                // Window arrangement is a convenience around the explicit start
+                // action; a platform window quirk must never block recording.
+                eprintln!("[window-layout] companion layout unavailable: {error}");
+                show_main_window(app);
+            }
+        } else {
+            // An unreadable identity cannot safely select or arrange a PID.
             show_main_window(app);
         }
     }
     emit_state(app, state);
     Ok(())
+}
+
+fn validated_capture_target(
+    prompt: &PendingPrompt,
+    is_current: impl FnOnce(u32, u64) -> bool,
+) -> Result<Option<(u32, u64)>, String> {
+    let Some(started_at) = prompt.process_started_at else {
+        // If Windows denied process-query access when the prompt was created,
+        // retain the useful advisory prompt but use the safe default-output path.
+        return Ok(None);
+    };
+    if !is_current(prompt.process_id, started_at) {
+        return Err(
+            "The detected app is no longer available. Please start a new recording manually."
+                .to_string(),
+        );
+    }
+    Ok(Some((prompt.process_id, started_at)))
 }
 
 #[tauri::command]
@@ -719,11 +756,37 @@ fn update_detections(
     {
         let mut data = state.inner.data.lock().unwrap();
         data.sessions.retain(|process_id, session| {
-            live_process_instances.get(process_id).is_some_and(|current| {
-                // An unreadable creation time is unknown, not a new process.
-                !matches!((session.process_started_at, *current), (Some(old), Some(new)) if old != new)
-            })
+            live_process_instances
+                .get(process_id)
+                .is_some_and(|current| {
+                    match (session.process_started_at, *current) {
+                        (Some(old), Some(new)) if old != new => false,
+                        (None, Some(new)) => {
+                            // A later readable creation time establishes the identity
+                            // that future polls must compare before preserving state.
+                            session.process_started_at = Some(new);
+                            changed = true;
+                            true
+                        }
+                        // An unreadable current creation time is unknown, not proof
+                        // that a previously identified process was replaced.
+                        _ => true,
+                    }
+                })
         });
+
+        if let Some(prompt) = data.prompt.as_mut() {
+            if prompt.process_started_at.is_none() {
+                if let Some(started_at) = live_process_instances
+                    .get(&prompt.process_id)
+                    .copied()
+                    .flatten()
+                {
+                    prompt.process_started_at = Some(started_at);
+                    changed = true;
+                }
+            }
+        }
 
         for (process_id, session) in data.sessions.iter_mut() {
             let active = active_audio_process_ids.contains(process_id);
@@ -1409,14 +1472,20 @@ fn classify_windows(
         let own_audio = lineage
             .iter()
             .any(|id| *id == current_pid || is_kiminola_process(&processes[id].name));
-        if !own_audio
-            && (lineage.is_empty() || lineage.iter().any(|id| processes[id].identity.is_none()))
-        {
-            // Missing process metadata can change family attribution. Do not
-            // interpret the family's absence as a confirmed episode ending.
-            audio_scan_complete = false;
-        }
-        if let Some(detection) = resolve_app(pid, &processes, &windows, current_pid) {
+        let detection = resolve_app(pid, &processes, &windows, current_pid);
+        if let Some(detection) = detection {
+            let attributed_lineage = lineage
+                .iter()
+                .position(|id| *id == detection.process_id)
+                .map(|root_index| &lineage[..=root_index]);
+            if !own_audio
+                && attributed_lineage
+                    .is_none_or(|ids| ids.iter().any(|id| processes[id].identity.is_none()))
+            {
+                // Only ancestry required to reach the attributed family affects
+                // completeness. An unreadable launcher above the root does not.
+                audio_scan_complete = false;
+            }
             family_audio
                 .entry(detection.process_id)
                 .or_default()
@@ -1425,6 +1494,12 @@ fn classify_windows(
             if detection.targeted || detection.window_process_id.is_some() {
                 detections.push(detection);
             }
+        } else if !own_audio
+            && (lineage.is_empty() || lineage.iter().any(|id| processes[id].identity.is_none()))
+        {
+            // Missing process metadata may explain failed attribution. Do not
+            // interpret the family's absence as confirmed episode inactivity.
+            audio_scan_complete = false;
         }
     }
     // A call window on an active helper's branch is more specific than the
@@ -2160,6 +2235,49 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_launcher_does_not_make_a_resolved_app_scan_incomplete() {
+        let processes = HashMap::from([
+            (
+                1,
+                ProcessInfo {
+                    name: "explorer.exe".into(),
+                    parent_id: 0,
+                    identity: None,
+                },
+            ),
+            (
+                10,
+                ProcessInfo {
+                    name: "call-app.exe".into(),
+                    parent_id: 1,
+                    identity: Some(super::ProcessIdentity {
+                        executable_path: "C:/Fixture/call-app.exe".into(),
+                        started_at: 1,
+                    }),
+                },
+            ),
+        ]);
+        let snapshot = classify_windows(
+            processes,
+            HashMap::from([(10, vec!["Call".into()])]),
+            HashMap::from([(
+                10,
+                super::AudioActivity {
+                    input: true,
+                    output: true,
+                },
+            )]),
+            999,
+        );
+
+        assert_eq!(snapshot.detections.len(), 1);
+        assert!(
+            snapshot.audio_scan_complete,
+            "identity outside the attributed app family must not stall every onset counter"
+        );
+    }
+
+    #[test]
     #[cfg(target_os = "windows")]
     fn process_target_validation_checks_creation_time() {
         let pid = std::process::id();
@@ -2216,6 +2334,71 @@ mod tests {
                 "suppression must not transfer to the replacement process"
             );
         }
+    }
+
+    #[test]
+    fn initially_unknown_process_identity_is_reconciled_before_pid_reuse() {
+        for dismissed in [false, true] {
+            let state = MeetingPresenceState::new();
+            let snapshot = |started_at| {
+                let mut snapshot =
+                    detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], &[10]);
+                snapshot.live_process_instances.insert(10, started_at);
+                snapshot
+            };
+
+            let first = super::update_detections(&state, snapshot(None), true)
+                .1
+                .expect("targeted app should prompt");
+            assert_eq!(
+                state.inner.data.lock().unwrap().sessions[&10].process_started_at,
+                None
+            );
+
+            super::update_detections(&state, snapshot(Some(1)), true);
+            {
+                let data = state.inner.data.lock().unwrap();
+                assert_eq!(data.sessions[&10].process_started_at, Some(1));
+                assert_eq!(data.prompt.as_ref().unwrap().process_started_at, Some(1));
+            }
+            if dismissed {
+                state.claim_prompt(&first.id).unwrap();
+            }
+
+            let replacement = super::update_detections(&state, snapshot(Some(2)), true)
+                .1
+                .expect("replacement process should get a fresh prompt");
+            assert!(state.claim_prompt(&first.id).is_err());
+            assert_ne!(replacement.id, first.id);
+        }
+    }
+
+    #[test]
+    fn prompt_target_validation_falls_back_only_when_identity_was_unknown() {
+        let prompt = |process_started_at| super::PendingPrompt {
+            id: "prompt".into(),
+            process_id: 10,
+            process_started_at,
+            targeted: true,
+            window_process_id: Some(10),
+            app_label: "Microsoft Teams".into(),
+            confidence: MeetingPresenceConfidence::Likely,
+            evidence: vec![MeetingPresenceEvidence::ActiveCoreAudio],
+        };
+
+        assert_eq!(
+            super::validated_capture_target(&prompt(None), |_, _| false).unwrap(),
+            None,
+            "unknown identity should use safe default-output capture"
+        );
+        assert!(super::validated_capture_target(&prompt(Some(1)), |_, _| false).is_err());
+        assert_eq!(
+            super::validated_capture_target(&prompt(Some(1)), |pid, started_at| {
+                pid == 10 && started_at == 1
+            })
+            .unwrap(),
+            Some((10, 1))
+        );
     }
 
     #[test]

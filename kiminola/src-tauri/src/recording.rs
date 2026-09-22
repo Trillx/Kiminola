@@ -124,6 +124,10 @@ impl RecordingState {
         }
         Ok(Some(target.process_id))
     }
+
+    fn clear_pending_loopback_target(&self) {
+        self.pending_loopback_target.lock().unwrap().take();
+    }
 }
 
 /// Synchronous recording activity check for native lifecycle handlers such as
@@ -144,6 +148,14 @@ pub fn queue_process_loopback_target(app: &AppHandle, process_id: u32, process_s
             process_started_at,
             queued_at: Instant::now(),
         });
+    }
+}
+
+/// Ensures a default-output start cannot inherit an earlier prompt's
+/// still-unconsumed process target.
+pub fn clear_process_loopback_target(app: &AppHandle) {
+    if let Some(state) = app.try_state::<RecordingState>() {
+        state.clear_pending_loopback_target();
     }
 }
 
@@ -457,6 +469,20 @@ mod tests {
             process_started_at: 1,
             queued_at: Instant::now() - PENDING_LOOPBACK_TARGET_TTL - Duration::from_secs(1),
         });
+        assert_eq!(state.take_loopback_target(|_, _| true), Ok(None));
+    }
+
+    #[test]
+    fn pending_process_target_can_be_cleared_before_default_output_capture() {
+        let state = RecordingState::new();
+        *state.pending_loopback_target.lock().unwrap() = Some(PendingLoopbackTarget {
+            process_id: 42,
+            process_started_at: 1,
+            queued_at: Instant::now(),
+        });
+
+        state.clear_pending_loopback_target();
+
         assert_eq!(state.take_loopback_target(|_, _| true), Ok(None));
     }
 

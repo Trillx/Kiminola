@@ -423,6 +423,11 @@ export interface MeetingPresenceAction {
   draft_id?: number;
 }
 
+export interface MeetingPresenceError {
+  prompt_id: string;
+  message: string;
+}
+
 const MEETING_PRESENCE_ACTION_EVENT = "meeting-presence:action";
 
 export async function sendMeetingPresenceActionToMain(
@@ -471,6 +476,14 @@ export function onMeetingPresenceState(
   handler: (state: MeetingPresenceState) => void,
 ): Promise<UnlistenFn> {
   return listen<MeetingPresenceState>("meeting-presence:state", (payload) => {
+    handler(payload.payload);
+  });
+}
+
+export function onMeetingPresenceError(
+  handler: (message: MeetingPresenceError) => void,
+): Promise<UnlistenFn> {
+  return listen<MeetingPresenceError>("meeting-presence:error", (payload) => {
     handler(payload.payload);
   });
 }

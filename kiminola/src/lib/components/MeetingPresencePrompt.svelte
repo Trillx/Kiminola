@@ -8,6 +8,7 @@
     getMeetingPresenceState,
     jotNotesFromMeetingPrompt,
     onMeetingPresenceAction,
+    onMeetingPresenceError,
     onMeetingPresencePrompt,
     onMeetingPresenceState,
     sendMeetingPresenceActionToMain,
@@ -33,6 +34,7 @@
     let unlistenPrompt: (() => void) | undefined;
     let unlistenState: (() => void) | undefined;
     let unlistenAction: (() => void) | undefined;
+    let unlistenError: (() => void) | undefined;
 
     onMeetingPresencePrompt((next) => {
       promptVersion += 1;
@@ -43,10 +45,14 @@
     onMeetingPresenceState((state: MeetingPresenceState) => {
       promptVersion += 1;
       prompt = state.prompt;
-      if (overlay && !state.prompt) {
+      if (overlay && !state.prompt && !error && !busy) {
         void hideOverlay();
       }
     }).then((fn) => (unlistenState = fn));
+
+    onMeetingPresenceError((failure) => {
+      if (!prompt || prompt.id === failure.prompt_id) error = failure.message;
+    }).then((fn) => (unlistenError = fn));
 
     onMeetingPresenceAction(async (action) => {
       // Handoffs carry no prompt ID. Read the claimed backend state instead of
@@ -76,6 +82,7 @@
       unlistenPrompt?.();
       unlistenState?.();
       unlistenAction?.();
+      unlistenError?.();
       if (overlay) {
         document.documentElement.style.background = previousRootBackground;
         document.body.style.background = previousBodyBackground;
@@ -126,13 +133,13 @@
       }
     } catch (err) {
       const refreshVersion = promptVersion;
-      error = prompt?.id === promptId ? "That prompt is no longer active." : "";
+      error = !prompt || prompt.id === promptId ? String(err) : error;
       const state = await getMeetingPresenceState().catch(() => null);
       // Events delivered during the refresh are newer than its snapshot. A
       // failed refresh is not evidence that the current prompt disappeared.
       if (state && refreshVersion === promptVersion) {
         prompt = state.prompt;
-        if (prompt?.id !== promptId) error = "";
+        if (prompt?.id && prompt.id !== promptId) error = "";
       }
       console.error("Meeting prompt action failed:", err);
     } finally {
@@ -141,17 +148,30 @@
   }
 </script>
 
-{#if prompt}
+{#if prompt || error}
   <aside class="meeting-prompt" aria-live="assertive" aria-label="Meeting prompt">
-    <div class="prompt-kicker">{prompt.app_label}</div>
-    <div class="prompt-title">{prompt.message}</div>
-    <div class="prompt-copy">{prompt.not_recording_message}</div>
-    <div class="prompt-actions">
-      <Button onclick={() => resolve("notes")} disabled={busy}>Jot notes</Button>
-      <Button variant="secondary" onclick={() => resolve("start")} disabled={busy}>Start recording</Button>
-      <Button variant="ghost" onclick={() => resolve("dismiss")} disabled={busy}>Not now</Button>
-    </div>
-    {#if error}<div class="prompt-error">{error}</div>{/if}
+    {#if prompt}
+      <div class="prompt-kicker">{prompt.app_label}</div>
+      <div class="prompt-title">{prompt.message}</div>
+      <div class="prompt-copy">{prompt.not_recording_message}</div>
+      <div class="prompt-actions">
+        <Button onclick={() => resolve("notes")} disabled={busy}>Jot notes</Button>
+        <Button variant="secondary" onclick={() => resolve("start")} disabled={busy}>Start recording</Button>
+        <Button variant="ghost" onclick={() => resolve("dismiss")} disabled={busy}>Not now</Button>
+      </div>
+    {:else}
+      <div class="prompt-title">Couldn’t start recording</div>
+      <div class="prompt-actions">
+        <Button
+          variant="ghost"
+          onclick={() => {
+            error = "";
+            void hideOverlay();
+          }}>Close</Button
+        >
+      </div>
+    {/if}
+    {#if error}<div class="prompt-error" role="alert">{error}</div>{/if}
   </aside>
 {/if}
 
