@@ -722,6 +722,57 @@ fn target_snapshot_is_send_without_exposing_native_handles_or_surrounding_text()
     assert_send::<TargetSnapshot>();
 }
 
+const OWNED_EDITOR_READY: u32 = WM_APP + 1;
+const OWNED_EDITOR_TRACE: u32 = WM_APP + 2;
+
+// Buffer only our disposable editor's relevant messages. No pipe I/O occurs
+// inside the timed send, and the native EDIT procedure still handles each call.
+// This distinguishes a failed send from a successful send with wrong readback.
+#[derive(Debug)]
+struct OwnedMessageTrace {
+    id: u32,
+    elapsed: Duration,
+    result: isize,
+}
+
+thread_local! {
+    static OWNED_EDITOR_PROC: std::cell::Cell<WNDPROC> = const { std::cell::Cell::new(None) };
+    static OWNED_EDITOR_MESSAGES: std::cell::RefCell<Vec<OwnedMessageTrace>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+unsafe extern "system" fn traced_owned_editor(
+    hwnd: HWND,
+    id: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let started = Instant::now();
+    let result = CallWindowProcW(OWNED_EDITOR_PROC.get(), hwnd, id, wparam, lparam);
+    if matches!(
+        id,
+        EM_SETSEL
+            | EM_REPLACESEL
+            | EM_GETPASSWORDCHAR
+            | WM_GETTEXTLENGTH
+            | WM_GETTEXT
+            | EM_GETSEL
+            | EM_GETLIMITTEXT
+    ) {
+        OWNED_EDITOR_MESSAGES.with_borrow_mut(|messages| {
+            if messages.len() < 128 {
+                messages.push(OwnedMessageTrace {
+                    id,
+                    elapsed: started.elapsed(),
+                    result: result.0,
+                });
+            }
+        });
+    }
+    result
+}
+
 // This is a subprocess entry point, never an interactive editor. It has no
 // visible window, activation, clipboard, keyboard injection, or user data.
 #[test]
@@ -732,59 +783,135 @@ fn owned_editor_subprocess() {
     }
     use std::io::Write;
     let editor = Editor::new(ES_MULTILINE as u32);
-    println!("OWNED_EDITOR={}", editor.0 .0 as usize);
-    std::io::stdout().flush().unwrap();
+    OWNED_EDITOR_MESSAGES.with_borrow_mut(|messages| messages.reserve(128));
     let mut msg = MSG::default();
     unsafe {
-        while IsWindow(editor.0).as_bool() && GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        let original = SetWindowLongPtrW(
+            editor.0,
+            GWLP_WNDPROC,
+            traced_owned_editor as *const () as isize,
+        );
+        assert_ne!(original, 0);
+        OWNED_EDITOR_PROC.set(std::mem::transmute::<isize, WNDPROC>(original));
+        PostMessageW(editor.0, OWNED_EDITOR_READY, WPARAM(0), LPARAM(0)).unwrap();
+        while IsWindow(editor.0).as_bool() {
+            let status = GetMessageW(&mut msg, None, 0, 0).0;
+            assert_ne!(status, -1, "owned editor GetMessageW failed");
+            if status == 0 {
+                break;
+            }
+            if msg.hwnd == editor.0 && msg.message == OWNED_EDITOR_READY {
+                // Publish only after consuming our queued readiness marker, not
+                // merely after CreateWindowExW. This is not a delivery retry.
+                // Serial libtest writes its test label without a newline.
+                // Start the private protocol on its own line in either mode.
+                println!("\nOWNED_EDITOR={}", editor.0 .0 as usize);
+                std::io::stdout().flush().unwrap();
+            } else if msg.hwnd == editor.0 && msg.message == OWNED_EDITOR_TRACE {
+                OWNED_EDITOR_MESSAGES.with_borrow(|messages| {
+                    for (index, entry) in messages.iter().enumerate() {
+                        println!(
+                            "owned message[{index}] id={:#x} native_elapsed={:?} result={:#x}",
+                            entry.id, entry.elapsed, entry.result
+                        );
+                    }
+                    println!(
+                        "OWNED_TRACE_END={} capacity_reached={}",
+                        messages.len(),
+                        messages.len() == 128
+                    );
+                });
+                std::io::stdout().flush().unwrap();
+            } else {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
     }
 }
 
-struct OwnedEditorProcess(std::process::Child);
+struct OwnedEditorProcess {
+    child: std::process::Child,
+    output: std::sync::mpsc::Receiver<String>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+impl OwnedEditorProcess {
+    fn receive(&mut self, prefix: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let line = self
+                .output
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "owned editor pid={} waiting for {prefix}: {error}; child_status={:?}",
+                        self.child.id(),
+                        self.child.try_wait()
+                    )
+                });
+            if let Some(value) = line.strip_prefix(prefix) {
+                return value.to_owned();
+            }
+            println!("owned editor pid={}: {line}", self.child.id());
+        }
+    }
+}
 impl Drop for OwnedEditorProcess {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
 fn owned_editor_process() -> (OwnedEditorProcess, HWND) {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
-    let mut child = OwnedEditorProcess(
-        Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "dictation_native::tests::owned_editor_subprocess",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("KIMINOLA_OWNED_EDITOR_CHILD", "1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
-    );
-    let stdout = child.0.stdout.take().unwrap();
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || {
+    let started = Instant::now();
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "dictation_native::tests::owned_editor_subprocess",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("KIMINOLA_OWNED_EDITOR_CHILD", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let (tx, output) = std::sync::mpsc::channel();
+    let mut child = OwnedEditorProcess {
+        child,
+        output,
+        reader: None,
+    };
+    let stdout = child.child.stdout.take().unwrap();
+    child.reader = Some(std::thread::spawn(move || {
+        // Keep draining until EOF. Dropping the pipe after the HWND would lose
+        // the trace, and printing from a native procedure could delay delivery.
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Some(handle) = line.strip_prefix("OWNED_EDITOR=") {
-                let _ = tx.send(handle.parse::<usize>().unwrap());
+            if tx.send(line).is_err() {
                 break;
             }
         }
-    });
-    let edit = HWND(rx.recv_timeout(Duration::from_secs(5)).unwrap() as *mut _);
+    }));
+    let edit = HWND(child.receive("OWNED_EDITOR=").parse::<usize>().unwrap() as *mut _);
     let mut pid = 0;
-    unsafe {
-        GetWindowThreadProcessId(edit, Some(&mut pid));
-    }
-    assert_eq!(pid, child.0.id());
+    let thread = unsafe { GetWindowThreadProcessId(edit, Some(&mut pid)) };
+    assert_eq!(pid, child.child.id());
+    assert_ne!(thread, 0);
     assert!(!unsafe { IsWindowVisible(edit) }.as_bool());
+    assert!(unsafe { IsWindowUnicode(edit) }.as_bool());
+    println!(
+        "owned editor ready: pid={pid} thread={thread} hwnd={:?} arch={} elapsed={:?}",
+        edit,
+        std::env::consts::ARCH,
+        started.elapsed()
+    );
     (child, edit)
 }
 
@@ -822,7 +949,7 @@ fn process_security_matches_observed_runner_and_child_tokens() {
     assert_security(unsafe { GetCurrentProcess() }, "runner");
     let (child, _edit) = owned_editor_process();
     let process = ProcessHandle(unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, child.0.id())
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, child.child.id())
             .unwrap()
             .0 as usize
     });
@@ -832,22 +959,69 @@ fn process_security_matches_observed_runner_and_child_tokens() {
 
 #[test]
 fn cross_process_native_editor_reads_and_verifies_only_disposable_text() {
-    let (_child, edit) = owned_editor_process();
+    use std::cell::{Cell, RefCell};
+    use windows::Win32::Foundation::{GetLastError, SetLastError, WIN32_ERROR};
+
+    fn describe(state: &Result<EditorState, String>) -> String {
+        match state {
+            Ok(state) => format!(
+                "text_utf16={:?} selection={:?} style={:#x} limit={}",
+                state.text, state.selection, state.style, state.limit
+            ),
+            Err(error) => format!("read_error={error}"),
+        }
+    }
+
+    let (mut child, edit) = owned_editor_process();
     // Only marshalling and exact readback in our disposable control. Security
     // eligibility is tested separately, never required or bypassed here.
     message(edit, EM_SETSEL, 10, 14).unwrap();
-    let before = read_editor(edit).unwrap();
+    let before = read_editor(edit);
+    println!("owned editor before: {}", describe(&before));
+    let before = before.unwrap();
     assert_eq!(before.selection, (10, 14));
+    let started = Instant::now();
+    let guards = RefCell::new(Vec::new());
+    let dispatch = RefCell::new(None);
+    let calls = Cell::new(0);
     let outcome = deliver_editor(
         edit,
         &before,
         "foreign 🦀",
-        |_| Ok(()),
-        |units| message(edit, EM_REPLACESEL, 1, units.as_ptr() as isize).map(|_| ()),
-    )
-    .unwrap();
-    assert_eq!(outcome, DeliveryOutcome::Verified);
-    let after = read_editor(edit).unwrap();
+        |before_dispatch| {
+            guards
+                .borrow_mut()
+                .push((before_dispatch, started.elapsed()));
+            Ok(())
+        },
+        |units| {
+            calls.set(calls.get() + 1);
+            let sent = Instant::now();
+            unsafe { SetLastError(WIN32_ERROR(0)) };
+            let result = message(edit, EM_REPLACESEL, 1, units.as_ptr() as isize);
+            // Read immediately; successful sends need not clear last error.
+            let error = unsafe { GetLastError() };
+            *dispatch.borrow_mut() = Some((result.clone(), error, sent.elapsed()));
+            result.map(|_| ())
+        },
+    );
+    println!(
+        "owned editor delivery: outcome={outcome:?} elapsed={:?} calls={} dispatch={:?} guards={:?}",
+        started.elapsed(), calls.get(), dispatch.borrow(), guards.borrow()
+    );
+    // Diagnostic read only, after the original outcome is fixed. It must never
+    // upgrade Uncertain to Verified or dispatch the insertion again.
+    let after = read_editor(edit);
+    println!("owned editor after: {}", describe(&after));
+    unsafe { PostMessageW(edit, OWNED_EDITOR_TRACE, WPARAM(0), LPARAM(0)).unwrap() };
+    let trace = child.receive("OWNED_TRACE_END=");
+    println!(
+        "owned editor trace: {trace}; child_status={:?}",
+        child.child.try_wait()
+    );
+    assert_eq!(calls.get(), 1, "owned editor dispatch is never retried");
+    assert_eq!(outcome.unwrap(), DeliveryOutcome::Verified);
+    let after = after.unwrap();
     assert_eq!(
         String::from_utf16(&after.text).unwrap(),
         "synthetic foreign 🦀"
