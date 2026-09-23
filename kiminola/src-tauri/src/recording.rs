@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 use crate::asr::{resolve_asr_model_dir, AsrEngine};
+use crate::capture_gate::{CaptureGate, CaptureLease, CaptureOwner};
 use crate::recording_session::{
     AudioPressureEvent, AudioSource, DefaultAudioSource, RecordingSession, RecordingStartStatus,
     TranscriptEvent, TranscriptSink,
@@ -19,11 +20,14 @@ pub struct RecordingState {
     pending_loopback_target: SyncMutex<Option<PendingLoopbackTarget>>,
     active: AtomicBool,
     updating: AtomicBool,
+    update_lease: SyncMutex<Option<CaptureLease>>,
 }
 
 struct ActiveRecording {
     session: RecordingSession,
     transcript_store: Arc<TranscriptEventStore>,
+    // Ownership lasts through pause and the final decoder drain.
+    _capture_lease: CaptureLease,
 }
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
@@ -90,6 +94,7 @@ impl RecordingState {
             pending_loopback_target: SyncMutex::new(None),
             active: AtomicBool::new(false),
             updating: AtomicBool::new(false),
+            update_lease: SyncMutex::new(None),
         }
     }
 
@@ -172,6 +177,11 @@ async fn ensure_asr_engine(cache: &Mutex<Option<Arc<AsrEngine>>>) -> Option<Arc<
     engine
 }
 
+pub(crate) async fn shared_asr_engine(app: &AppHandle) -> Option<Arc<AsrEngine>> {
+    let state = app.state::<RecordingState>();
+    ensure_asr_engine(&state.asr_engine).await
+}
+
 async fn get_or_try_init<T, F>(cache: &Mutex<Option<Arc<T>>>, loader: F) -> Option<Arc<T>>
 where
     T: Send + 'static,
@@ -238,6 +248,7 @@ pub async fn start_recording(
     if session.is_some() {
         return Err("recording already in progress".into());
     }
+    let capture_lease = app.state::<CaptureGate>().claim(CaptureOwner::Meeting)?;
     state.set_active_for_app(&app, true);
 
     // Grab the preloaded ASR engine (warmed in the background at app launch);
@@ -251,6 +262,7 @@ pub async fn start_recording(
         match state.take_loopback_target(crate::meeting_presence::process_instance_is_current) {
             Ok(target) => target,
             Err(error) => {
+                drop(capture_lease);
                 state.set_active_for_app(&app, false);
                 return Err(error);
             }
@@ -267,6 +279,7 @@ pub async fn start_recording(
     let start_status = match new_session.start().await {
         Ok(status) => status,
         Err(error) => {
+            drop(capture_lease);
             state.set_active_for_app(&app, false);
             return Err(error);
         }
@@ -274,6 +287,7 @@ pub async fn start_recording(
     *session = Some(ActiveRecording {
         session: new_session,
         transcript_store,
+        _capture_lease: capture_lease,
     });
     if let Err(error) = app.emit("recording:started", ()) {
         eprintln!("failed to emit recording:started: {error}");
@@ -283,6 +297,7 @@ pub async fn start_recording(
 
 #[tauri::command]
 pub async fn prepare_app_update(
+    app: AppHandle,
     state: State<'_, RecordingState>,
     database: State<'_, crate::db::DbState>,
 ) -> Result<(), String> {
@@ -290,8 +305,16 @@ pub async fn prepare_app_update(
     if session.is_some() || state.is_active() {
         return Err("Finish and save the current recording before updating.".into());
     }
+    if state.updating.load(Ordering::Acquire) {
+        return Err("The app is already preparing an update.".into());
+    }
+    let lease = app.state::<CaptureGate>().claim(CaptureOwner::Update)?;
     state.updating.store(true, Ordering::Release);
+    // Publish before awaiting suspension so a disconnected IPC waiter cannot
+    // leave the update barrier without ownership.
+    *state.update_lease.lock().unwrap() = Some(lease);
     if let Err(error) = database.pool.suspend().await {
+        state.update_lease.lock().unwrap().take();
         state.updating.store(false, Ordering::Release);
         return Err(error);
     }
@@ -306,6 +329,7 @@ pub async fn cancel_app_update(
     let _session = state.session.lock().await;
     database.pool.resume().await;
     state.updating.store(false, Ordering::Release);
+    state.update_lease.lock().unwrap().take();
     Ok(())
 }
 
@@ -328,11 +352,10 @@ pub async fn stop_recording(
         });
     };
     let stop_result = active.session.stop().await;
+    let result = result_after_finalization(stop_result, &active.transcript_store);
+    drop(active);
     state.set_active_for_app(&app, false);
-    Ok(result_after_finalization(
-        stop_result,
-        &active.transcript_store,
-    ))
+    Ok(result)
 }
 
 /// Pauses the active recording session. Capture streams are stopped but the
@@ -360,6 +383,7 @@ pub async fn resume_recording(
 
 /// Helper used by `lib.rs` to install the recording state into the Tauri manager.
 pub fn setup(app: &mut tauri::App) {
+    app.manage(CaptureGate::default());
     let state = RecordingState::new();
     let cache = Arc::clone(&state.asr_engine);
     app.manage(state);

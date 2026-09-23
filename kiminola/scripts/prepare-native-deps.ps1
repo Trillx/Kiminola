@@ -158,8 +158,9 @@ foreach ($runtimeName in $runtimeNames) {
     }
 }
 
-# Native test executables load these DLLs before Cargo can copy them beside
-# every generated harness, so expose the selected architecture explicitly.
+# PATH helps build tools, but Windows searches System32 before PATH for DLLs.
+# build.rs stages this same package beside Cargo test executables in the actual
+# <profile>/deps output, including --target and CARGO_TARGET_DIR layouts.
 Add-BuildPath -Path $libDir
 
 # tauri.conf.json intentionally stages these four runtime DLLs from target/release

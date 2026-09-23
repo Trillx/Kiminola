@@ -34,17 +34,21 @@ try {
     let callbackId = 0;
     const callbacks = new Map();
     const listeners = new Map();
+    window.nativeCalls = [];
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
     window.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
       transformCallback(fn) { callbacks.set(++callbackId, fn); return callbackId; },
       async invoke(command, args) {
+        window.nativeCalls.push(command);
         if (command === "plugin:event|listen") { listeners.set(args.event, args.handler); return args.handler; }
         if (command === "plugin:event|unlisten") return;
         if (command === "is_onboarding_complete") return true;
         if (command === "database_status") return { ready: true, backups: [] };
         if (command === "plugin:app|version") return "0.1.2";
         if (command === "get_global_shortcut") return "Control+Shift+Space";
+        if (command === "get_dictation_state") return { settings: { enabled: false, activation: "hold", shortcut: "Ctrl+Shift+Space", side: "right", cleanup: "raw", clipboard_consent: false, history_enabled: false, microphone_id: null }, provider_authorized: false, phase: "disabled", session_id: null, text: "", raw_text: "", level: 0, elapsed_seconds: 0, error: null, exit_intent: null, delivery: "none" };
+        if (["list_dictation_microphones", "list_dictation_history"].includes(command)) return [];
         if (command === "check_model_pack") return true;
         if (command === "get_llm_config") return { kind: "ollama", base_url: "http://localhost:11434/v1", model: "test", has_api_key: false };
         if (command === "list_templates") return [{ id: 1, name: "General", prompt: "{transcript} {notes}", is_builtin: 1 }];
@@ -133,7 +137,7 @@ try {
   await page.getByRole("tab", { name: "General", exact: true }).waitFor();
   assert.equal(await page.locator(".sidebar").count(), 0);
   assert.equal(await page.locator(".topbar").count(), 0);
-  for (const label of ["General", "Speech model", "AI provider", "Shortcut", "Templates", "About"]) {
+  for (const label of ["General", "Speech model", "AI provider", "Dictation", "Shortcut", "Templates", "About"]) {
     await page.getByRole("tab", { name: label, exact: true }).click();
     await page.waitForFunction((name) => document.querySelector('[role="tab"][aria-selected="true"]')?.textContent?.trim() === name, label);
     assert.equal(await page.locator('[role="tabpanel"]').count(), 1);
@@ -146,7 +150,15 @@ try {
   await page.setViewportSize({ width: 1200, height: 800 });
   await settleFrame();
   assert.equal(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector(".main")).marginLeft)), 240, "leaving settings restores the sidebar");
-  console.log("PASS settings: all six sections, narrow layout, return to meetings with sidebar restored");
+  console.log("PASS settings: all seven sections, narrow layout, return to meetings with sidebar restored");
+  await page.setViewportSize({ width: 64, height: 220 });
+  await page.goto(origin + "/index.html?window=dictation");
+  await page.getByRole("region", { name: "Dictation pill", exact: true }).waitFor();
+  const overlayCalls = await page.evaluate(() => window.nativeCalls);
+  assert.equal(overlayCalls.includes("get_dictation_state"), true);
+  assert.equal(overlayCalls.some(command => ["start_dictation", "is_onboarding_complete", "get_meeting_presence_state", "plugin:updater|check"].includes(command)), false);
+  assert.equal(await page.locator(".sidebar").count(), 0);
+  console.log("PASS native overlay entry: index.html?window=dictation renders only the pill and never starts capture");
   assert.deepEqual(errors, [], "browser runtime errors");
 } finally {
   await browser?.close();

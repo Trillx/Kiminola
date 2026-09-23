@@ -211,7 +211,7 @@ Adopted lifecycle decision: [Define dictation lifecycle, privacy, and recovery](
 - Recognize speech locally. Audio never leaves the machine; baseline transcription works without an AI provider.
 - Users may opt into text-only Dictation cleanup through a configured Provider, including OpenRouter. Investigate local cleanup as well; an app-managed local cleanup model is not yet a commitment. The meeting MVP's local-LLM scope exclusion does not settle this new decision.
 - Remember an explicit dictation-specific cloud-cleanup opt-in. A Provider configured for Meeting notes does not grant dictation upload permission. A new remote endpoint requires renewed consent.
-- Cleanup removes filler, handles spoken corrections, and adds punctuation, paragraphs, or lists while preserving intended meaning. It does not summarize, add content, or adapt the writing persona to the destination app. Plain transcription remains an acceptable baseline if cleanup is unavailable; fallback consent and presentation remain open.
+- Cleanup removes filler, handles spoken corrections, and adds punctuation, paragraphs, or lists while preserving intended meaning. It does not summarize, add content, or adapt the writing persona to the destination app. Plain transcription is the default. If requested cleanup fails, retain raw text for explicit review/copy rather than silently delivering it or switching providers.
 - Use the existing Nemotron/sherpa-onnx pack for this implementation. Alternative speech-engine comparisons and small cleanup-model optimization are deferred. Wispr Flow is a behavioral reference, not an engine requirement. Optional cleanup reuses the configured text Provider; no new app-managed cleanup model is included.
 
 ### Delivery and implementation verification
@@ -241,13 +241,14 @@ Adopted lifecycle decision: [Define dictation lifecycle, privacy, and recovery](
 
 ### Text history and recovery
 
-- Optional local Dictation history is off by default. When enabled, it stores final text only for 30 days, with individual and clear-all deletion; audio, surrounding app content and cancelled attempts are excluded. The delivery decision will define which completed outcomes qualify for history. Disabling history stops new saves; existing entries remain subject to expiry and explicit deletion rather than being silently erased.
+- Optional local Dictation history is off by default. When enabled, it stores final text only for 30 days, with individual and clear-all deletion; audio, surrounding app content and cancelled attempts are excluded. A completed result qualifies after verified delivery, explicit Copy, or explicit confirmation of uncertain delivery. Failed or interrupted attempts remain memory-only even when copied. Disabling history stops new saves; existing entries remain subject to expiry and explicit deletion rather than being silently erased.
 - Keep failed or interrupted dictation text only in memory until explicitly dismissed or the app quits. Do not persist failed attempts for crash/restart recovery. Available raw text is retained if cleanup fails; an incomplete provider response is not a successful final result.
 - Resolve pending recovery by copying or explicitly dismissing it before starting another dictation. Never silently replace the recovery text. A Meeting may start while that inactive recovery remains available.
 
 ### Remaining release qualification
 
 - Named application/version coverage, native hardware performance and final interaction acceptance remain release gates. Unsupported or unverified automatic-delivery targets retain review/copy fallback; compilation or a mock passing is not a compatibility result. Deferred model investigations do not block the approved existing-model implementation.
+- The initial implementation certifies no automatic-delivery targets. Its empty certification allowlist forces review/copy before any foreground-editor inspection, clipboard publication or automatic paste. Explicit Copy is separate from automatic delivery. Native fixture evidence and remaining qualification limits are recorded in `kiminola/src-tauri/tests/dictation-native/README.md`.
 - Cloud audio transcription, audio retention, multilingual launch support, always-listening activation, and general voice-command automation remain outside scope.
 
 ## 9. Packaging & distribution

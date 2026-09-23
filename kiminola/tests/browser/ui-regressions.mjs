@@ -9,6 +9,7 @@ import { createServer } from 'vite';
 import { runOnboardingProviderTests } from './onboarding-provider.mjs';
 import { runMeetingPresenceTests } from './meeting-presence.mjs';
 import { runBoardsTests } from './boards.mjs';
+import { runDictationTests } from './dictation.mjs';
 
 // Real frontend, synthetic IPC only. Never opens the native app or the user's browser profile.
 const require = createRequire(import.meta.url);
@@ -27,10 +28,10 @@ async function eventually(read, check, message) {
   } while (Date.now() < deadline);
   assert.fail(`${message}: ${JSON.stringify(value)}`);
 }
-async function check(name, run) {
+async function check(name, run, contextOptions = {}) {
   if (process.env.UI_TEST_FILTER && !name.includes(process.env.UI_TEST_FILTER)) return;
   await test(name, async () => {
-    const context = await browser.newContext({ viewport: { width: 1200, height: 800 }, colorScheme: 'light' });
+    const context = await browser.newContext({ viewport: { width: 1200, height: 800 }, colorScheme: 'light', ...contextOptions });
     await context.addInitScript({ path: fileURLToPath(new URL('./fixture.mjs', import.meta.url)) });
     const page = await context.newPage();
     page.setDefaultTimeout(7000);
@@ -77,6 +78,7 @@ try {
   await runOnboardingProviderTests({ check, open, eventually, origin });
   await runMeetingPresenceTests({ check, open, eventually, origin });
   await runBoardsTests({ check, open, origin });
+  await runDictationTests({ check, open, eventually, origin });
 
   await check('UI-02 Cancel never writes a transcript correction', async page => {
     await open(page, '/meeting/1');

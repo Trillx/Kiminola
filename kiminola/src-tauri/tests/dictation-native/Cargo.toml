@@ -1,0 +1,20 @@
+[package]
+name = "dictation-native-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The Tauri plugin reexports these exact types. Avoid loading the app/ASR in
+# this isolated adapter executable. The app build verifies the real import.
+global-hotkey = "=0.8.0"
+windows = { version = "=0.58.0", features = [
+    "Win32_Foundation", "Win32_Security", "Win32_System_Threading",
+    "Win32_System_DataExchange", "Win32_System_Memory",
+    "Win32_System_StationsAndDesktops", "Win32_System_RemoteDesktop",
+    "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility", "Win32_Graphics_Gdi",
+] }

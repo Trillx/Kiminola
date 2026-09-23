@@ -10,6 +10,12 @@
   let enhancedMarkdown = '## Summary\n\nFixture summary.\n\n## Action items\n\n- Follow up with the team.';
   const presence = { enabled: false, paused: false, start_with_windows: false, mode: 'off', hint: null, prompt: null };
   const windowLabel = new URLSearchParams(location.search).get('window') === 'meeting-prompt' ? 'meeting-prompt' : 'main';
+  let dictation = {
+    settings: { enabled: false, activation: 'hold', shortcut: 'Ctrl+Shift+Space', side: 'right', cleanup: 'raw', clipboard_consent: false, history_enabled: false, microphone_id: null },
+    provider_authorized: false, phase: 'disabled', session_id: null, text: '', raw_text: '', level: 0, elapsed_seconds: 0, error: null, exit_intent: null, delivery: 'none',
+  };
+  let dictationHistory = [{ id: 1, text: 'Synthetic completed dictation.', created_at: '2026-09-23T15:00:00Z' }];
+  let pendingDictationDisable = null;
   const drafts = new Map();
   const defaultBoards = [{
     id: 1,
@@ -70,6 +76,9 @@
     failPresenceAction: null, consumeAndFailPresenceAction: null, failPresenceState: false, failBoardMove: false, boardAddDelay: 0,
     windows: { main: { visible: windowLabel === 'main', focused: false }, 'meeting-prompt': { visible: windowLabel === 'meeting-prompt', focused: false } },
     hasListener(event) { return [...listeners.values()].some(item => item.event === event); },
+    dictationState() { return structuredClone(dictation); },
+    setDictation(patch) { dictation = { ...dictation, ...structuredClone(patch) }; window.audit.emit('dictation:state', structuredClone(dictation)); },
+    seedDictationHistory(entries) { dictationHistory = structuredClone(entries); },
     seedNoteDraft(draft) { drafts.set(draft.id, structuredClone(draft)); },
     emit(event, payload) {
       if (event === 'meeting-presence:prompt') {
@@ -109,6 +118,55 @@
         case 'plugin:event|emit_to':
           if (!window.audit.sendTo) throw new Error('Fixture: no cross-window event transport installed');
           return window.audit.sendTo(args);
+        case 'get_dictation_state': {
+          if (window.audit.failDictationRead) throw new Error('Fixture: dictation state unavailable');
+          const captured = structuredClone(dictation);
+          if (window.audit.holdDictationRead) {
+            window.audit.holdDictationRead = false;
+            await new Promise(resolve => window.audit.releaseDictationRead = resolve);
+          }
+          return captured;
+        }
+        case 'set_dictation_settings': {
+          if (window.audit.failDictationSave) throw new Error('Fixture: dictation shortcut conflicts with Meeting shortcut');
+          if (window.audit.holdDictationSave) await new Promise(resolve => window.audit.releaseDictationSave = resolve);
+          const { consent_provider, ...settings } = args.input;
+          if (settings.enabled && settings.cleanup === 'provider' && !dictation.provider_authorized && !consent_provider) throw new Error('Provider consent required');
+          if (!settings.enabled && (dictation.text || dictation.raw_text) && ['starting', 'listening', 'processing', 'review'].includes(dictation.phase)) {
+            pendingDictationDisable = settings;
+            window.audit.setDictation({ phase: 'review', exit_intent: 'disable' });
+            return structuredClone(dictation);
+          }
+          window.audit.setDictation({ settings, provider_authorized: dictation.provider_authorized || consent_provider, phase: settings.enabled ? 'idle' : 'disabled' });
+          return structuredClone(dictation);
+        }
+        case 'list_dictation_microphones': return [{ id: 'synthetic-mic', name: 'Synthetic microphone' }];
+        case 'list_dictation_history': return structuredClone(dictationHistory);
+        case 'delete_dictation_history':
+          if (window.audit.failDictationDelete) throw new Error('Fixture: history delete failed');
+          dictationHistory = args.id === null ? [] : dictationHistory.filter(entry => entry.id !== args.id);
+          return;
+        case 'start_dictation': window.audit.setDictation({ phase: 'listening', session_id: 1 }); return structuredClone(dictation);
+        case 'stop_dictation': {
+          const session = dictation.session_id;
+          if (window.audit.holdDictationStop) {
+            window.audit.setDictation({ phase: 'processing' });
+            await new Promise(resolve => window.audit.releaseDictationStop = resolve);
+            if (dictation.session_id !== session || dictation.phase !== 'processing') return { ...structuredClone(dictation), phase: 'review', text: 'Stale stop reply.' };
+          }
+          window.audit.setDictation({ phase: 'review', text: 'Synthetic final text.', raw_text: 'Synthetic final text.' });
+          return structuredClone(dictation);
+        }
+        case 'cancel_dictation': window.audit.setDictation({ phase: 'idle', text: '', raw_text: '' }); return structuredClone(dictation);
+        case 'resolve_dictation': {
+          if (window.audit.failDictationResolve) throw new Error('Fixture: clipboard unavailable');
+          if (args.action === 'copy') window.audit.copiedDictation = dictation.text || dictation.raw_text;
+          window.audit.setDictation(args.action === 'cancel_exit' ? { exit_intent: null } : { settings: pendingDictationDisable ?? dictation.settings, phase: pendingDictationDisable ? 'disabled' : 'idle', text: '', raw_text: '', exit_intent: null });
+          pendingDictationDisable = null;
+          const captured = structuredClone(dictation);
+          if (window.audit.holdDictationResolve) await new Promise(resolve => window.audit.releaseDictationResolve = resolve);
+          return captured;
+        }
         case 'is_onboarding_complete': return true;
         case 'set_onboarding_complete': return;
         case 'check_microphone_permission': return 'Granted';
