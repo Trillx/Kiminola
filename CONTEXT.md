@@ -20,6 +20,12 @@ Canonical language for the project. Implementation details do not belong here.
 - **Meeting hierarchy** — the organizational parent/child relationship between Meetings. A child Meeting remains a separate recording with its own transcript and notes; hierarchy does not roll content up.
 - **Library location** — the single direct container assigned to a Meeting: either a Space or another Meeting, never both.
 - **Capture session** — the active recording of a Meeting, from manual start to manual stop.
+- **Dictation**: user-initiated speech input intended as written text in a target application, rather than a transcript of a Meeting.
+- **Dictation session**: one user-initiated microphone dictation, distinct from a Meeting and its Capture session, that produces text for a target application.
+- **Dictation cleanup**: optional editing of dictated text to remove filler, handle spoken corrections, and add punctuation or structure while preserving the user's intended meaning. It does not summarize the speech or compose additional content.
+- **Dictation history**: the user's optional local collection of completed dictation text, separate from Meetings.
+- **Dictation recovery**: available dictation text retained for review after an interruption or failed cleanup or delivery. It is distinct from Dictation history.
+- **Dictation pill**: the small screen-edge overlay that shows dictation state and microphone activity. It is not the Meeting's Live transcript pill.
 - **Mic channel** — the audio channel captured from the user's microphone. Labeled **"You"** in the transcript.
 - **System channel** — the audio channel captured from system/loopback audio (what the meeting app plays). Labeled **"Others"** in the transcript.
 - **Live transcript** — the incrementally-streaming text produced from both channels during a capture session, labeled by channel.
@@ -29,7 +35,7 @@ Canonical language for the project. Implementation details do not belong here.
 - **Meeting prompt** — a user-visible notification shown after a Meeting presence hint, offering a choice such as opening a Notepad or starting a Capture session. It never starts capture without explicit confirmation.
 - **Event-aware Meeting prompt** — a Meeting prompt enriched by a fresh timed Calendar event that overlaps the local meeting-presence window from 15 minutes before the event starts through 15 minutes after it ends. Matching uses the event time window only; local app/window plus Core Audio evidence remains independent. One candidate may be shown directly, while multiple candidates require an event chooser; the prompt keeps the uncertain “You may be in a meeting” wording and adds a separate “Possible event” title/time line; **Start recording** explicitly confirms and links the displayed/selected event after revalidation; without a fresh candidate, Kimi Nola falls back to the generic Meeting prompt without calendar context; event changes never bypass the existing one-prompt-per-app-session suppression rules; if the event becomes stale before action, the user may start without a calendar event or cancel; the Calendar event never creates the prompt.
 - **Companion layout** — a temporary side-by-side arrangement used when the user starts a Capture session from a Meeting prompt: the meeting application remains visible alongside Kimi Nola's Notepad. It is a starting arrangement, not a locked layout; the user may resize or reposition the windows.
-- **Background companion** — Kimi Nola's resident mode after the main window closes, limited to local Meeting presence hints and prompts. It never captures audio and ends only when the user explicitly quits or disables it.
+- **Background companion**: Kimi Nola's optional resident meeting-presence service, which supplies local Meeting presence hints and prompts. It never captures audio and is controlled separately from Dictation.
 - **Note enhancement** — the post-meeting LLM pass that produces structured notes: a baseline summary from the transcript alone, merged with the Notepad contents when present.
 - **Model pack** — a downloadable on-device ASR model the user installs to power transcription. Audio never leaves the machine.
 - **Model manifest** — the embedded description of a Model pack: source repo, revision, file list, sizes, and verification hashes.
@@ -38,4 +44,4 @@ Canonical language for the project. Implementation details do not belong here.
 - **Update check** — the app's request to learn whether a newer App release is available. It never installs anything and is not usage analytics.
 - **First-run wizard** — the mandatory onboarding flow a new user completes before accessing the library. Steps: microphone permission, Model pack download, optional AI Provider configuration.
 - **Onboarding state** — the persisted record of which first-run wizard steps have been completed, used to gate access to the library and recording.
-- **Provider** — a pluggable cloud LLM backend used for Note enhancement (e.g. OpenRouter, direct API keys). Receives transcript *text*, never audio.
+- **Provider**: a user-configured local or remote LLM backend for optional Note enhancement or Dictation cleanup. Receives text, never audio.

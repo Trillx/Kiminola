@@ -1,6 +1,6 @@
 # Kiminola — Build-Ready Spec
 
-**Status:** Ready for implementation. All wayfinder decision tickets are resolved (see `.scratch/kiminola/map.md` and `issues/`). The library hierarchy decision is also adopted: Spaces and Meetings form a recursive organizational tree with validated reparenting.
+**Status:** The original meeting-product wayfinder is resolved (see `.scratch/kiminola/map.md` and `issues/`). The library hierarchy decision is also adopted: Spaces and Meetings form a recursive organizational tree with validated reparenting. System-wide dictation implementation is authorized under §8.2; native compatibility and release qualification remain unverified.
 
 ## 1. Product definition
 
@@ -197,6 +197,57 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   clears runtime state.
 - Settings expose Meeting detection and Start with Windows. Tray status is
   “Detecting locally · not recording”, “Paused”, or “Off”.
+
+## 8.2 System-wide dictation
+
+Planning map: [Plan system-wide dictation for Kimi Nola](https://github.com/Trillx/Kiminola/issues/43). The maintainer has authorized implementation of the lifecycle and processing/delivery contract below. Historical research and unresolved qualification tickets do not establish measured runtime behavior or certified application support.
+
+Adopted lifecycle decision: [Define dictation lifecycle, privacy, and recovery](https://github.com/Trillx/Kiminola/issues/47#issuecomment-5788875062).
+
+### Scope and processing
+
+- Target Windows x64 and ARM64, English first, for email, team chat, coding apps, and browser text fields. Exact app compatibility is not yet validated.
+- Recognize speech locally. Audio never leaves the machine; baseline transcription works without an AI provider.
+- Users may opt into text-only Dictation cleanup through a configured Provider, including OpenRouter. Investigate local cleanup as well; an app-managed local cleanup model is not yet a commitment. The meeting MVP's local-LLM scope exclusion does not settle this new decision.
+- Remember an explicit dictation-specific cloud-cleanup opt-in. A Provider configured for Meeting notes does not grant dictation upload permission. A new remote endpoint requires renewed consent.
+- Cleanup removes filler, handles spoken corrections, and adds punctuation, paragraphs, or lists while preserving intended meaning. It does not summarize, add content, or adapt the writing persona to the destination app. Plain transcription remains an acceptable baseline if cleanup is unavailable; fallback consent and presentation remain open.
+- Use the existing Nemotron/sherpa-onnx pack for this implementation. Alternative speech-engine comparisons and small cleanup-model optimization are deferred. Wispr Flow is a behavioral reference, not an engine requirement. Optional cleanup reuses the configured text Provider; no new app-managed cleanup model is included.
+
+### Delivery and implementation verification
+
+- Deliver finalized text only. Guard automatic paste to the original, unchanged, supported editor behind explicit clipboard-use consent. Changes to the target or uncertainty about its eligibility require review/copy instead. No automatic delivery to password fields, elevated apps, or terminals; never submit text or simulate Enter.
+- Generic Windows focus checking and input delivery are not atomic. Validate eligibility and target identity again immediately before delivery, invalidate stale/cancelled work, and test only in disposable editors before declaring a destination supported. A dispatched paste is not proof that a target accepted the text; do not automatically retry an uncertain delivery.
+- Cleanup failure retains the raw transcript for review rather than silently delivering it or changing provider. A configured Meeting-note provider alone grants no dictation consent.
+- Approved test seams are public dictation commands/events for capture ownership and cancellation, provider requests through local fake-server responses, browser-visible settings/pill/recovery behavior, and Windows shortcuts/delivery in disposable test-owned editors. Tests do not type into real user applications or make paid provider calls.
+- Run Blast Radius against shared Meeting, provider, resident and update paths. Every implementation push is followed by Greploop and CI verification; no merge or release is implied by authorization to push.
+
+### Capture lifecycle
+
+- Dictation sessions are separate from Meetings. One dictation owns recording, processing and delivery at a time. Another dictation or Meeting must wait until that active work finishes or is explicitly cancelled; a conflicting request explains the conflict and never silently stops existing work.
+- Block dictation until an existing Meeting session ends, including while the Meeting is starting, paused or finalizing. Retained dictation recovery text does not block a Meeting because it no longer owns capture or processing.
+- Offer hold-to-talk and press-to-start/stop modes. In hold mode, releasing any key in the configured chord ends capture. The Windows shortcut probe must verify this contract; main-key-only release polling is not sufficient evidence. Apply the existing shortcut conflict/replacement safety rules from §5. Exact default bindings remain for the interaction decision.
+- Capture microphone audio only. Use the Windows default unless the user selects another microphone, then keep that device for the whole session. Default-device or selection changes apply to the next dictation; never silently switch devices mid-session.
+- Limit each dictation to ten minutes. At the limit, stop capture and preserve available text for review without automatic insertion.
+- On Windows lock/sleep or microphone loss, stop capture, cancel pending cleanup, invalidate automatic delivery and retain available text in memory. Never automatically resume capture or insert after recovery; review remains hidden while Windows is locked.
+- Explicit cancellation discards the attempt, cancels its pending cleanup and invalidates future delivery instead of creating a recovery item. It cannot retract text already sent to a provider or undo an external insertion. Late results from cancelled work have no delivery authority.
+
+### Resident operation and Dictation pill
+
+- Require a one-time explicit Enable dictation action. Starting with Windows remains a separate opt-in. Dictation enablement is independent of Meeting detection; the Background companion remains an advisory no-capture service.
+- Use a small, thin screen-edge Dictation pill with a user-selectable side. Hotkey activation shows waves representing microphone activity. Idle microphone capture is forbidden. Exact idle presentation, focus and accessibility behavior remain for the interaction prototype.
+- Keep the pill and shortcuts available after the main window closes until the user explicitly quits or disables dictation. Closing that window does not cancel an active dictation.
+- Explicit Quit or Disable stops capture and cancels cleanup immediately. If unsent text remains, offer copy or discard before completing the action. Cancelling that exit leaves review available, not a resumed recording. App updates wait until active dictation work and recovery are resolved.
+
+### Text history and recovery
+
+- Optional local Dictation history is off by default. When enabled, it stores final text only for 30 days, with individual and clear-all deletion; audio, surrounding app content and cancelled attempts are excluded. The delivery decision will define which completed outcomes qualify for history. Disabling history stops new saves; existing entries remain subject to expiry and explicit deletion rather than being silently erased.
+- Keep failed or interrupted dictation text only in memory until explicitly dismissed or the app quits. Do not persist failed attempts for crash/restart recovery. Available raw text is retained if cleanup fails; an incomplete provider response is not a successful final result.
+- Resolve pending recovery by copying or explicitly dismissing it before starting another dictation. Never silently replace the recovery text. A Meeting may start while that inactive recovery remains available.
+
+### Remaining release qualification
+
+- Named application/version coverage, native hardware performance and final interaction acceptance remain release gates. Unsupported or unverified automatic-delivery targets retain review/copy fallback; compilation or a mock passing is not a compatibility result. Deferred model investigations do not block the approved existing-model implementation.
+- Cloud audio transcription, audio retention, multilingual launch support, always-listening activation, and general voice-command automation remain outside scope.
 
 ## 9. Packaging & distribution
 
