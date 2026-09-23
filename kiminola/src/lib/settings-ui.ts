@@ -2,6 +2,7 @@ export const SETTINGS_SECTIONS = [
   { id: "general", label: "General" },
   { id: "models", label: "Speech model" },
   { id: "ai", label: "AI provider" },
+  { id: "dictation", label: "Dictation" },
   { id: "shortcut", label: "Shortcut" },
   { id: "templates", label: "Templates" },
   { id: "about", label: "About" },

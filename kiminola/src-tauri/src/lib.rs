@@ -1,7 +1,12 @@
 mod asr;
 mod boards;
+mod capture_gate;
 mod db;
 mod db_safety;
+mod dictation;
+mod dictation_capture;
+mod dictation_history;
+mod dictation_native;
 mod export;
 mod llm;
 mod loopback;
@@ -119,6 +124,9 @@ pub fn run() {
                 .with_handler(|app, shortcut, event| {
                     use std::str::FromStr;
                     use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
+                    if dictation::handle_shortcut(app, shortcut, event.state()) {
+                        return;
+                    }
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
@@ -143,6 +151,13 @@ pub fn run() {
             let database = db::setup(app);
             if let Err(error) = shortcuts::setup(app) {
                 eprintln!("[shortcuts] startup settings unavailable: {error}");
+            }
+            // Finish main-thread database initialization before starting tasks
+            // that synchronously dispatch UI work back to this thread. SQLx
+            // returns pooled connections in spawned tasks; a worker waiting on
+            // UI can strand that task in its non-stealable Tokio LIFO slot.
+            if let Err(error) = dictation::setup(app) {
+                eprintln!("[dictation] startup unavailable: {error}");
             }
             meeting_presence::setup(app)?;
             if std::env::args().any(|arg| arg == "--background") {
@@ -200,6 +215,15 @@ pub fn run() {
             recording::stop_recording,
             recording::pause_recording,
             recording::resume_recording,
+            dictation::get_dictation_state,
+            dictation::set_dictation_settings,
+            dictation::start_dictation,
+            dictation::stop_dictation,
+            dictation::cancel_dictation,
+            dictation::resolve_dictation,
+            dictation::list_dictation_microphones,
+            dictation::list_dictation_history,
+            dictation::delete_dictation_history,
             db::save_meeting,
             db::list_meetings,
             db::get_meeting,

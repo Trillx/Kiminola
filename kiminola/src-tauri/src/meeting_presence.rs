@@ -302,8 +302,14 @@ impl MeetingPresenceState {
         }
     }
 
+    #[cfg(test)]
     fn set_recording_active(&self, active: bool) {
+        self.update_recording_active(|| active);
+    }
+
+    fn update_recording_active(&self, active: impl FnOnce() -> bool) {
         let mut data = self.inner.data.lock().unwrap();
+        let active = active();
         data.recording_active = active;
         if active {
             data.prompt = None;
@@ -388,7 +394,14 @@ impl MeetingPresenceState {
 /// Share the detector's lock so an in-flight poll cannot recreate a cleared prompt.
 pub(crate) fn recording_activity_changed(app: &tauri::AppHandle, active: bool) {
     if let Some(state) = app.try_state::<MeetingPresenceState>() {
-        state.set_recording_active(active);
+        // A repeated Meeting stop must not re-enable prompts during Dictation.
+        // Release the finished lease before calling this with false.
+        state.update_recording_active(|| {
+            active
+                || app
+                    .try_state::<crate::capture_gate::CaptureGate>()
+                    .is_some_and(|gate| gate.is_busy())
+        });
         state.update_tray();
         emit_state(app, &state);
         #[cfg(desktop)]
@@ -1045,13 +1058,38 @@ fn setup_tray(
                     let _ = app.emit(EVENT_RECORDING_QUIT_BLOCKED, ());
                     return;
                 }
-                event_state.set_quitting();
-                app.exit(0);
+                let handle = app.clone();
+                tauri::async_runtime::spawn(crate::dictation::request_quit(handle));
             }
             _ => {}
         })
         .build(app)?;
     state.update_tray();
+    Ok(())
+}
+
+struct QuitGuard {
+    _lease: crate::capture_gate::CaptureLease,
+}
+
+/// Recheck ownership after a delayed Dictation exit decision. The guard lasts
+/// until process exit, so a Meeting cannot start between this check and exit.
+pub(crate) fn quit_when_idle(app: &tauri::AppHandle, review_resolved: bool) -> Result<(), String> {
+    if recording::is_recording_active(app) {
+        let _ = app.emit(EVENT_RECORDING_QUIT_BLOCKED, ());
+        return Err("Finish and save the current Meeting before quitting.".into());
+    }
+    let gate = app.state::<crate::capture_gate::CaptureGate>();
+    let lease = if review_resolved {
+        gate.claim_quit_after_review_resolved()?
+    } else {
+        gate.claim(crate::capture_gate::CaptureOwner::Quit)?
+    };
+    app.manage(QuitGuard { _lease: lease });
+    if let Some(state) = app.try_state::<MeetingPresenceState>() {
+        state.set_quitting();
+    }
+    app.exit(0);
     Ok(())
 }
 

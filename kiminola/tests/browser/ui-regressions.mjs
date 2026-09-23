@@ -5,16 +5,19 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { createServer } from 'vite';
+import { build, preview } from 'vite';
 import { runOnboardingProviderTests } from './onboarding-provider.mjs';
 import { runMeetingPresenceTests } from './meeting-presence.mjs';
 import { runBoardsTests } from './boards.mjs';
+import { runDictationTests } from './dictation.mjs';
 
 // Real frontend, synthetic IPC only. Never opens the native app or the user's browser profile.
 const require = createRequire(import.meta.url);
-process.env.NODE_ENV = 'development';
-const server = await createServer({ server: { host: '127.0.0.1', port: 0, strictPort: false }, logLevel: 'warn' });
-await server.listen();
+// Rebuild for standalone runs too. Development dependency discovery can replace
+// shared chunks during route changes; exercise the immutable shipped bundles.
+process.env.NODE_ENV = 'production';
+await build({ logLevel: 'warn' });
+const server = await preview({ preview: { host: '127.0.0.1', port: 0, strictPort: false }, logLevel: 'warn' });
 const origin = server.resolvedUrls.local[0].replace(/\/$/, '');
 let browser;
 async function eventually(read, check, message) {
@@ -27,10 +30,10 @@ async function eventually(read, check, message) {
   } while (Date.now() < deadline);
   assert.fail(`${message}: ${JSON.stringify(value)}`);
 }
-async function check(name, run) {
+async function check(name, run, contextOptions = {}) {
   if (process.env.UI_TEST_FILTER && !name.includes(process.env.UI_TEST_FILTER)) return;
   await test(name, async () => {
-    const context = await browser.newContext({ viewport: { width: 1200, height: 800 }, colorScheme: 'light' });
+    const context = await browser.newContext({ viewport: { width: 1200, height: 800 }, colorScheme: 'light', ...contextOptions });
     await context.addInitScript({ path: fileURLToPath(new URL('./fixture.mjs', import.meta.url)) });
     const page = await context.newPage();
     page.setDefaultTimeout(7000);
@@ -49,7 +52,7 @@ async function check(name, run) {
 }
 async function open(page, route = '/') {
   await page.goto(origin + route);
-  // The first route can trigger Vite's cold dependency transform on Windows.
+  // Leave time for browser startup and font loading on cold Windows runners.
   await page.locator('.main-content').waitFor({ timeout: 30000 });
   await page.evaluate(() => document.fonts.ready);
 }
@@ -64,19 +67,22 @@ try {
     ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH, headless: true }
     : { channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true });
 
-  // Vite transforms routes lazily. Warm the first route outside the assertions
-  // so a cold hosted runner cannot consume a test's seven-second interaction
-  // budget while compiling the onboarding bundle.
-  const warmContext = await browser.newContext();
-  await warmContext.addInitScript({ path: fileURLToPath(new URL('./fixture.mjs', import.meta.url)) });
-  const warmPage = await warmContext.newPage();
-  await warmPage.goto(origin + '/onboarding');
-  await warmPage.getByRole('button', { name: 'Allow microphone', exact: true }).waitFor({ timeout: 30000 });
-  await warmContext.close();
+
+  await check('Browser suite loads production assets across route changes', async page => {
+    const scripts = [];
+    page.on('request', request => {
+      if (request.resourceType() === 'script') scripts.push(new URL(request.url()).pathname);
+    });
+    for (const route of ['/', '/meeting/1', '/boards', '/settings']) await open(page, route);
+    assert.ok(scripts.some(path => path.startsWith('/_app/immutable/')), 'Exercise the compiled app');
+    assert.deepEqual(scripts.filter(path => /\/@vite\/|\/\.svelte-kit\/|\/node_modules\/\.vite\//.test(path)), [],
+      'Route changes must not depend on mutable Vite development chunks');
+  });
 
   await runOnboardingProviderTests({ check, open, eventually, origin });
   await runMeetingPresenceTests({ check, open, eventually, origin });
   await runBoardsTests({ check, open, origin });
+  await runDictationTests({ check, open, eventually, origin });
 
   await check('UI-02 Cancel never writes a transcript correction', async page => {
     await open(page, '/meeting/1');
@@ -428,7 +434,7 @@ try {
       assert.deepEqual(violations.map(v => ({ id: v.id, nodes: v.nodes.map(n => n.failureSummary) })), []);
     });
   }
-  // Keep Vite's event loop available while the detailed drawer suite runs.
+  // Keep the preview server available while the detailed drawer suite runs.
   if (!process.env.UI_TEST_FILTER) {
     const sidebar = await promisify(execFile)(process.execPath,
       ['--test', 'tests/sidebar-shell.browser.mjs'],

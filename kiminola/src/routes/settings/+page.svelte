@@ -4,6 +4,8 @@
   import { beforeNavigate, goto } from "$app/navigation";
   import { getVersion } from "@tauri-apps/api/app";
   import ProviderConfigForm from "$lib/components/ProviderConfigForm.svelte";
+  import DictationSettings from "$lib/components/DictationSettings.svelte";
+  import DictationHistory from "$lib/components/DictationHistory.svelte";
   import { themeState, toggleTheme } from "$lib/theme.svelte";
   import {
     getGlobalShortcut,
@@ -51,6 +53,8 @@
 
   let active = $state<SettingsSection>(resolveSettingsSection(page.url.searchParams.get("section")));
   let shortcut = $state("");
+  let dictationDirty = $state(false);
+  let dictationBusy = $state(false);
   let savingShortcut = $state(false);
   let shortcutSaved = $state(false);
   let shortcutError = $state("");
@@ -287,6 +291,8 @@
   }
 
   function activateSection(section: SettingsSection) {
+    if (section !== active && dictationBusy) return;
+    if (section !== active && dictationDirty && !window.confirm("Discard unsaved dictation settings?")) return;
     if (section !== active && templateDirty) {
       pendingSection = section;
       discardConfirmOpen = true;
@@ -320,7 +326,7 @@
 
   onMount(() => {
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (templateDirty) event.preventDefault();
+      if (templateDirty || dictationDirty || dictationBusy) event.preventDefault();
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
     if (active === "models") void refreshModelHealth();
@@ -347,6 +353,9 @@
   });
 
   beforeNavigate(({ cancel, to }) => {
+    if (dictationBusy) { cancel(); return; }
+    if (dictationDirty && (to?.url.pathname !== page.url.pathname || to?.url.searchParams.get("section") !== "dictation") &&
+      !window.confirm("Discard unsaved dictation settings?")) { cancel(); return; }
     if (templateDirty && to?.url.pathname !== page.url.pathname &&
       !window.confirm("Discard unsaved template changes?")) cancel();
   });
@@ -502,6 +511,9 @@
           {/if}
           {#if presenceError}<div class="test-output error" role="alert">{presenceError}</div>{/if}
         </section>
+      {:else if active === "dictation"}
+        <DictationSettings bind:dirty={dictationDirty} bind:busy={dictationBusy} />
+        <DictationHistory />
       {:else if active === "models"}
         <div class="settings-card provider-config">
           <div class="enhance-title">On-device speech model</div>

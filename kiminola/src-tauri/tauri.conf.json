@@ -34,6 +34,23 @@
         "visible": false,
         "focus": false,
         "shadow": false
+      },
+      {
+        "label": "dictation",
+        "title": "Dictation",
+        "url": "index.html?window=dictation",
+        "width": 64,
+        "height": 220,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false,
+        "focusable": false,
+        "shadow": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {

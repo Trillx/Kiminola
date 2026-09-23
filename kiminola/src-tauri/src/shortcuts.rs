@@ -16,6 +16,10 @@ mod change;
 const SHORTCUT_KEY: &str = "global_shortcut";
 
 pub struct ShortcutState {
+    // Coordinate Meeting and Dictation registration transactions. The plugin
+    // indexes both by the same accelerator ID.
+    pub(crate) coordination: tokio::sync::Mutex<()>,
+    pub(crate) dictation_current: Mutex<Option<String>>,
     // Keep this synchronous: lib.rs reads it inside the global shortcut handler.
     pub current: Mutex<Option<String>>,
     // Serialize all updates; retain inactive registrations if rollback fails.
@@ -25,6 +29,8 @@ pub struct ShortcutState {
 impl ShortcutState {
     pub fn new() -> Self {
         Self {
+            coordination: tokio::sync::Mutex::new(()),
+            dictation_current: Mutex::new(None),
             current: Mutex::new(None),
             changes: tokio::sync::Mutex::new(Vec::new()),
         }
@@ -61,6 +67,23 @@ pub async fn set_global_shortcut(
     // registration and its persistence/compensation. The task holds the gate.
     tauri::async_runtime::spawn(async move {
         let state = app.state::<ShortcutState>();
+        let _coordination = state.coordination.lock().await;
+        if let Some(value) = shortcut.as_deref().filter(|value| !value.trim().is_empty()) {
+            let candidate = parse_shortcut(value)?;
+            let reserved = state.dictation_current.lock().unwrap().clone();
+            if reserved
+                .as_deref()
+                .map(parse_shortcut)
+                .transpose()?
+                .as_ref()
+                == Some(&candidate)
+            {
+                return Err(
+                    "This shortcut is already used by Dictation. Choose a different shortcut."
+                        .into(),
+                );
+            }
+        }
         let backend = NativeShortcutBackend {
             app: &app,
             pool: &pool,
