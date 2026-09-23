@@ -149,6 +149,7 @@
 
   function beginCreateSpace(parentSpaceId: number | null = null) {
     actionError = null;
+    if (parentSpaceId !== null) expandNode({ kind: "space", id: parentSpaceId });
     addingSpaceParentId = parentSpaceId;
     newSpaceName = "";
     addingSpace = true;
@@ -342,6 +343,19 @@
 
 <SearchDialog bind:open={searchOpen} />
 
+{#snippet spaceInput(placeholder: string)}
+  <input
+    class="space-input"
+    type="text"
+    {placeholder}
+    aria-label={placeholder}
+    bind:value={newSpaceName}
+    bind:this={spaceInputRef}
+    onkeydown={onSpaceInputKeydown}
+    disabled={actionBusy}
+  />
+{/snippet}
+
 {#snippet sidebarContent()}
   <a class="wordmark" href="/" aria-label="Kimi Nola — home">
     <img
@@ -384,16 +398,8 @@
       </ContextMenu.Portal>
     </ContextMenu.Root>
 
-    {#if addingSpace}
-      <input
-        class="space-input"
-        type="text"
-        placeholder={addingSpaceParentId === null ? "New Space" : "New sub-space"}
-        bind:value={newSpaceName}
-        bind:this={spaceInputRef}
-        onkeydown={onSpaceInputKeydown}
-        disabled={actionBusy}
-      />
+    {#if addingSpace && addingSpaceParentId === null}
+      {@render spaceInput("New Space")}
     {/if}
 
     {#if treeLoadError}
@@ -417,6 +423,8 @@
           {moveValidation}
           {draggingNode}
           {dropTarget}
+          creatingSpaceParentId={addingSpace ? addingSpaceParentId : null}
+          createSpaceInput={spaceInput}
           onToggle={toggleNode}
           onNewMeeting={startMeeting}
           onNewSpace={(parentId) => beginCreateSpace(parentId)}

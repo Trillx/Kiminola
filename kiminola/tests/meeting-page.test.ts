@@ -7,6 +7,8 @@ import { parse, type AST } from "svelte/compiler";
 import { createMeetingNotesAutosave, loadMeetingAfterAutosave } from "../src/lib/meeting-notes.ts";
 // @ts-expect-error Node imports TypeScript directly.
 import { providerIsConfigured, resolveSettingsSection, settingsSectionHref } from "../src/lib/settings-ui.ts";
+// @ts-expect-error Node imports TypeScript directly.
+import { extractActionItemEntries, replaceActionItems } from "../src/lib/action-items.ts";
 
 const component = readFileSync(new URL("../src/routes/meeting/[id]/+page.svelte", import.meta.url), "utf8");
 function elementsIn(value: unknown): Array<AST.RegularElement | AST.Component> {
@@ -92,6 +94,9 @@ function pageController(overrides: Record<string, unknown> = {}) {
     loadMeetingAfterAutosave,
     providerIsConfigured,
     settingsSectionHref,
+    extractActionItemEntries,
+    replaceActionItems,
+    updateEnhancedActionItems: async () => {},
     updateNotes: async (_id: number, text: string) => { stored = text; },
     enhanceMeeting: async () => { observed.push(stored); },
     onLlmChunk: async () => () => {},

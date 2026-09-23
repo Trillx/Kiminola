@@ -147,6 +147,7 @@ export interface BoardCard {
   position: number;
   meeting_id: number | null;
   meeting_title: string | null;
+  source_action_index: number | null;
 }
 
 export interface BoardColumn {
@@ -193,17 +194,30 @@ export async function addBoardCard(input: {
   columnId: number;
   title: string;
   meetingId?: number | null;
+  sourceActionIndex?: number | null;
+  sourceEnhancedMarkdown?: string | null;
 }): Promise<BoardCard> {
   return invoke("add_board_card", {
     boardId: input.boardId,
     columnId: input.columnId,
     title: input.title,
     meetingId: input.meetingId ?? null,
+    sourceActionIndex: input.sourceActionIndex ?? null,
+    sourceEnhancedMarkdown: input.sourceEnhancedMarkdown ?? null,
   });
 }
 
 export async function moveBoardCard(cardId: number, columnId: number): Promise<void> {
   await invoke("move_board_card", { cardId, columnId });
+}
+
+export async function updateEnhancedActionItems(input: {
+  meetingId: number;
+  originalMarkdown: string;
+  enhancedMarkdown: string;
+  edits: Array<{ sourceIndex: number; originalTitle: string; title: string }>;
+}): Promise<void> {
+  await invoke("update_enhanced_action_items", input);
 }
 
 
