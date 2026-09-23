@@ -737,6 +737,7 @@ struct OwnedMessageTrace {
 
 thread_local! {
     static OWNED_EDITOR_PROC: std::cell::Cell<WNDPROC> = const { std::cell::Cell::new(None) };
+    static OWNED_EDITOR_DELAY_REPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static OWNED_EDITOR_MESSAGES: std::cell::RefCell<Vec<OwnedMessageTrace>> = const {
         std::cell::RefCell::new(Vec::new())
     };
@@ -749,6 +750,11 @@ unsafe extern "system" fn traced_owned_editor(
     lparam: LPARAM,
 ) -> LRESULT {
     let started = Instant::now();
+    if id == EM_REPLACESEL && OWNED_EDITOR_DELAY_REPLACE.replace(false) {
+        // Delay only this child's first synthetic insertion, beyond the
+        // production 200 ms deadline. Never change another process or input.
+        std::thread::sleep(Duration::from_millis(300));
+    }
     let result = CallWindowProcW(OWNED_EDITOR_PROC.get(), hwnd, id, wparam, lparam);
     if matches!(
         id,
@@ -783,6 +789,8 @@ fn owned_editor_subprocess() {
     }
     use std::io::Write;
     let editor = Editor::new(ES_MULTILINE as u32);
+    OWNED_EDITOR_DELAY_REPLACE
+        .set(std::env::var("KIMINOLA_OWNED_EDITOR_DELAY_REPLACE").as_deref() == Ok("1"));
     OWNED_EDITOR_MESSAGES.with_borrow_mut(|messages| messages.reserve(128));
     let mut msg = MSG::default();
     unsafe {
@@ -867,6 +875,10 @@ impl Drop for OwnedEditorProcess {
 }
 
 fn owned_editor_process() -> (OwnedEditorProcess, HWND) {
+    owned_editor_process_with_delay(false)
+}
+
+fn owned_editor_process_with_delay(delay_replace: bool) -> (OwnedEditorProcess, HWND) {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     let started = Instant::now();
@@ -879,6 +891,10 @@ fn owned_editor_process() -> (OwnedEditorProcess, HWND) {
             "--test-threads=1",
         ])
         .env("KIMINOLA_OWNED_EDITOR_CHILD", "1")
+        .env(
+            "KIMINOLA_OWNED_EDITOR_DELAY_REPLACE",
+            if delay_replace { "1" } else { "0" },
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -959,6 +975,51 @@ fn process_security_matches_observed_runner_and_child_tokens() {
 
 #[test]
 fn cross_process_native_editor_reads_and_verifies_only_disposable_text() {
+    check_cross_process_delivery(false, owned_replace_selection, DeliveryOutcome::Verified);
+}
+
+#[test]
+fn cross_process_readback_fixture_allows_slow_synthetic_dispatch() {
+    check_cross_process_delivery(true, owned_replace_selection, DeliveryOutcome::Verified);
+}
+
+#[test]
+fn cross_process_production_timeout_is_uncertain_without_retry() {
+    check_cross_process_delivery(
+        true,
+        |edit, units| message(edit, EM_REPLACESEL, 1, units.as_ptr() as isize).map(|_| ()),
+        DeliveryOutcome::Uncertain,
+    );
+}
+
+fn owned_replace_selection(edit: HWND, units: &[u16]) -> Result<(), String> {
+    // This is synthetic fixture setup, not production WM_PASTE. Hosted native
+    // EDIT processing exceeded 200 ms even though it inserted the exact text.
+    // Give this one send a bounded fixture budget; production readback still
+    // uses 200 ms. The separate timeout test uses production message() unchanged.
+    let status = unsafe {
+        SendMessageTimeoutW(
+            edit,
+            EM_REPLACESEL,
+            WPARAM(1),
+            LPARAM(units.as_ptr() as isize),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+            5_000,
+            None,
+        )
+    };
+    if status.0 == 0 {
+        Err(TARGET_ERROR.into())
+    } else {
+        Ok(())
+    }
+}
+
+fn check_cross_process_delivery(
+    delay_replace: bool,
+    send: impl Fn(HWND, &[u16]) -> Result<(), String>,
+    expected: DeliveryOutcome,
+) {
     use std::cell::{Cell, RefCell};
     use windows::Win32::Foundation::{GetLastError, SetLastError, WIN32_ERROR};
 
@@ -972,7 +1033,7 @@ fn cross_process_native_editor_reads_and_verifies_only_disposable_text() {
         }
     }
 
-    let (mut child, edit) = owned_editor_process();
+    let (mut child, edit) = owned_editor_process_with_delay(delay_replace);
     // Only marshalling and exact readback in our disposable control. Security
     // eligibility is tested separately, never required or bypassed here.
     message(edit, EM_SETSEL, 10, 14).unwrap();
@@ -998,29 +1059,57 @@ fn cross_process_native_editor_reads_and_verifies_only_disposable_text() {
             calls.set(calls.get() + 1);
             let sent = Instant::now();
             unsafe { SetLastError(WIN32_ERROR(0)) };
-            let result = message(edit, EM_REPLACESEL, 1, units.as_ptr() as isize);
+            let result = send(edit, units);
             // Read immediately; successful sends need not clear last error.
             let error = unsafe { GetLastError() };
             *dispatch.borrow_mut() = Some((result.clone(), error, sent.elapsed()));
-            result.map(|_| ())
+            result
         },
     );
     println!(
         "owned editor delivery: outcome={outcome:?} elapsed={:?} calls={} dispatch={:?} guards={:?}",
         started.elapsed(), calls.get(), dispatch.borrow(), guards.borrow()
     );
-    // Diagnostic read only, after the original outcome is fixed. It must never
-    // upgrade Uncertain to Verified or dispatch the insertion again.
-    let after = read_editor(edit);
-    println!("owned editor after: {}", describe(&after));
+    // A queued trace request completes after any timed-out insertion finishes.
+    // This bounded fixture synchronization cannot change the original verdict.
     unsafe { PostMessageW(edit, OWNED_EDITOR_TRACE, WPARAM(0), LPARAM(0)).unwrap() };
     let trace = child.receive("OWNED_TRACE_END=");
     println!(
         "owned editor trace: {trace}; child_status={:?}",
         child.child.try_wait()
     );
+    // Diagnostic read only, after the original outcome is fixed. It must never
+    // upgrade Uncertain to Verified or dispatch the insertion again.
+    let after = read_editor(edit);
+    println!("owned editor after: {}", describe(&after));
     assert_eq!(calls.get(), 1, "owned editor dispatch is never retried");
-    assert_eq!(outcome.unwrap(), DeliveryOutcome::Verified);
+    assert_eq!(outcome.unwrap(), expected);
+    let dispatch = dispatch.into_inner().unwrap();
+    match expected {
+        DeliveryOutcome::Verified => {
+            dispatch.0.unwrap();
+            assert_eq!(
+                guards
+                    .borrow()
+                    .iter()
+                    .map(|entry| entry.0)
+                    .collect::<Vec<_>>(),
+                [true, true, false]
+            );
+        }
+        DeliveryOutcome::Uncertain => {
+            assert_eq!(dispatch.0, Err(TARGET_ERROR.into()));
+            assert_eq!(dispatch.1, WIN32_ERROR(1460));
+            assert_eq!(
+                guards
+                    .borrow()
+                    .iter()
+                    .map(|entry| entry.0)
+                    .collect::<Vec<_>>(),
+                [true, true]
+            );
+        }
+    }
     let after = after.unwrap();
     assert_eq!(
         String::from_utf16(&after.text).unwrap(),
