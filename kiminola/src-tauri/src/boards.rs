@@ -344,31 +344,29 @@ fn action_item_at(markdown: &str, target_index: i64) -> Option<String> {
             continue;
         }
 
-        let mut rest = trimmed;
-        if let Some(value) = rest
-            .strip_prefix("- ")
-            .or_else(|| rest.strip_prefix("* "))
-            .or_else(|| rest.strip_prefix("+ "))
-        {
-            rest = value;
+        let marker_end = if matches!(trimmed.as_bytes().first(), Some(b'-' | b'*' | b'+')) {
+            1
         } else {
-            let digit_count = rest.bytes().take_while(u8::is_ascii_digit).count();
-            let suffix = rest.get(digit_count..)?;
-            let Some(value) = suffix
-                .strip_prefix(". ")
-                .or_else(|| suffix.strip_prefix(") "))
-            else {
+            let digit_count = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+            if digit_count == 0 || !matches!(trimmed.as_bytes().get(digit_count), Some(b'.' | b')'))
+            {
                 continue;
-            };
-            rest = value;
+            }
+            digit_count + 1
+        };
+        let Some(after_marker) = trimmed.get(marker_end..) else {
+            continue;
+        };
+        if !after_marker.chars().next().is_some_and(char::is_whitespace) {
+            continue;
         }
-        if rest.len() >= 4
+        let mut rest = after_marker.trim_start();
+        if rest.len() >= 3
             && rest.starts_with('[')
             && matches!(rest.as_bytes()[1], b' ' | b'x' | b'X')
             && rest.as_bytes()[2] == b']'
-            && rest.as_bytes()[3] == b' '
         {
-            rest = &rest[4..];
+            rest = rest[3..].trim_start();
         }
         let title = rest.trim();
         if title.is_empty() {
@@ -544,12 +542,10 @@ pub(crate) async fn update_enhanced_action_items_impl(
 
     for edit in edits {
         sqlx::query(
-            "UPDATE board_cards SET title = ?, source_action_index = ?
-             WHERE meeting_id = ? AND title = ?
-               AND (source_action_index = ? OR source_action_index = -1)",
+            "UPDATE board_cards SET title = ?
+             WHERE meeting_id = ? AND title = ? AND source_action_index = ?",
         )
         .bind(edit.title.trim())
-        .bind(edit.source_index)
         .bind(meeting_id)
         .bind(edit.original_title.trim())
         .bind(edit.source_index)
@@ -659,6 +655,17 @@ pub async fn update_enhanced_action_items(
 mod tests {
     use super::*;
     use crate::db_safety::init_pool;
+
+    #[test]
+    fn action_item_parser_matches_frontend_whitespace_rules() {
+        let markdown =
+            "## Action items\n-  Follow up\n-\tSend notes\n- [x]Close loop\n1)\tBook room";
+
+        assert_eq!(action_item_at(markdown, 0).as_deref(), Some("Follow up"));
+        assert_eq!(action_item_at(markdown, 1).as_deref(), Some("Send notes"));
+        assert_eq!(action_item_at(markdown, 2).as_deref(), Some("Close loop"));
+        assert_eq!(action_item_at(markdown, 3).as_deref(), Some("Book room"));
+    }
 
     #[tokio::test]
     async fn boards_create_customise_and_move_cards() {
@@ -839,7 +846,7 @@ mod tests {
             .iter()
             .map(|card| card.title.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(titles, ["Beta", "Gamma", "Beta"]);
+        assert_eq!(titles, ["Beta", "Gamma", "Alpha"]);
 
         pool.close().await;
         std::fs::remove_file(path).expect("remove action edit test database");
