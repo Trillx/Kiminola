@@ -88,3 +88,47 @@ for (const operation of operations) {
     await flushPendingWork();
   });
 }
+
+for (const method of ["getDictationState", "listDictationMicrophones", "listDictationHistory"]) {
+  test(`failed ${method} does not abort an update draining a settings save`, async () => {
+    const { ipc, adapter } = await dictationIpc();
+    const read = ipc[method]().catch((error: Error) => error);
+    const save = ipc.setDictationSettings(input);
+    const events: string[] = [];
+    const update = installWhenSaved({
+      flush: flushPendingWork,
+      prepare: async () => { events.push("prepared"); },
+      install: async () => { events.push("installed"); },
+      cancel: async () => { events.push("cancelled"); },
+    }).then(() => null, (error: Error) => error);
+    await new Promise(resolve => setImmediate(resolve));
+    const failure = new Error("incidental read failed");
+    adapter.calls[0].reject(failure);
+    assert.equal(await read, failure, "the UI still receives the read error");
+    assert.deepEqual(events, [], "the settings save must still hold the update");
+    adapter.calls[1].resolve();
+    await save;
+    assert.equal(await update, null, "only the settings write controls update success");
+    assert.deepEqual(events, ["prepared", "installed"]);
+  });
+
+  test(`pending ${method} does not delay installation`, async () => {
+    const { ipc, adapter } = await dictationIpc();
+    const read = ipc[method]();
+    const events: string[] = [];
+    const update = installWhenSaved({
+      flush: flushPendingWork,
+      prepare: async () => { events.push("prepared"); },
+      install: async () => { events.push("installed"); },
+      cancel: async () => { events.push("cancelled"); },
+    });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(events, ["prepared", "installed"]);
+    } finally {
+      adapter.calls[0].resolve();
+      await read;
+      await update;
+    }
+  });
+}
