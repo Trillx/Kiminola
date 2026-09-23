@@ -1624,6 +1624,81 @@ mod tests {
             .unwrap();
         (commands, platform)
     }
+    #[test]
+    fn startup_initializes_dictation_before_background_ui_can_block_database_work() {
+        // This wiring contract uses real SQLx and Dictation initialization,
+        // injecting only the synchronous UI-thread rendezvous. Follow the
+        // application's order rather than a second hard-coded sequence.
+        // No Tauri app, native shortcuts, microphone or user profile is opened.
+        let setup = include_str!("lib.rs")
+            .split(".setup(|app| {")
+            .nth(1)
+            .unwrap()
+            .split(".on_window_event")
+            .next()
+            .unwrap();
+        let dictation_first = setup.find("dictation::setup(app)").unwrap()
+            < setup.find("meeting_presence::setup(app)").unwrap();
+        for worker_threads in [1, 4] {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(worker_threads)
+                .enable_all()
+                .build()
+                .unwrap();
+            let (commands, platform) = runtime.block_on(fixture());
+            let database = platform.scratch.database.clone();
+            let pool = platform.pool.clone();
+            let (ui_waiting_tx, ui_waiting_rx) = std::sync::mpsc::channel();
+            let (dispatch_tx, dispatch_rx) = std::sync::mpsc::channel();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            // The watchdog is outside Tokio. Always release the UI waiter, even
+            // when the regression fails. Extra workers cannot steal a LIFO task.
+            let watchdog = std::thread::spawn(move || {
+                let ready_before_dispatch = ready_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+                let _ = dispatch_tx.send(());
+                ready_before_dispatch
+            });
+            let background = || {
+                let task = runtime.spawn(async move {
+                    // Meeting presence reads settings then synchronously waits for
+                    // the main thread in MenuItem::set_text. PoolConnection::drop
+                    // must still finish returning the connection on this runtime.
+                    let _: SavedSettings = history::load_settings(&pool).await.unwrap();
+                    ui_waiting_tx.send(()).unwrap();
+                    dispatch_rx.recv().unwrap();
+                });
+                ui_waiting_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                task
+            };
+            let initialize = || {
+                runtime.block_on(DictationCommands::new(
+                    database.clone(),
+                    platform.clone(),
+                    CaptureGate::default(),
+                ))
+            };
+            let (initialized, ui_task) = if dictation_first {
+                let initialized = initialize();
+                (initialized, background())
+            } else {
+                let ui_task = background();
+                assert_eq!(platform.pool.size(), 1);
+                assert_eq!(platform.pool.num_idle(), 0);
+                (initialize(), ui_task)
+            };
+            let _ = ready_tx.send(());
+            let ready_before_dispatch = watchdog.join().unwrap();
+            runtime.block_on(ui_task).unwrap();
+            assert_eq!(initialized.unwrap().snapshot().phase, Phase::Disabled);
+            drop(commands);
+            runtime.block_on(database.suspend()).unwrap();
+            assert!(
+                ready_before_dispatch,
+                "Dictation initialization waited for main-thread UI dispatch ({worker_threads} workers)"
+            );
+        }
+    }
+
     async fn enable(commands: &Arc<DictationCommands>, cleanup: Cleanup, consent: bool) {
         let settings = DictationSettings {
             enabled: true,

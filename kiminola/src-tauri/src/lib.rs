@@ -152,10 +152,14 @@ pub fn run() {
             if let Err(error) = shortcuts::setup(app) {
                 eprintln!("[shortcuts] startup settings unavailable: {error}");
             }
-            meeting_presence::setup(app)?;
+            // Finish main-thread database initialization before starting tasks
+            // that synchronously dispatch UI work back to this thread. SQLx
+            // returns pooled connections in spawned tasks; a worker waiting on
+            // UI can strand that task in its non-stealable Tokio LIFO slot.
             if let Err(error) = dictation::setup(app) {
                 eprintln!("[dictation] startup unavailable: {error}");
             }
+            meeting_presence::setup(app)?;
             if std::env::args().any(|arg| arg == "--background") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
