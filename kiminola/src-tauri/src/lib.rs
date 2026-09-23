@@ -96,6 +96,13 @@ impl ActivationState {
     }
 }
 
+fn manage_database_state<R: tauri::Runtime>(
+    builder: tauri::Builder<R>,
+    state: db::DbState,
+) -> tauri::Builder<R> {
+    builder.manage(state)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let startup_mutex = WindowsStartupMutex;
@@ -106,7 +113,7 @@ pub fn run() {
         StartupCoordination::Degraded(diagnostic) => emit_local_diagnostic(diagnostic),
     }
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(ActivationState::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let intent = ActivationIntent::from_args(&args);
@@ -116,7 +123,8 @@ pub fn run() {
                 meeting_presence::show_main_window(app);
             }
         }))
-        .manage(shortcuts::ShortcutState::new())
+        .manage(shortcuts::ShortcutState::new());
+    let app = manage_database_state(builder, db::state())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
@@ -148,7 +156,7 @@ pub fn run() {
         )
         .setup(|app| {
             recording::setup(app);
-            let database = db::setup(app);
+            let database = app.state::<db::DbState>().pool.clone();
             if let Err(error) = shortcuts::setup(app) {
                 eprintln!("[shortcuts] startup settings unavailable: {error}");
             }
@@ -326,7 +334,43 @@ mod windows_test_runtime {
 
 #[cfg(test)]
 mod startup_wiring_tests {
-    use super::{ActivationDecision, ActivationIntent, ActivationState};
+    use super::{db, manage_database_state, ActivationDecision, ActivationIntent, ActivationState};
+
+    #[test]
+    fn database_status_is_available_before_setup_callback_runs() {
+        let builder = manage_database_state(
+            tauri::test::mock_builder(),
+            db::DbState::new(Err("test database path is unavailable".to_string())),
+        );
+        let app = builder
+            .setup(|_| panic!("setup must not run before this command"))
+            .invoke_handler(tauri::generate_handler![db::database_status])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("build mock webview");
+
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "database_status".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "http://tauri.localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::default(),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        );
+
+        let status = response
+            .expect("database_status must resolve before setup")
+            .deserialize::<serde_json::Value>()
+            .expect("database status response must be JSON");
+        assert_eq!(status["ready"], false);
+        assert_eq!(status["error"], "test database path is unavailable");
+    }
 
     #[test]
     fn ordinary_activation_before_setup_is_replayed_after_setup() {

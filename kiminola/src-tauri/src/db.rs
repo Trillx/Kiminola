@@ -12,12 +12,20 @@ use crate::db_safety::{Database, DatabaseStatus};
 #[cfg(test)]
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
-use tauri::{Manager, State};
+use tauri::State;
 
 /// Shared startup and recovery boundary. Failed initialization stays blocked
 /// until the user retries or restores through the recovery screen.
 pub struct DbState {
     pub(crate) pool: Arc<Database>,
+}
+
+impl DbState {
+    pub(crate) fn new(path: Result<PathBuf, String>) -> Self {
+        Self {
+            pool: Arc::new(Database::new(path)),
+        }
+    }
 }
 
 /// `%LOCALAPPDATA%\Kiminola\data\kiminola.db`, falling back to a `data/`
@@ -1625,14 +1633,11 @@ pub async fn search_meetings(
     search_meetings_impl(&pool, &query).await
 }
 
-/// Helper used by `lib.rs` to install DB state before launch warm-up.
-pub fn setup(app: &mut tauri::App) -> Arc<Database> {
-    let state = DbState {
-        pool: Arc::new(Database::new(db_path())),
-    };
-    let cell = Arc::clone(&state.pool);
-    app.manage(state);
-    cell
+/// Construct state for registration on the builder. The database gate can
+/// invoke commands before Tauri's setup callback runs, so registration must
+/// happen during builder configuration rather than inside setup.
+pub fn state() -> DbState {
+    DbState::new(db_path())
 }
 
 #[cfg(test)]
