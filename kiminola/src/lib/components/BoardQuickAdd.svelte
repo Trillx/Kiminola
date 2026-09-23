@@ -1,57 +1,71 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import ListTodo from "@lucide/svelte/icons/list-todo";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import { addBoardCard, listBoards, type Board } from "$lib/tauri";
   import { Button } from "$lib/components/ui/button";
   import { Textarea } from "$lib/components/ui/textarea";
+  import type { ActionItemEntry } from "$lib/action-items";
 
   type Step = "action" | "board" | "column";
   type Props = {
     meetingId: number;
-    actionItems: string[];
+    actionItems: ActionItemEntry[];
+    enhancedMarkdown: string;
   };
 
-  let { meetingId, actionItems }: Props = $props();
+  let { meetingId, actionItems, enhancedMarkdown }: Props = $props();
   let open = $state(false);
   let step = $state<Step>("action");
   let boards = $state<Board[]>([]);
   let selectedBoardId = $state<number | null>(null);
   let customAction = $state("");
   let selectedAction = $state("");
+  let selectedActionIndex = $state<number | null>(null);
   let loading = $state(false);
   let saving = $state(false);
   let error = $state<string | null>(null);
-  let success = $state<string | null>(null);
+  let triggerRef = $state<HTMLButtonElement | null>(null);
+  let closeButtonRef = $state<HTMLButtonElement | null>(null);
+  let announcement = $state("");
 
   let selectedBoard = $derived(boards.find((board) => board.id === selectedBoardId) ?? null);
 
-  function closeMenu() {
+  async function closeMenu(restoreFocus = true, force = false) {
+    if (!force && (loading || saving)) return;
     open = false;
     step = "action";
     error = null;
-    success = null;
     selectedBoardId = null;
     selectedAction = "";
+    selectedActionIndex = null;
     customAction = "";
+    if (restoreFocus) {
+      await tick();
+      triggerRef?.focus();
+    }
   }
 
-  function openMenu() {
+  async function openMenu() {
+    if (loading || saving) return;
     open = true;
     step = "action";
     error = null;
-    success = null;
     selectedBoardId = null;
     selectedAction = "";
+    selectedActionIndex = null;
     customAction = "";
+    await tick();
+    closeButtonRef?.focus();
   }
 
-  async function chooseAction(title: string) {
+  async function chooseAction(title: string, sourceActionIndex: number | null = null) {
     const trimmed = title.trim();
     if (!trimmed || loading) return;
     selectedAction = trimmed;
+    selectedActionIndex = sourceActionIndex;
     loading = true;
     error = null;
-    success = null;
     try {
       const snapshot = await listBoards();
       boards = snapshot.boards;
@@ -73,20 +87,27 @@
     step = "column";
   }
 
-  async function addToColumn(columnId: number, columnName: string) {
+  async function addToColumn(columnId: number) {
     if (selectedBoardId === null || !selectedAction || saving) return;
-    const board = selectedBoard;
+    const boardName = selectedBoard?.name ?? "board";
+    const columnName = selectedBoard?.columns.find((column) => column.id === columnId)?.name ?? "column";
+    const actionTitle = selectedAction;
+    const actionIndex = selectedActionIndex;
+    const sourceMarkdown = actionIndex === null ? null : enhancedMarkdown;
     saving = true;
     error = null;
     try {
       await addBoardCard({
         boardId: selectedBoardId,
         columnId,
-        title: selectedAction,
+        title: actionTitle,
         meetingId,
+        sourceActionIndex: actionIndex,
+        sourceEnhancedMarkdown: sourceMarkdown,
       });
-      success = `Added to ${board?.name ?? "board"} · ${columnName}`;
-      step = "column";
+      announcement = `Added ${actionTitle} to ${boardName}, ${columnName}.`;
+      saving = false;
+      await closeMenu(true, true);
     } catch (cause) {
       error = String(cause);
     } finally {
@@ -95,7 +116,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === "Escape" && open) closeMenu();
+    if (event.key === "Escape" && open && !loading && !saving) void closeMenu();
   }
 </script>
 
@@ -103,16 +124,19 @@
 
 <div class="board-quick-add">
   <Button
+    bind:ref={triggerRef}
     variant="outline"
     size="sm"
     aria-expanded={open}
     aria-haspopup="dialog"
     aria-label="Add action item to a board"
-    onclick={open ? closeMenu : openMenu}
+    disabled={loading || saving}
+    onclick={open ? () => void closeMenu() : () => void openMenu()}
   >
     <ListTodo size={15} aria-hidden="true" />
     Add to board
   </Button>
+  <span class="sr-only" role="status" aria-live="polite">{announcement}</span>
 
   {#if open}
     <div class="board-quick-add-panel" role="dialog" aria-label="Add action item to a board">
@@ -123,20 +147,17 @@
             {step === "action" ? "Choose an action" : step === "board" ? "Choose a board" : "Choose a column"}
           </h2>
         </div>
-        <button class="quick-add-close" type="button" aria-label="Close board menu" onclick={closeMenu}>×</button>
+        <button bind:this={closeButtonRef} class="quick-add-close" type="button" aria-label="Close board menu" disabled={loading || saving} onclick={() => void closeMenu()}>×</button>
       </header>
 
-      {#if success}
-        <div class="quick-add-success" role="status">{success}</div>
-      {/if}
 
       {#if step === "action"}
         {#if actionItems.length > 0}
           <p class="quick-add-copy">Select an action item from these enhanced notes.</p>
           <div class="quick-add-options" aria-label="Enhanced note action items">
-            {#each actionItems as item}
-              <button class="quick-add-option" type="button" disabled={loading} onclick={() => void chooseAction(item)}>
-                {item}
+            {#each actionItems as item (item.sourceIndex)}
+              <button class="quick-add-option" type="button" disabled={loading} onclick={() => void chooseAction(item.title, item.sourceIndex)}>
+                {item.title}
               </button>
             {/each}
           </div>
@@ -162,7 +183,7 @@
             </button>
           {/each}
         </div>
-        <a class="quick-add-manage" href="/boards" onclick={closeMenu}>Manage boards</a>
+        <a class="quick-add-manage" href="/boards" onclick={() => void closeMenu(false)}>Manage boards</a>
       {:else if selectedBoard}
         <button class="quick-add-back" type="button" onclick={() => (step = "board")}>
           <ArrowLeft size={14} aria-hidden="true" /> {selectedBoard.name}
@@ -174,7 +195,7 @@
               class="quick-add-option"
               type="button"
               disabled={saving}
-              onclick={() => void addToColumn(column.id, column.name)}
+              onclick={() => void addToColumn(column.id)}
             >
               <span>{column.name}</span>
               <small>{column.cards.length} {column.cards.length === 1 ? "card" : "cards"}</small>
@@ -320,7 +341,6 @@
     color: var(--brand);
   }
 
-  .quick-add-success,
   .quick-add-error {
     padding: 9px 10px;
     border-radius: var(--radius-input);
@@ -328,10 +348,6 @@
     line-height: 1.4;
   }
 
-  .quick-add-success {
-    background: var(--brand-soft);
-    color: var(--brand-deep);
-  }
 
   .quick-add-error {
     margin: 0;
