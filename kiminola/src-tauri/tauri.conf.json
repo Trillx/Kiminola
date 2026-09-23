@@ -16,6 +16,7 @@
         "width": 1200,
         "height": 800,
         "resizable": true,
+        "dragDropEnabled": false,
         "minWidth": 420,
         "minHeight": 520
       },

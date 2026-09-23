@@ -225,6 +225,15 @@ try {
   assert.deepEqual(await page.evaluate(() => window.sidebarMoves), [{ node: { kind: "space", id: 2 }, destination: { kind: "space", id: 4 } }]);
   assert.equal(await page.getByRole("link", { name: "Follow-up", exact: true }).count(), 1, "Move preserves descendants without duplication");
   console.log("PASS drag target ownership, cycle prevention, and revealing moved branches");
+
+  const kickoff = page.getByRole("link", { name: "Project kickoff", exact: true });
+  await kickoff.dragTo(personal);
+  await page.waitForFunction(() => window.sidebarMoves.length === 2);
+  assert.deepEqual(await page.evaluate(() => window.sidebarMoves[1]), {
+    node: { kind: "meeting", id: 12 }, destination: { kind: "space", id: 4 },
+  });
+  assert.equal(await personal.getAttribute("aria-expanded"), "true", "Meeting drop keeps its destination revealed");
+  console.log("PASS meetings can be dragged into Spaces with a pointer gesture");
   assert.deepEqual(errors, [], "browser runtime errors");
 } finally {
   await browser?.close();

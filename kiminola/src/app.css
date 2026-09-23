@@ -682,6 +682,34 @@ html[data-compact-window-resizing="true"] .transcript-sheet {
   flex-direction: column;
 }
 
+/* Shared low-profile scrollbar for app-owned scrolling surfaces. */
+.ui-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--hairline-strong) transparent;
+}
+
+.ui-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.ui-scrollbar::-webkit-scrollbar-track,
+.ui-scrollbar::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.ui-scrollbar::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--hairline-strong);
+  background-clip: padding-box;
+}
+
+.ui-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  background-clip: padding-box;
+}
+
 .topbar {
   display: flex;
   align-items: center;

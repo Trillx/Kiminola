@@ -216,6 +216,7 @@ pub fn run() {
             boards::rename_board_column,
             boards::add_board_card,
             boards::move_board_card,
+            boards::update_enhanced_action_items,
             db::update_notes,
             db::update_segment_text,
             db::delete_segment,

@@ -22,6 +22,9 @@
   let boardNameDraft = $state("");
   let editingColumnId = $state<number | null>(null);
   let columnNameDraft = $state("");
+  let draggingCardId = $state<number | null>(null);
+  let draggingFromColumnId = $state<number | null>(null);
+  let dropColumnId = $state<number | null>(null);
 
   let activeBoard = $derived(snapshot?.boards.find((board) => board.id === activeBoardId) ?? null);
 
@@ -149,19 +152,59 @@
     }
   }
 
-  async function moveCard(cardId: number, columnId: number, select: HTMLSelectElement, persistedColumnId: number) {
-    if (busy) return;
+  async function moveCard(cardId: number, columnId: number, persistedColumnId: number, select?: HTMLSelectElement) {
+    if (busy || columnId === persistedColumnId) return;
     busy = true;
     error = null;
     try {
       await moveBoardCard(cardId, columnId);
       await loadBoards();
     } catch (cause) {
-      select.value = String(persistedColumnId);
+      if (select) select.value = String(persistedColumnId);
       error = errorMessage(cause);
     } finally {
       busy = false;
     }
+  }
+
+  function clearCardDrag() {
+    draggingCardId = null;
+    draggingFromColumnId = null;
+    dropColumnId = null;
+  }
+
+  function beginCardDrag(event: DragEvent, cardId: number, columnId: number) {
+    if (busy || !event.dataTransfer) {
+      event.preventDefault();
+      return;
+    }
+    draggingCardId = cardId;
+    draggingFromColumnId = columnId;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(cardId));
+  }
+
+  function targetCardColumn(event: DragEvent, columnId: number) {
+    if (draggingCardId === null || !event.dataTransfer) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    dropColumnId = columnId;
+  }
+
+  function leaveCardColumn(event: DragEvent, columnId: number) {
+    const column = event.currentTarget as HTMLElement;
+    const nextTarget = event.relatedTarget as Node | null;
+    if (nextTarget && column.contains(nextTarget)) return;
+    if (dropColumnId === columnId) dropColumnId = null;
+  }
+
+  function dropCard(event: DragEvent, columnId: number) {
+    if (draggingCardId === null || draggingFromColumnId === null) return;
+    event.preventDefault();
+    const cardId = draggingCardId;
+    const sourceColumnId = draggingFromColumnId;
+    clearCardDrag();
+    void moveCard(cardId, columnId, sourceColumnId);
   }
 </script>
 
@@ -196,7 +239,7 @@
   {:else if snapshot}
     <div class="boards-layout">
       <nav class="board-list" aria-label="Boards">
-        <div class="board-list-items">
+        <div class="board-list-items ui-scrollbar">
           {#each snapshot.boards as board (board.id)}
             <button
               type="button"
@@ -245,9 +288,16 @@
             <p class="board-hint">Add action items from a meeting's enhanced notes to this board.</p>
           {/if}
 
-          <div class="kanban-grid" aria-label="Kanban columns">
+          <div class="kanban-grid ui-scrollbar" aria-label="Kanban columns">
             {#each activeBoard.columns as column (column.id)}
-              <article class="kanban-column" aria-label={column.name}>
+              <article
+                class="kanban-column"
+                class:drop-target={dropColumnId === column.id}
+                aria-label={column.name}
+                ondragover={(event) => targetCardColumn(event, column.id)}
+                ondragleave={(event) => leaveCardColumn(event, column.id)}
+                ondrop={(event) => dropCard(event, column.id)}
+              >
                 <header class="column-header">
                   {#if editingColumnId === column.id}
                     <form class="rename-column-form" onsubmit={(event) => { event.preventDefault(); void saveColumnName(column.id); }}>
@@ -264,9 +314,15 @@
                   <span class="column-count">{column.cards.length}</span>
                 </header>
 
-                <div class="column-cards">
+                <div class="column-cards ui-scrollbar">
                   {#each column.cards as card (card.id)}
-                    <article class="board-card">
+                    <article
+                      class="board-card"
+                      class:dragging={draggingCardId === card.id}
+                      draggable={!busy}
+                      ondragstart={(event) => beginCardDrag(event, card.id, column.id)}
+                      ondragend={clearCardDrag}
+                    >
                       <p>{card.title}</p>
                       {#if card.meeting_id}
                         <a href={`/meeting/${card.meeting_id}`} class="card-source">{card.meeting_title ?? "Meeting note"}</a>
@@ -279,7 +335,7 @@
                           disabled={busy}
                           onchange={(event) => {
                             const select = event.currentTarget as HTMLSelectElement;
-                            void moveCard(card.id, Number(select.value), select, column.id);
+                            void moveCard(card.id, Number(select.value), column.id, select);
                           }}
                         >
                           {#each activeBoard.columns as destination (destination.id)}
@@ -304,10 +360,18 @@
 </div>
 
 <style>
+  :global(.main):has(> .boards-page) {
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
   .boards-page {
     max-width: none;
     min-width: 0;
+    min-height: 0;
     padding: 24px 28px 28px;
+    overflow: hidden;
   }
 
   .boards-header {
@@ -384,8 +448,11 @@
   .boards-layout {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    flex: 1;
     gap: 20px;
     min-width: 0;
+    min-height: 0;
   }
 
   .board-list {
@@ -398,7 +465,6 @@
     gap: 6px;
     overflow-x: auto;
     padding-bottom: 8px;
-    scrollbar-width: thin;
   }
 
   .board-list-item {
@@ -434,7 +500,11 @@
   .board-list-item > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .board-workspace {
+    display: flex;
+    flex-direction: column;
     min-width: 0;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .board-workspace-header {
@@ -490,21 +560,31 @@
   .kanban-grid {
     display: flex;
     align-items: stretch;
+    flex: 1;
     gap: 12px;
     max-width: 100%;
+    min-height: 0;
     padding-bottom: 12px;
     overflow-x: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--hairline) transparent;
   }
 
   .kanban-column {
+    display: flex;
+    flex-direction: column;
     flex: 1 0 220px;
     min-width: 0;
-    min-height: 260px;
+    min-height: 0;
     padding: 12px;
+    border: 1px solid transparent;
     background: var(--surface-soft);
     border-radius: 8px;
+    overflow: hidden;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+
+  .kanban-column.drop-target {
+    border-color: var(--hairline-strong);
+    background: var(--surface-elev);
   }
 
   .column-header {
@@ -544,7 +624,12 @@
 
   .column-cards {
     display: grid;
+    align-content: start;
+    flex: 1;
     gap: 8px;
+    min-height: 0;
+    padding-right: 3px;
+    overflow-y: auto;
   }
 
   .board-card {
@@ -555,6 +640,15 @@
     border: 1px solid var(--hairline-soft);
     border-radius: var(--radius-input);
     box-shadow: 0 2px 6px var(--shadow-ambient);
+    cursor: grab;
+  }
+
+  .board-card:active {
+    cursor: grabbing;
+  }
+
+  .board-card.dragging {
+    opacity: 0.56;
   }
 
   .board-card p {

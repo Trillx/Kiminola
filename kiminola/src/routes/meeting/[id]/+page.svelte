@@ -13,6 +13,7 @@
     getLlmConfig,
     listTemplates,
     enhanceMeeting,
+    updateEnhancedActionItems,
     updateSegmentText,
     deleteSegment,
     type MeetingDetail,
@@ -21,7 +22,7 @@
     type TranscriptLine,
   } from "$lib/tauri";
   import { renderMarkdown } from "$lib/markdown";
-  import { extractActionItems } from "$lib/action-items";
+  import { extractActionItemEntries, replaceActionItems } from "$lib/action-items";
   import BoardQuickAdd from "$lib/components/BoardQuickAdd.svelte";
   import ProviderConfigForm from "$lib/components/ProviderConfigForm.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -45,6 +46,7 @@
   let enhancementVersion = 0;
   onDestroy(() => {
     enhancementVersion++;
+    actionItemEditVersion++;
     segmentEditVersion++;
     clearTimeout(renderTimer);
     unsubscribeNotes();
@@ -66,6 +68,12 @@
   let enhancedMd = $state("");
   let enhancedGenerated = $state(false);
   let hasEverEnhanced = $state(false);
+  let editingActionItems = $state(false);
+  let actionItemDrafts = $state<string[]>([]);
+  let savingActionItems = $state(false);
+  let actionItemEditError = $state<string | null>(null);
+  let actionItemEditStatus = $state<string | null>(null);
+  let actionItemEditVersion = 0;
   // Rendered HTML is updated on a throttle while streaming: re-parsing and
   // sanitizing the whole document on every token chunk stalls the UI.
   let enhancedHtml = $state("");
@@ -83,6 +91,66 @@
       renderTimer = undefined;
       enhancedHtml = renderMarkdown(enhancedMd);
     }, 100);
+  }
+
+  function startActionItemEdit() {
+    actionItemDrafts = extractActionItemEntries(enhancedMd).map((item) => item.title);
+    actionItemEditError = null;
+    actionItemEditStatus = null;
+    editingActionItems = true;
+  }
+
+  function cancelActionItemEdit() {
+    if (savingActionItems) return;
+    editingActionItems = false;
+    actionItemDrafts = [];
+    actionItemEditError = null;
+  }
+
+  async function saveActionItemEdits() {
+    if (!meeting || savingActionItems) return;
+    const entries = extractActionItemEntries(enhancedMd);
+    const titles = actionItemDrafts.map((item) => item.trim());
+    if (titles.some((item) => !item)) {
+      actionItemEditError = "Action items cannot be empty.";
+      return;
+    }
+
+    const edits = entries.flatMap(({ sourceIndex, title: originalTitle }, index) => {
+      const title = titles[index];
+      if (!title || title === originalTitle) return [];
+      return [{ sourceIndex, originalTitle, title }];
+    });
+    if (edits.length === 0) {
+      cancelActionItemEdit();
+      return;
+    }
+
+    const originalMarkdown = enhancedMd;
+    const nextMarkdown = replaceActionItems(originalMarkdown, edits);
+    const meetingId = meeting.id;
+    const version = ++actionItemEditVersion;
+    savingActionItems = true;
+    actionItemEditError = null;
+    try {
+      await updateEnhancedActionItems({
+        meetingId,
+        originalMarkdown,
+        enhancedMarkdown: nextMarkdown,
+        edits,
+      });
+      if (version !== actionItemEditVersion || meeting?.id !== meetingId) return;
+      enhancedMd = nextMarkdown;
+      renderEnhancedNow();
+      editingActionItems = false;
+      actionItemDrafts = [];
+      actionItemEditStatus = "Action items updated. Linked board cards were updated too.";
+    } catch (error) {
+      if (version !== actionItemEditVersion || meeting?.id !== meetingId) return;
+      actionItemEditError = `Could not update action items: ${String(error)}`;
+    } finally {
+      if (version === actionItemEditVersion && meeting?.id === meetingId) savingActionItems = false;
+    }
   }
 
   function isEnhanceMode(value: string | null): value is "generate" | "enhance" {
@@ -114,7 +182,7 @@
   }
 
   async function runEnhancement() {
-    if (!meeting || enhancing) return;
+    if (!meeting || enhancing || editingActionItems || savingActionItems) return;
     const id = meeting.id;
     const templateId = selectedTemplateId;
     const version = ++enhancementVersion;
@@ -156,6 +224,7 @@
     const mode = page.url.searchParams.get("mode");
     const warning = page.url.searchParams.get("warning");
     enhancementVersion++;
+    actionItemEditVersion++;
     enhancing = false;
     enhanceError = null;
     clearTimeout(renderTimer);
@@ -170,6 +239,11 @@
     enhancedHtml = "";
     enhancedGenerated = false;
     hasEverEnhanced = false;
+    editingActionItems = false;
+    actionItemDrafts = [];
+    savingActionItems = false;
+    actionItemEditError = null;
+    actionItemEditStatus = null;
     configLoaded = false;
     config = null;
     templates = [];
@@ -394,6 +468,7 @@
   }
 
   let configured = $derived(configLoaded && config != null && providerIsConfigured(config));
+  let actionItems = $derived(extractActionItemEntries(enhancedMd));
 
   const templateOptions = $derived(templates.map((t) => ({ value: String(t.id), label: t.name })));
   const selectedTemplateLabel = $derived(
@@ -584,12 +659,19 @@
                   <a class="manage-templates" href={settingsSectionHref("templates")}>Manage templates</a>
                 </div>
                 <div class="tool-actions">
-                  <BoardQuickAdd meetingId={meeting.id} actionItems={extractActionItems(enhancedMd)} />
+                  {#if !editingActionItems && !savingActionItems}
+                    <BoardQuickAdd meetingId={meeting.id} {actionItems} enhancedMarkdown={enhancedMd} />
+                  {/if}
+                  {#if actionItems.length > 0}
+                    <Button variant="outline" size="sm" onclick={startActionItemEdit} disabled={enhancing || editingActionItems || savingActionItems}>
+                      Edit action items
+                    </Button>
+                  {/if}
                   <Button
                     variant="outline"
                     size="sm"
                     onclick={runEnhancement}
-                    disabled={enhancing}
+                    disabled={enhancing || editingActionItems || savingActionItems}
                   >
                     {enhancing ? "Regenerating…" : "Regenerate"}
                   </Button>
@@ -598,6 +680,30 @@
               {#if enhancing}
                 <div class="streaming-hint">AI is rewriting your notes…</div>
               {/if}
+              {#if editingActionItems}
+                <section class="action-item-editor" aria-label="Edit enhanced action items">
+                  <div class="action-item-editor-heading">
+                    <strong>Action items</strong>
+                    <span>Changes also update linked cards on Boards.</span>
+                  </div>
+                  <div class="action-item-fields">
+                    {#each actionItemDrafts as _, index}
+                      <label>
+                        <span>Action item {index + 1}</span>
+                        <Input bind:value={actionItemDrafts[index]} disabled={savingActionItems} />
+                      </label>
+                    {/each}
+                  </div>
+                  {#if actionItemEditError}<p class="action-item-edit-error" role="alert">{actionItemEditError}</p>{/if}
+                  <div class="action-item-edit-actions">
+                    <Button size="sm" onclick={saveActionItemEdits} disabled={savingActionItems}>
+                      {savingActionItems ? "Saving…" : "Save action items"}
+                    </Button>
+                    <Button variant="ghost" size="sm" onclick={cancelActionItemEdit} disabled={savingActionItems}>Cancel</Button>
+                  </div>
+                </section>
+              {/if}
+              {#if actionItemEditStatus}<p class="action-item-edit-status" role="status">{actionItemEditStatus}</p>{/if}
               {@html enhancedHtml}
             </div>
           {/if}
@@ -786,6 +892,44 @@
   }
   .manage-templates:hover {
     color: var(--brand-hover);
+  }
+
+  .action-item-editor {
+    display: grid;
+    gap: 14px;
+    margin: 18px 0;
+    padding: 16px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+  }
+  .action-item-editor-heading,
+  .action-item-fields,
+  .action-item-fields label {
+    display: grid;
+    gap: 6px;
+  }
+  .action-item-editor-heading span,
+  .action-item-fields label > span,
+  .action-item-edit-status {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .action-item-fields {
+    gap: 12px;
+  }
+  .action-item-edit-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .action-item-edit-error,
+  .action-item-edit-status {
+    margin: 0;
+  }
+  .action-item-edit-error {
+    color: var(--danger);
+    font-size: 13px;
   }
 
   .raw-line {

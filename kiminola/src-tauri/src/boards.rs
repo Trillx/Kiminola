@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tauri::State;
 
@@ -20,6 +20,7 @@ pub struct BoardCard {
     pub position: i64,
     pub meeting_id: Option<i64>,
     pub meeting_title: Option<String>,
+    pub source_action_index: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +68,7 @@ struct CardRow {
     position: i64,
     meeting_id: Option<i64>,
     meeting_title: Option<String>,
+    source_action_index: Option<i64>,
 }
 
 async fn ensure_default_board(pool: &SqlitePool) -> Result<bool, String> {
@@ -150,7 +152,8 @@ pub(crate) async fn list_boards_impl(pool: &SqlitePool) -> Result<BoardsSnapshot
     }
 
     let card_rows = sqlx::query_as::<_, CardRow>(
-        "SELECT c.id, c.column_id, c.title, c.position, c.meeting_id, m.title AS meeting_title
+        "SELECT c.id, c.column_id, c.title, c.position, c.meeting_id, m.title AS meeting_title,
+                c.source_action_index
          FROM board_cards c
          LEFT JOIN meetings m ON m.id = c.meeting_id
          ORDER BY c.column_id ASC, c.position ASC, c.id ASC",
@@ -170,6 +173,7 @@ pub(crate) async fn list_boards_impl(pool: &SqlitePool) -> Result<BoardsSnapshot
                 position: row.position,
                 meeting_id: row.meeting_id,
                 meeting_title: row.meeting_title,
+                source_action_index: row.source_action_index,
             });
     }
 
@@ -181,7 +185,8 @@ pub(crate) async fn list_boards_impl(pool: &SqlitePool) -> Result<BoardsSnapshot
 
 async fn load_card(pool: &SqlitePool, card_id: i64) -> Result<BoardCard, String> {
     sqlx::query_as::<_, CardRow>(
-        "SELECT c.id, c.column_id, c.title, c.position, c.meeting_id, m.title AS meeting_title
+        "SELECT c.id, c.column_id, c.title, c.position, c.meeting_id, m.title AS meeting_title,
+                c.source_action_index
          FROM board_cards c
          LEFT JOIN meetings m ON m.id = c.meeting_id
          WHERE c.id = ?",
@@ -196,6 +201,7 @@ async fn load_card(pool: &SqlitePool, card_id: i64) -> Result<BoardCard, String>
         position: row.position,
         meeting_id: row.meeting_id,
         meeting_title: row.meeting_title,
+        source_action_index: row.source_action_index,
     })
     .ok_or_else(|| "board card not found".to_string())
 }
@@ -304,16 +310,100 @@ pub(crate) async fn rename_column_impl(
     Ok(())
 }
 
+fn action_item_at(markdown: &str, target_index: i64) -> Option<String> {
+    if target_index < 0 {
+        return None;
+    }
+    let mut in_action_section = false;
+    let mut action_index = 0_i64;
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let heading = trimmed
+                .trim_start_matches('#')
+                .trim()
+                .trim_end_matches(':')
+                .trim()
+                .to_ascii_lowercase();
+            in_action_section = matches!(
+                heading.as_str(),
+                "action item"
+                    | "action items"
+                    | "next step"
+                    | "next steps"
+                    | "ask / next step"
+                    | "ask / next steps"
+                    | "follow-up"
+                    | "follow-ups"
+                    | "follow up"
+                    | "follow ups"
+            );
+            continue;
+        }
+        if !in_action_section {
+            continue;
+        }
+
+        let mut rest = trimmed;
+        if let Some(value) = rest
+            .strip_prefix("- ")
+            .or_else(|| rest.strip_prefix("* "))
+            .or_else(|| rest.strip_prefix("+ "))
+        {
+            rest = value;
+        } else {
+            let digit_count = rest.bytes().take_while(u8::is_ascii_digit).count();
+            let suffix = rest.get(digit_count..)?;
+            let Some(value) = suffix
+                .strip_prefix(". ")
+                .or_else(|| suffix.strip_prefix(") "))
+            else {
+                continue;
+            };
+            rest = value;
+        }
+        if rest.len() >= 4
+            && rest.starts_with('[')
+            && matches!(rest.as_bytes()[1], b' ' | b'x' | b'X')
+            && rest.as_bytes()[2] == b']'
+            && rest.as_bytes()[3] == b' '
+        {
+            rest = &rest[4..];
+        }
+        let title = rest.trim();
+        if title.is_empty() {
+            continue;
+        }
+        if action_index == target_index {
+            return Some(title.to_string());
+        }
+        action_index += 1;
+    }
+    None
+}
+
 pub(crate) async fn add_card_impl(
     pool: &SqlitePool,
     board_id: i64,
     column_id: i64,
     title: &str,
     meeting_id: Option<i64>,
+    source_action_index: Option<i64>,
+    source_enhanced_markdown: Option<&str>,
 ) -> Result<BoardCard, String> {
     let title = title.trim();
     if title.is_empty() {
         return Err("Action item cannot be empty".to_string());
+    }
+    match (source_action_index, source_enhanced_markdown) {
+        (Some(index), Some(markdown))
+            if action_item_at(markdown, index).as_deref() == Some(title) => {}
+        (Some(_), _) => {
+            return Err(
+                "This action item has changed. Reopen Add to board and try again.".to_string(),
+            )
+        }
+        (None, _) => {}
     }
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let column_exists: Option<i64> =
@@ -345,17 +435,29 @@ pub(crate) async fn add_card_impl(
     .await
     .map_err(|e| e.to_string())?;
     let card_id: i64 = sqlx::query_scalar(
-        "INSERT INTO board_cards (column_id, meeting_id, title, position, created_at)
-         VALUES (?, ?, ?, ?, ?) RETURNING id",
+        "INSERT INTO board_cards
+             (column_id, meeting_id, source_action_index, title, position, created_at)
+         SELECT ?, ?, ?, ?, ?, ?
+         WHERE ? IS NULL OR EXISTS (
+             SELECT 1 FROM notes WHERE meeting_id = ? AND enhanced_markdown = ?
+         )
+         RETURNING id",
     )
     .bind(column_id)
     .bind(meeting_id)
+    .bind(source_action_index)
     .bind(title)
     .bind(position)
     .bind(now_iso())
-    .fetch_one(&mut *tx)
+    .bind(source_action_index)
+    .bind(meeting_id)
+    .bind(source_enhanced_markdown)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| {
+        "This action item has changed. Reopen Add to board and try again.".to_string()
+    })?;
     tx.commit().await.map_err(|e| e.to_string())?;
     load_card(pool, card_id).await
 }
@@ -397,6 +499,64 @@ pub(crate) async fn move_card_impl(
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionItemEdit {
+    source_index: i64,
+    original_title: String,
+    title: String,
+}
+
+pub(crate) async fn update_enhanced_action_items_impl(
+    pool: &SqlitePool,
+    meeting_id: i64,
+    original_markdown: &str,
+    enhanced_markdown: &str,
+    edits: &[ActionItemEdit],
+) -> Result<(), String> {
+    if edits
+        .iter()
+        .any(|edit| edit.source_index < 0 || edit.title.trim().is_empty())
+    {
+        return Err("Action item cannot be empty".to_string());
+    }
+
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let changed = sqlx::query(
+        "UPDATE notes SET enhanced_markdown = ?, updated_at = ?
+         WHERE meeting_id = ? AND enhanced_markdown = ?",
+    )
+    .bind(enhanced_markdown)
+    .bind(now_iso())
+    .bind(meeting_id)
+    .bind(original_markdown)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?
+    .rows_affected();
+    if changed == 0 {
+        return Err("Enhanced notes changed before the action items could be saved".to_string());
+    }
+
+    for edit in edits {
+        sqlx::query(
+            "UPDATE board_cards SET title = ?, source_action_index = ?
+             WHERE meeting_id = ? AND title = ?
+               AND (source_action_index = ? OR source_action_index = -1)",
+        )
+        .bind(edit.title.trim())
+        .bind(edit.source_index)
+        .bind(meeting_id)
+        .bind(edit.original_title.trim())
+        .bind(edit.source_index)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -450,9 +610,20 @@ pub async fn add_board_card(
     column_id: i64,
     title: String,
     meeting_id: Option<i64>,
+    source_action_index: Option<i64>,
+    source_enhanced_markdown: Option<String>,
 ) -> Result<BoardCard, String> {
     let pool = ensure_pool(&state.pool).await?;
-    add_card_impl(&pool, board_id, column_id, &title, meeting_id).await
+    add_card_impl(
+        &pool,
+        board_id,
+        column_id,
+        &title,
+        meeting_id,
+        source_action_index,
+        source_enhanced_markdown.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -463,6 +634,25 @@ pub async fn move_board_card(
 ) -> Result<(), String> {
     let pool = ensure_pool(&state.pool).await?;
     move_card_impl(&pool, card_id, column_id).await
+}
+
+#[tauri::command]
+pub async fn update_enhanced_action_items(
+    state: State<'_, DbState>,
+    meeting_id: i64,
+    original_markdown: String,
+    enhanced_markdown: String,
+    edits: Vec<ActionItemEdit>,
+) -> Result<(), String> {
+    let pool = ensure_pool(&state.pool).await?;
+    update_enhanced_action_items_impl(
+        &pool,
+        meeting_id,
+        &original_markdown,
+        &enhanced_markdown,
+        &edits,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -516,6 +706,8 @@ mod tests {
             column_id,
             "Send the follow-up",
             Some(meeting_id),
+            None,
+            None,
         )
         .await
         .expect("add card");
@@ -531,5 +723,125 @@ mod tests {
 
         pool.close().await;
         std::fs::remove_file(path).expect("remove board test database");
+    }
+
+    #[tokio::test]
+    async fn enhanced_action_edits_update_the_note_and_linked_cards() {
+        let path = std::env::temp_dir().join(format!(
+            "kiminola-action-edit-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let pool = init_pool(&path).await.expect("init action edit test pool");
+        let boards = list_boards_impl(&pool).await.expect("default board");
+        let column_id = boards.boards[0].columns[0].id;
+        let meeting_id: i64 = sqlx::query_scalar(
+            "INSERT INTO meetings (title, space_id, created_at, duration_seconds)
+             VALUES ('Action meeting', (SELECT id FROM spaces LIMIT 1), ?, 0) RETURNING id",
+        )
+        .bind(now_iso())
+        .fetch_one(&pool)
+        .await
+        .expect("seed meeting");
+        sqlx::query(
+            "INSERT INTO notes (meeting_id, raw_markdown, enhanced_markdown, updated_at)
+             VALUES (?, '', '## Action items\n\n- Alpha\n- Beta', ?)",
+        )
+        .bind(meeting_id)
+        .bind(now_iso())
+        .execute(&pool)
+        .await
+        .expect("seed enhanced notes");
+        let stale_add = add_card_impl(
+            &pool,
+            boards.boards[0].id,
+            column_id,
+            "Alpha",
+            Some(meeting_id),
+            Some(0),
+            Some("## Summary\n\nStale snapshot\n\n## Action items\n\n- Alpha\n- Beta"),
+        )
+        .await;
+        assert!(
+            stale_add.is_err(),
+            "stale enhanced actions must not create cards"
+        );
+        add_card_impl(
+            &pool,
+            boards.boards[0].id,
+            column_id,
+            "Alpha",
+            Some(meeting_id),
+            Some(0),
+            Some("## Action items\n\n- Alpha\n- Beta"),
+        )
+        .await
+        .expect("add first linked card");
+        add_card_impl(
+            &pool,
+            boards.boards[0].id,
+            column_id,
+            "Beta",
+            Some(meeting_id),
+            Some(1),
+            Some("## Action items\n\n- Alpha\n- Beta"),
+        )
+        .await
+        .expect("add second linked card");
+        let legacy_card = add_card_impl(
+            &pool,
+            boards.boards[0].id,
+            column_id,
+            "Alpha",
+            Some(meeting_id),
+            None,
+            None,
+        )
+        .await
+        .expect("add simulated legacy card");
+        sqlx::query("UPDATE board_cards SET source_action_index = -1 WHERE id = ?")
+            .bind(legacy_card.id)
+            .execute(&pool)
+            .await
+            .expect("mark legacy card");
+
+        update_enhanced_action_items_impl(
+            &pool,
+            meeting_id,
+            "## Action items\n\n- Alpha\n- Beta",
+            "## Action items\n\n- Beta\n- Gamma",
+            &[
+                ActionItemEdit {
+                    source_index: 0,
+                    original_title: "Alpha".to_string(),
+                    title: "Beta".to_string(),
+                },
+                ActionItemEdit {
+                    source_index: 1,
+                    original_title: "Beta".to_string(),
+                    title: "Gamma".to_string(),
+                },
+            ],
+        )
+        .await
+        .expect("update enhanced action");
+
+        let enhanced: String =
+            sqlx::query_scalar("SELECT enhanced_markdown FROM notes WHERE meeting_id = ?")
+                .bind(meeting_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load enhanced notes");
+        assert_eq!(enhanced, "## Action items\n\n- Beta\n- Gamma");
+        let snapshot = list_boards_impl(&pool).await.expect("reload boards");
+        let titles = snapshot.boards[0].columns[0]
+            .cards
+            .iter()
+            .map(|card| card.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, ["Beta", "Gamma", "Beta"]);
+
+        pool.close().await;
+        std::fs::remove_file(path).expect("remove action edit test database");
     }
 }

@@ -93,6 +93,17 @@ test("dialog and drag targets reuse source descendant membership", () => {
   assert.match(nodeSource, /moveValidation\.canDrop\(location\)/);
 });
 
+test("the main Tauri window leaves HTML drag and drop to the frontend", () => {
+  const config = JSON.parse(
+    readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+  );
+  assert.equal(
+    config.app.windows[0].dragDropEnabled,
+    false,
+    "WebView2's native file-drop handler blocks HTML drag and drop on Windows",
+  );
+});
+
 test("missing move sources fail closed and roots cannot move to root", () => {
   assert.equal(createMoveValidation(tree, null).canDrop({ kind: "space", id: 1 }), false);
   assert.equal(createMoveValidation(tree, { kind: "meeting", id: 99 }).canDrop({ kind: "space", id: 1 }), false);

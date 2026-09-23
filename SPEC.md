@@ -15,7 +15,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 1. **Idle / library** — sidebar shows Spaces tree, Boards, and recent meetings; "New meeting" starts capture.
 2. **Recording** — the full screen is a notes-first sketch notepad. A subtle **Live transcript** pill sits bottom-left; clicking it opens a floating square that pushes the notepad right. Mic and loopback channels transcribe in parallel, labeled **You** / **Others**. Concurrent partial utterances remain independent; finalized cross-source copies caused by laptop-speaker bleed are conservatively reconciled in favor of the clean loopback result.
 3. **Stop** — "Stop meeting" ends capture. Post-meeting defaults to the **My notes** tab with pills: **My notes → Enhance Notes → Transcript**.
-4. **Enhance (optional)** — user clicks **Enhance Notes**, picks a template, and gets a read-only AI artifact generated from their raw notes + transcript. Raw notes are never overwritten; re-enhance overwrites the AI artifact. Action items in enhanced notes can be copied to a selected Board column.
+4. **Enhance (optional)** — user clicks **Enhance Notes**, picks a template, and gets an AI artifact generated from their raw notes + transcript. Raw notes are never overwritten; re-enhance overwrites the AI artifact. Action items in enhanced notes can be edited and copied to a selected Board column. Editing an action item updates linked Board cards from that Meeting.
 
 ## 3. Stack
 

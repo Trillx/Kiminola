@@ -7,6 +7,7 @@
   const summary = (id, title) => ({ id, title, created_at: '2026-09-21T15:00:00Z', duration_seconds: 600, space_name: 'Personal', location_path: 'Personal', parent_meeting_id: null });
   const meetings = [summary(1, 'Alpha planning'), summary(2, 'Beta launch')];
   const transcript = [{ id: 11, channel: 'you', text: 'Original transcript sentence.', start_ms: 0, end_ms: 1000 }];
+  let enhancedMarkdown = '## Summary\n\nFixture summary.\n\n## Action items\n\n- Follow up with the team.';
   const presence = { enabled: false, paused: false, start_with_windows: false, mode: 'off', hint: null, prompt: null };
   const windowLabel = new URLSearchParams(location.search).get('window') === 'meeting-prompt' ? 'meeting-prompt' : 'main';
   const drafts = new Map();
@@ -66,7 +67,7 @@
   window.audit = {
     calls: [], failConfig: false, failShortcut: false, failSegment: false, failSearch: false,
     slowSearch: false, modelDelay: 0, treeCount: 2, failRecovery: false, recovery: null,
-    failPresenceAction: null, consumeAndFailPresenceAction: null, failPresenceState: false, failBoardMove: false,
+    failPresenceAction: null, consumeAndFailPresenceAction: null, failPresenceState: false, failBoardMove: false, boardAddDelay: 0,
     windows: { main: { visible: windowLabel === 'main', focused: false }, 'meeting-prompt': { visible: windowLabel === 'meeting-prompt', focused: false } },
     hasListener(event) { return [...listeners.values()].some(item => item.event === event); },
     seedNoteDraft(draft) { drafts.set(draft.id, structuredClone(draft)); },
@@ -162,11 +163,15 @@
           return;
         }
         case 'add_board_card': {
+          if (window.audit.boardAddDelay) await new Promise(resolve => setTimeout(resolve, window.audit.boardAddDelay));
+          if (args.sourceActionIndex != null && args.sourceEnhancedMarkdown !== enhancedMarkdown) {
+            throw new Error('Fixture: action item changed');
+          }
           const board = boardById(args.boardId);
           const column = board?.columns.find(item => item.id === args.columnId);
           if (!column) throw new Error('Fixture: column does not belong to board');
           const meeting = meetings.find(item => item.id === args.meetingId);
-          const card = { id: nextCardId++, title: args.title, position: column.cards.length, meeting_id: args.meetingId ?? null, meeting_title: meeting?.title ?? null };
+          const card = { id: nextCardId++, title: args.title, position: column.cards.length, meeting_id: args.meetingId ?? null, meeting_title: meeting?.title ?? null, source_action_index: args.sourceActionIndex ?? null };
           column.cards.push(card);
           persistBoards();
           return structuredClone(card);
@@ -190,7 +195,7 @@
           if (drafts.has(args.id)) return structuredClone(drafts.get(args.id));
           if (args.id !== 100) throw new Error('Fixture: note draft not found');
           return { id: 100, title: 'Recovery fixture', created_at: '2026-09-21T15:00:00Z', updated_at: '2026-09-21T15:00:00Z', raw_markdown: 'Recovered notes', meeting_id: null, recovery_duration_seconds: 60, recovery_location: null, recovery_transcript: Array.from({ length: 3 }, (_, i) => ({ channel: 'you', text: `Recovered sentence ${i + 1}`, start_ms: i * 2000, end_ms: i * 2000 + 1000 })) };
-        case 'get_meeting': return { ...meetings.find(m => m.id === args.id), notepad: 'Sample meeting notes.', enhanced_markdown: '## Summary\n\nFixture summary.\n\n## Action items\n\n- Follow up with the team.', transcript: structuredClone(transcript) };
+        case 'get_meeting': return { ...meetings.find(m => m.id === args.id), notepad: 'Sample meeting notes.', enhanced_markdown: enhancedMarkdown, transcript: structuredClone(transcript) };
         case 'get_llm_config': if (window.audit.failConfig) throw new Error('Fixture: config database unavailable'); return structuredClone(config);
         case 'set_llm_config':
           config = { ...args.config, has_api_key: savedIdentities.has(JSON.stringify([args.config.kind, args.config.base_url])) };
@@ -213,6 +218,16 @@
           return;
         case 'delete_segment': return;
         case 'update_notes': return;
+        case 'update_enhanced_action_items':
+          if (enhancedMarkdown !== args.originalMarkdown) throw new Error('Fixture: enhanced notes changed');
+          enhancedMarkdown = args.enhancedMarkdown;
+          for (const edit of args.edits) {
+            for (const card of boards.flatMap(board => board.columns).flatMap(column => column.cards)) {
+              if (card.meeting_id === args.meetingId && card.source_action_index === edit.sourceIndex && card.title === edit.originalTitle) card.title = edit.title;
+            }
+          }
+          persistBoards();
+          return;
         case 'rename_meeting': meetings.find(m => m.id === args.meetingId).title = args.title; return;
         case 'create_note_draft': return createDraft();
         case 'update_note_draft_recovery':
