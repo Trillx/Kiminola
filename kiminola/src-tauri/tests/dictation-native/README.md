@@ -16,6 +16,24 @@ Normal tests create hidden, offscreen, nonactivating native Unicode EDIT control
 
 Delivery-core tests use test-only `EM_REPLACESEL` dispatch into those owned controls. Production dispatch is one `WM_PASTE`. This tests UTF-16 content/selection verification, preflight refusal, partial delivery, failure and uncertainty handling. It does not establish a successful clipboard-based paste through the public foreground-target path.
 
+## Runner tokens and security policy
+
+Owned-editor marshalling does not require the runner or child to be a production-eligible target. Hosted runners may inherit elevated or non-medium tokens. `process_security_matches_observed_runner_and_child_tokens` separately queries the runner's and owned child's elevation, UIAccess and integrity RID, prints those observations, and checks the production verdict against them. Eligible live processes must return their actual creation time; ineligible tokens must return the target-security error. Failed token queries fail the test, rather than counting as expected rejection.
+
+`only_non_elevated_medium_integrity_editors_are_eligible` covers integrity boundaries and elevation/UIAccess combinations deterministically. Only non-elevated, non-UIAccess tokens in the medium integrity band pass. These are policy cases, not claims that elevated or UIAccess processes were launched locally.
+
+`ineligible_runner_still_exercises_owned_editor_and_release_gate` starts a fresh exact-test child and lowers only that child's process integrity to low, unless it is already low or below. It verifies the resulting token and production rejection, then executes the security-verdict, cross-process readback and public delivery-refusal tests. The parent verifies its own token did not change. This test reproduces both original runner-token assumptions without elevation, UAC changes, interactive prompts, clipboard access or changes to other processes. A failure to lower or inspect the token fails the test; it does not skip coverage.
+
+Focused token regression command:
+
+```text
+cargo test --manifest-path tests/dictation-native/Cargo.toml -- --exact dictation_native::tests::ineligible_runner_still_exercises_owned_editor_and_release_gate --nocapture --test-threads=1
+```
+
+The normal suite also runs this regression. Readback success under a policy-rejected token proves fixture isolation, not production target eligibility or release qualification.
+
+## Input and interruption isolation
+
 The interruption test creates the real native monitor thread, hidden top-level window, WTS registration and activity hooks. It sends synthetic session and power messages only to that owned monitor. It never locks or suspends Windows. Public snapshot and copy functions are tested for refusal during that synthetic locked state. Unlock/resume produce no capture callback.
 
 The chord test supplies virtual-key states and releases each primary/modifier component. It proves the decision rule, not physical keyboard event delivery.
@@ -38,7 +56,7 @@ The implementation host denied `CreateWindowStationW` with `HRESULT(0x80070005)`
 
 No production application/version is certified in this build. `CERTIFIED_APPLICATION_VERSIONS` is deliberately empty. Public `snapshot_target` refuses before inspecting any foreground editor or surrounding text. Public `paste_to_target` independently requires certification before consuming an attempt, validating the editor, publishing to the clipboard or dispatching. Clipboard consent does not bypass qualification. The backend keeps final text in review and offers explicit Copy, whose desktop checks and error handling still apply. This is not a claim that successful clipboard publication has been qualified.
 
-Regression tests call both public functions. The delivery test uses a privately constructed snapshot of a hidden, test-owned EDIT and checks that its content and attempt flag stay unchanged. These tests do not require foreground activation, clipboard access or a real user's editor. They do not replace the existing private native delivery tests.
+Regression tests call both public functions. The delivery test uses a privately constructed, deliberately ineligible snapshot of a hidden, test-owned EDIT with a sentinel creation time. It checks the exact qualification error and that both initial attempt states and editor content stay unchanged. Constructing this snapshot does not call `process_security`: early refusal must not require an eligible runner. These tests do not require foreground activation, clipboard access or a real user's editor. They do not replace the existing private native delivery tests.
 
 A future allowlist entry must verify the retained live process's exact application/version and tested platform, with recorded disposable-editor clipboard and `WM_PASTE` evidence. A Unicode EDIT class, user consent, compilation or the synthetic dispatch below cannot certify an application. Unknown identities must fail closed.
 

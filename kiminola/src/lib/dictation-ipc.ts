@@ -1,6 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as nativeInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { trackOperation } from "./pending-work";
 import type { DictationHistoryEntry, DictationMicrophone, DictationResolution, DictationSettingsInput, DictationSnapshot } from "./dictation-types";
+
+function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
+  return trackOperation(nativeInvoke<T>(command, args));
+}
 
 export const getDictationState = () => invoke<DictationSnapshot>("get_dictation_state");
 export const setDictationSettings = (input: DictationSettingsInput) => invoke<DictationSnapshot>("set_dictation_settings", { input });

@@ -318,11 +318,30 @@ fn decode_audio<D: Decoder>(
     sink: &EventSink,
 ) -> Result<String, String> {
     let mut text = String::new();
-    let publish = |revision: Option<String>, text: &mut String| {
-        if let Some(revision) = revision {
+    // ASR revisions replace only the current utterance. Endpoint finality must
+    // commit it even when the text matches the last partial we published.
+    let mut finalized = String::new();
+    let mut partial = String::new();
+    let mut publish = |revision: Option<(String, bool)>, text: &mut String| {
+        if let Some((revision, is_final)) = revision {
             let revision = revision.trim();
-            if !revision.is_empty() && revision != text {
-                *text = revision.to_string();
+            if !revision.is_empty() {
+                partial = revision.to_string();
+            }
+            if is_final && !partial.is_empty() {
+                if !finalized.is_empty() {
+                    finalized.push(' ');
+                }
+                finalized.push_str(&partial);
+                partial.clear();
+            }
+            let current = match (finalized.is_empty(), partial.is_empty()) {
+                (false, false) => format!("{finalized} {partial}"),
+                (_, true) => finalized.clone(),
+                (true, false) => partial.clone(),
+            };
+            if current != *text {
+                *text = current;
                 sink(CaptureEvent::Text(text.clone()));
             }
         }
@@ -343,6 +362,10 @@ fn decode_audio<D: Decoder>(
     if !tail.is_empty() {
         publish(decoder.push(&tail)?, &mut text);
     }
+    // Streaming transducers need trailing silence to release encoder context.
+    // It can finalize an utterance and reset the lane, so publish it BEFORE
+    // finish: an empty/new finish result must not hide the endpoint's text.
+    publish(decoder.push(&[0.0; 4800])?, &mut text);
     publish(decoder.finish()?, &mut text);
     sink(CaptureEvent::Level(0.0));
     Ok(text)
@@ -354,20 +377,17 @@ trait CaptureSource {
 }
 
 trait Decoder {
-    fn push(&mut self, samples: &[f32]) -> Result<Option<String>, String>;
-    fn finish(&mut self) -> Result<Option<String>, String>;
+    fn push(&mut self, samples: &[f32]) -> Result<Option<(String, bool)>, String>;
+    fn finish(&mut self) -> Result<Option<(String, bool)>, String>;
 }
 
 impl Decoder for AsrLane {
-    fn push(&mut self, samples: &[f32]) -> Result<Option<String>, String> {
-        Ok(AsrLane::push(self, samples).map(|(text, _)| text))
+    fn push(&mut self, samples: &[f32]) -> Result<Option<(String, bool)>, String> {
+        Ok(AsrLane::push(self, samples))
     }
 
-    fn finish(&mut self) -> Result<Option<String>, String> {
-        // sherpa streaming transducers need trailing silence to release their
-        // final encoder context. Only dictation adds this padding.
-        let tail = AsrLane::push(self, &[0.0; 4800]);
-        Ok(AsrLane::finish(self).or(tail).map(|(text, _)| text))
+    fn finish(&mut self) -> Result<Option<(String, bool)>, String> {
+        Ok(AsrLane::finish(self))
     }
 }
 
@@ -542,13 +562,183 @@ mod tests {
     }
 
     impl Decoder for SyntheticDecoder {
-        fn push(&mut self, samples: &[f32]) -> Result<Option<String>, String> {
+        fn push(&mut self, samples: &[f32]) -> Result<Option<(String, bool)>, String> {
             self.heard_audio |= samples.iter().any(|&sample| sample > 0.1);
             Ok(None)
         }
-        fn finish(&mut self) -> Result<Option<String>, String> {
-            Ok(self.heard_audio.then(|| "synthetic words".to_string()))
+        fn finish(&mut self) -> Result<Option<(String, bool)>, String> {
+            Ok(self
+                .heard_audio
+                .then(|| ("synthetic words".to_string(), true)))
         }
+    }
+
+    #[derive(Default)]
+    struct ScriptedDecoder {
+        revisions: std::collections::VecDeque<(&'static str, bool)>,
+        silence_revision: Option<(&'static str, bool)>,
+        final_revision: Option<(&'static str, bool)>,
+    }
+
+    impl Decoder for ScriptedDecoder {
+        fn push(&mut self, samples: &[f32]) -> Result<Option<(String, bool)>, String> {
+            let revision = if samples == [0.0; 4800] {
+                self.silence_revision.take()
+            } else {
+                self.revisions.pop_front()
+            };
+            Ok(revision.map(|(text, is_final)| (text.into(), is_final)))
+        }
+
+        fn finish(&mut self) -> Result<Option<(String, bool)>, String> {
+            assert!(self.revisions.is_empty(), "all audio must reach ASR");
+            Ok(self
+                .final_revision
+                .take()
+                .map(|(text, is_final)| (text.into(), is_final)))
+        }
+    }
+
+    async fn scripted_capture(decoder: ScriptedDecoder) -> (String, Vec<String>) {
+        struct ScriptedMicrophone {
+            input: InputPort,
+            chunks: usize,
+        }
+        impl CaptureSource for ScriptedMicrophone {
+            fn sample_rate(&self) -> u32 {
+                48_000
+            }
+            fn play(&self) -> Result<(), String> {
+                for _ in 0..self.chunks {
+                    self.input.push(&[0.5; CHUNK_FRAMES]);
+                }
+                Ok(())
+            }
+        }
+        let chunks = decoder.revisions.len();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let capture = DictationCapture::start_with(
+            move |input| Ok(ScriptedMicrophone { input, chunks }),
+            move || Ok(decoder),
+            Arc::new(move |event| {
+                if let CaptureEvent::Text(text) = event {
+                    observed.lock().unwrap().push(text);
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let text = tokio::time::timeout(Duration::from_secs(2), capture.finish())
+            .await
+            .expect("scripted capture must finish without microphone access")
+            .unwrap();
+        let revisions = events.lock().unwrap().clone();
+        (text, revisions)
+    }
+
+    #[tokio::test]
+    async fn utterance_endpoints_preserve_final_text_while_later_partials_change() {
+        let (text, events) = scripted_capture(ScriptedDecoder {
+            revisions: [
+                (" first utterance ", false),
+                ("first utterance", false),
+                ("first utterance", true),
+                ("secon", false),
+                ("second revised", false),
+            ]
+            .into(),
+            final_revision: Some(("second complete", true)),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(text, "first utterance second complete");
+        assert_eq!(
+            events,
+            [
+                "first utterance",
+                "first utterance secon",
+                "first utterance second revised",
+                "first utterance second complete",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn utterance_endpoint_from_trailing_silence_survives_empty_finish() {
+        let (text, events) = scripted_capture(ScriptedDecoder {
+            revisions: [("opening", true), ("last par", false)].into(),
+            silence_revision: Some(("last complete", true)),
+            final_revision: Some(("", true)),
+        })
+        .await;
+        assert_eq!(text, "opening last complete");
+        assert_eq!(
+            events,
+            ["opening", "opening last par", "opening last complete"]
+        );
+    }
+
+    #[tokio::test]
+    async fn utterance_endpoints_keep_intentionally_repeated_words() {
+        let (text, events) = scripted_capture(ScriptedDecoder {
+            revisions: [("yes", false), ("yes", true), ("yes", false), ("yes", true)].into(),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(text, "yes yes");
+        assert_eq!(events, ["yes", "yes yes"]);
+    }
+
+    #[tokio::test]
+    async fn utterance_empty_endpoint_commits_partial_before_the_next_revision() {
+        let (text, events) = scripted_capture(ScriptedDecoder {
+            revisions: [
+                ("first", false),
+                (" ", true),
+                ("", false),
+                ("second wrong", false),
+                ("second", false),
+                ("", true),
+            ]
+            .into(),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(text, "first second");
+        assert_eq!(events, ["first", "first second wrong", "first second"]);
+    }
+
+    #[tokio::test]
+    async fn utterance_partial_from_trailing_silence_is_replaced_by_finish() {
+        let (text, events) = scripted_capture(ScriptedDecoder {
+            revisions: [("first", true), ("sec", false)].into(),
+            silence_revision: Some(("second pending", false)),
+            final_revision: Some(("second complete", true)),
+        })
+        .await;
+        assert_eq!(text, "first second complete");
+        assert_eq!(
+            events,
+            [
+                "first",
+                "first sec",
+                "first second pending",
+                "first second complete"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn utterance_endpoint_from_trailing_silence_precedes_new_finish_text() {
+        let (text, events) = scripted_capture(ScriptedDecoder {
+            revisions: [("first", true)].into(),
+            silence_revision: Some(("second", true)),
+            final_revision: Some(("third", true)),
+        })
+        .await;
+        assert_eq!(text, "first second third");
+        assert_eq!(events, ["first", "first second", "first second third"]);
     }
 
     async fn wait_for_release(released: &AtomicBool) {
@@ -721,10 +911,10 @@ mod tests {
     async fn failed_finalization_keeps_the_latest_text_callback() {
         struct FailingDecoder;
         impl Decoder for FailingDecoder {
-            fn push(&mut self, _: &[f32]) -> Result<Option<String>, String> {
-                Ok(Some("words retained for review".into()))
+            fn push(&mut self, _: &[f32]) -> Result<Option<(String, bool)>, String> {
+                Ok(Some(("words retained for review".into(), false)))
             }
-            fn finish(&mut self) -> Result<Option<String>, String> {
+            fn finish(&mut self) -> Result<Option<(String, bool)>, String> {
                 Err("decoder finalization failed".into())
             }
         }
@@ -826,14 +1016,14 @@ mod tests {
             release: mpsc::Receiver<()>,
         }
         impl Decoder for StalledDecoder {
-            fn push(&mut self, _: &[f32]) -> Result<Option<String>, String> {
+            fn push(&mut self, _: &[f32]) -> Result<Option<(String, bool)>, String> {
                 if let Some(entered) = self.entered.take() {
                     let _ = entered.send(());
                     let _ = self.release.recv_timeout(Duration::from_secs(3));
                 }
-                Ok(Some("recover these words".into()))
+                Ok(Some(("recover these words".into(), false)))
             }
-            fn finish(&mut self) -> Result<Option<String>, String> {
+            fn finish(&mut self) -> Result<Option<(String, bool)>, String> {
                 Ok(None)
             }
         }

@@ -298,18 +298,163 @@ fn lock_disconnect_and_suspend_interrupt_but_resume_never_starts_capture() {
     ));
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ObservedToken {
+    elevated: u32,
+    ui_access: u32,
+    integrity_rid: u32,
+}
+
+// Independent native observations, not the verdict returned by process_security.
+// Query failures fail the test rather than being mistaken for policy rejection.
+fn observe_token(process: HANDLE) -> ObservedToken {
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(process, TOKEN_QUERY, &mut token).unwrap();
+        let token = ProcessHandle(token.0 as usize);
+        let mut needed = 0;
+        let mut elevated = TOKEN_ELEVATION::default();
+        GetTokenInformation(
+            token.raw(),
+            TokenElevation,
+            Some((&mut elevated as *mut TOKEN_ELEVATION).cast()),
+            std::mem::size_of_val(&elevated) as u32,
+            &mut needed,
+        )
+        .unwrap();
+        let mut ui_access = 0u32;
+        GetTokenInformation(
+            token.raw(),
+            TokenUIAccess,
+            Some((&mut ui_access as *mut u32).cast()),
+            std::mem::size_of_val(&ui_access) as u32,
+            &mut needed,
+        )
+        .unwrap();
+        let mut buffer = [0usize; 64]; // Align TOKEN_MANDATORY_LABEL's SID pointer.
+        GetTokenInformation(
+            token.raw(),
+            TokenIntegrityLevel,
+            Some(buffer.as_mut_ptr().cast()),
+            std::mem::size_of_val(&buffer) as u32,
+            &mut needed,
+        )
+        .unwrap();
+        let label = &*buffer.as_ptr().cast::<TOKEN_MANDATORY_LABEL>();
+        assert!(IsValidSid(label.Label.Sid).as_bool());
+        let count = *GetSidSubAuthorityCount(label.Label.Sid);
+        assert!(count > 0);
+        ObservedToken {
+            elevated: elevated.TokenIsElevated,
+            ui_access,
+            integrity_rid: *GetSidSubAuthority(label.Label.Sid, u32::from(count - 1)),
+        }
+    }
+}
+
+#[test]
+fn ineligible_runner_still_exercises_owned_editor_and_release_gate() {
+    const CHILD: &str = "KIMINOLA_LOW_INTEGRITY_FIXTURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let original = observe_token(unsafe { GetCurrentProcess() });
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dictation_native::tests::ineligible_runner_still_exercises_owned_editor_and_release_gate",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert_eq!(observe_token(unsafe { GetCurrentProcess() }), original);
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+
+    // Only this fresh exact-test child lowers its own integrity. No UAC setting,
+    // privilege elevation, user input, clipboard or other process is changed.
+    let current = unsafe { GetCurrentProcess() };
+    let before = observe_token(current);
+    println!("runner token before isolated lowering: {before:?}");
+    if before.integrity_rid > 0x1000 {
+        unsafe {
+            let mut token = HANDLE::default();
+            OpenProcessToken(current, TOKEN_ADJUST_DEFAULT | TOKEN_QUERY, &mut token).unwrap();
+            let token = ProcessHandle(token.0 as usize);
+            let mut sid_buffer = [0u32; 17];
+            let sid = PSID(sid_buffer.as_mut_ptr().cast());
+            let mut size = std::mem::size_of_val(&sid_buffer) as u32;
+            CreateWellKnownSid(WinLowLabelSid, PSID::default(), sid, &mut size).unwrap();
+            let label = TOKEN_MANDATORY_LABEL {
+                Label: SID_AND_ATTRIBUTES {
+                    Sid: sid,
+                    Attributes: 0x20, // SE_GROUP_INTEGRITY
+                },
+            };
+            SetTokenInformation(
+                token.raw(),
+                TokenIntegrityLevel,
+                (&label as *const TOKEN_MANDATORY_LABEL).cast(),
+                std::mem::size_of_val(&label) as u32 + size,
+            )
+            .unwrap();
+        }
+    }
+    let lowered = observe_token(current);
+    println!("isolated policy-rejected runner token: {lowered:?}");
+    assert!(lowered.integrity_rid <= 0x1000);
+    assert_eq!(process_security(current), Err(TARGET_ERROR.into()));
+    process_security_matches_observed_runner_and_child_tokens();
+
+    // Execute both regressions even if the first fails, so their independent
+    // assumptions about runner eligibility remain visible in failure output.
+    let readback = std::panic::catch_unwind(
+        cross_process_native_editor_reads_and_verifies_only_disposable_text,
+    );
+    let gate = std::panic::catch_unwind(
+        release_qualification_blocks_public_delivery_without_consuming_attempt,
+    );
+    assert!(
+        readback.is_ok(),
+        "owned-editor readback requires an eligible runner"
+    );
+    assert!(
+        gate.is_ok(),
+        "early qualification refusal requires an eligible runner"
+    );
+}
+
 #[test]
 fn only_non_elevated_medium_integrity_editors_are_eligible() {
-    assert!(permits_integrity(0, 0, 0x2000));
-    for args in [
-        (1, 0, 0x2000),
-        (0, 1, 0x2000),
-        (0, 0, 0x3000),
-        (0, 0, 0x4000),
-        (0, 0, 0x1000),
-        (0, 0, 0),
+    // Cover boundaries and every flag combination without changing any token.
+    // The medium band includes medium-plus; high integrity begins at 0x3000.
+    for (rid, medium) in [
+        (0, false),
+        (0x1000, false),
+        (0x1fff, false),
+        (0x2000, true),
+        (0x2100, true),
+        (0x2fff, true),
+        (0x3000, false),
+        (0x4000, false),
+        (u32::MAX, false),
     ] {
-        assert!(!permits_integrity(args.0, args.1, args.2));
+        for elevated in [0, 1, 2, u32::MAX] {
+            for ui_access in [0, 1, 2, u32::MAX] {
+                assert_eq!(
+                    permits_integrity(elevated, ui_access, rid),
+                    medium && elevated == 0 && ui_access == 0,
+                    "elevated={elevated}, ui_access={ui_access}, rid={rid:#x}"
+                );
+            }
+        }
     }
 }
 
@@ -548,7 +693,9 @@ fn release_qualification_blocks_public_delivery_without_consuming_attempt() {
         foreground: editor.0 .0 as usize,
         thread: unsafe { GetCurrentThreadId() },
         pid,
-        created: process_security(process.raw()).unwrap(),
+        // Deliberately not an eligible snapshot. Qualification must refuse
+        // before consulting creation time or the runner's security token.
+        created: 0,
         process,
         before: read_editor(editor.0).unwrap(),
         activity: ACTIVITY.load(Ordering::SeqCst),
@@ -596,18 +743,18 @@ fn owned_editor_subprocess() {
     }
 }
 
-#[test]
-fn cross_process_native_editor_reads_and_verifies_only_disposable_text() {
+struct OwnedEditorProcess(std::process::Child);
+impl Drop for OwnedEditorProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn owned_editor_process() -> (OwnedEditorProcess, HWND) {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
-    struct Child(std::process::Child);
-    impl Drop for Child {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let mut child = Child(
+    let mut child = OwnedEditorProcess(
         Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -638,14 +785,56 @@ fn cross_process_native_editor_reads_and_verifies_only_disposable_text() {
     }
     assert_eq!(pid, child.0.id());
     assert!(!unsafe { IsWindowVisible(edit) }.as_bool());
+    (child, edit)
+}
+
+#[test]
+fn process_security_matches_observed_runner_and_child_tokens() {
+    fn assert_security(process: HANDLE, role: &str) {
+        let observed = observe_token(process);
+        let expected_eligible = observed.elevated == 0
+            && observed.ui_access == 0
+            && (0x2000..0x3000).contains(&observed.integrity_rid);
+        let verdict = process_security(process);
+        println!(
+            "{role} token: {observed:?}; arch={}; production_security={verdict:?}",
+            std::env::consts::ARCH
+        );
+        if expected_eligible {
+            // Prove success retains the actual live process creation time.
+            let mut created = Default::default();
+            let mut exit = Default::default();
+            let mut kernel = Default::default();
+            let mut user = Default::default();
+            unsafe {
+                GetProcessTimes(process, &mut created, &mut exit, &mut kernel, &mut user).unwrap();
+            }
+            assert_eq!((exit.dwHighDateTime, exit.dwLowDateTime), (0, 0));
+            assert_eq!(
+                verdict,
+                Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+            );
+        } else {
+            assert_eq!(verdict, Err(TARGET_ERROR.into()));
+        }
+    }
+
+    assert_security(unsafe { GetCurrentProcess() }, "runner");
+    let (child, _edit) = owned_editor_process();
     let process = ProcessHandle(unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, child.0.id())
             .unwrap()
             .0 as usize
     });
-    // This fixture is expected to run unelevated, like the application.
-    assert!(process_security(process.raw()).is_ok());
+    assert_security(process.raw(), "owned-editor child");
     not_terminal(process.raw()).unwrap();
+}
+
+#[test]
+fn cross_process_native_editor_reads_and_verifies_only_disposable_text() {
+    let (_child, edit) = owned_editor_process();
+    // Only marshalling and exact readback in our disposable control. Security
+    // eligibility is tested separately, never required or bypassed here.
     message(edit, EM_SETSEL, 10, 14).unwrap();
     let before = read_editor(edit).unwrap();
     assert_eq!(before.selection, (10, 14));
@@ -663,6 +852,8 @@ fn cross_process_native_editor_reads_and_verifies_only_disposable_text() {
         String::from_utf16(&after.text).unwrap(),
         "synthetic foreign 🦀"
     );
+    let end = after.text.len() as u32;
+    assert_eq!(after.selection, (end, end));
     message(edit, EM_SETREADONLY, 1, 0).unwrap();
     assert!(read_editor(edit).is_err());
     unsafe {

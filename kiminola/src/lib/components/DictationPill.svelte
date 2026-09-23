@@ -49,7 +49,7 @@
   .edge { position: fixed; inset: 0; display: flex; align-items: center; justify-content: flex-end; padding: 8px; overflow: hidden; }
   .edge.left { justify-content: flex-start; }
   .pill { width: 48px; max-height: 204px; padding: 14px 5px; display: flex; flex: none; flex-direction: column; align-items: center; gap: 10px; background: var(--canvas); border: 1px solid var(--hairline); border-radius: 24px; color: var(--ink); }
-  .state { font: 500 9px/1.2 var(--font-mono); text-transform: uppercase; letter-spacing: .02em; }
+  .state { font: 500 9px/1.2 var(--font-mono); text-transform: uppercase; letter-spacing: .10em; }
   .mark { display: grid; place-items: center; color: var(--brand); height: 30px; }
   .wave { height: 30px; display: flex; gap: 1px; align-items: center; width: 35px; }
   .wave span { width: 2px; flex: none; min-height: 3px; background: var(--ink); border-radius: 2px; }

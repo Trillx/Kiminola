@@ -131,6 +131,15 @@ export async function runDictationTests({ check, open, eventually, origin }) {
     await eventually(() => pill.getAttribute('data-phase'), value => value === 'review', 'Stop transitions to review');
     assert.equal(await page.evaluate(() => window.audit.calls.filter(c => c.cmd === 'stop_dictation').length), 1);
     assert.equal((await pill.innerText()).includes('Synthetic final text.'), false);
+    const label = await pill.getByRole('status').evaluate(element => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      const parent = element.closest('.pill').getBoundingClientRect();
+      return { tracking: parseFloat(style.letterSpacing) / parseFloat(style.fontSize),
+        fits: rect.left >= parent.left && rect.right <= parent.right };
+    });
+    assert.ok(label.tracking >= 0.10 && label.tracking <= 0.16, 'Mono labels use the brand tracking range');
+    assert.equal(label.fits, true, 'The Review label stays inside the compact pill');
   });
 
   await check('Dictation pill explains backend start failures without capture and clears recovered errors', async page => {

@@ -89,6 +89,19 @@ async fn connect(path: &Path, read_only: bool) -> Result<SqlitePool, String> {
         .map_err(io_error)
 }
 
+async fn close_pool(pool: &SqlitePool) {
+    // SQLx 0.8.6 can return a connection to the idle queue after close() drains
+    // that queue but before it acquires all permits. Its close future can then
+    // resolve with size > 0, leaving SQLite's exclusive lock held. Re-drain
+    // until native connections are gone before reopening or handing off files.
+    loop {
+        pool.close().await;
+        if pool.size() == 0 {
+            break;
+        }
+    }
+}
+
 async fn verify(pool: &SqlitePool) -> Result<(), String> {
     let integrity: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check")
         .fetch_all(pool)
@@ -156,7 +169,7 @@ async fn snapshot(pool: &SqlitePool, destination: &Path) -> Result<(), String> {
         .map_err(|e| format!("Cannot create database backup: {e}"))?;
     let copy = connect(destination, true).await?;
     let result = verify(&copy).await;
-    copy.close().await;
+    close_pool(&copy).await;
     result?;
     OpenOptions::new()
         .write(true)
@@ -221,7 +234,7 @@ pub(crate) async fn open_migrated(
     std::fs::create_dir_all(path.parent().ok_or("database has no parent")?).map_err(io_error)?;
     let pool = connect(path, false).await?;
     if let Err(error) = migrate(&pool, path, migrations, keep_backup).await {
-        pool.close().await;
+        close_pool(&pool).await;
         return Err(error);
     }
     Ok(pool)
@@ -310,7 +323,7 @@ impl Database {
         let mut runtime = self.runtime.lock().await;
         runtime.suspended = true;
         if let Some(pool) = runtime.pool.take() {
-            pool.close().await;
+            close_pool(&pool).await;
         }
         Ok(())
     }
@@ -713,6 +726,93 @@ mod tests {
         reopened.close().await;
     }
 
+    #[tokio::test]
+    async fn update_barrier_closes_a_connection_returned_during_shutdown() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        use tokio::sync::Notify;
+
+        let fixture = Fixture::new();
+        let pause = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .after_release({
+                let pause = pause.clone();
+                let entered = entered.clone();
+                let release = release.clone();
+                move |_, _| {
+                    let pause = pause.clone();
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        if pause.swap(false, Ordering::SeqCst) {
+                            entered.notify_one();
+                            release.notified().await;
+                        }
+                        Ok(true)
+                    })
+                }
+            })
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&fixture.path)
+                    .create_if_missing(true)
+                    .locking_mode(SqliteLockingMode::Exclusive),
+            )
+            .await
+            .unwrap();
+        migrate(&pool, &fixture.path, &MIGRATIONS, false)
+            .await
+            .unwrap();
+        let database = Arc::new(Database::new(Ok(fixture.path.clone())));
+        {
+            let mut runtime = database.runtime.lock().await;
+            runtime.owner = Some(acquire_owner(&fixture.path).unwrap());
+            runtime.pool = Some(pool.clone());
+        }
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("INSERT INTO settings VALUES('fixture','returned during shutdown')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        // Park a real SQLx return after its first closed-pool check, before its
+        // final ping and idle-queue insertion. No scheduler timing is assumed.
+        pause.store(true, Ordering::SeqCst);
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        let task_database = database.clone();
+        let shutdown = tokio::spawn(async move { task_database.suspend().await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !pool.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!shutdown.is_finished());
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), shutdown)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pool.size(),
+            0,
+            "suspension must close every native connection"
+        );
+        assert!(pool.acquire().await.is_err());
+        assert!(database.pool().await.is_err());
+        database.resume().await;
+        let reopened = database.pool().await.unwrap();
+        assert_eq!(marker(&reopened).await, "returned during shutdown");
+        database.suspend().await.unwrap();
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn second_owner_cannot_migrate_or_restore_the_same_database() {
@@ -777,7 +877,7 @@ async fn restore_backup(path: &Path, name: &str) -> Result<(), String> {
         snapshot(&backup, &stage).await
     }
     .await;
-    backup.close().await;
+    close_pool(&backup).await;
     prepared?;
     // Prove the selected backup works with this binary before moving original data.
     let staged = open_migrated(&stage, &MIGRATIONS, false).await?;
@@ -785,7 +885,7 @@ async fn restore_backup(path: &Path, name: &str) -> Result<(), String> {
         .execute(&staged)
         .await
         .map_err(io_error)?;
-    staged.close().await;
+    close_pool(&staged).await;
     OpenOptions::new()
         .write(true)
         .open(&stage)

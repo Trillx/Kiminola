@@ -663,8 +663,7 @@ impl DictationCommands {
             }
         };
         if delivered && saved.settings.history_enabled {
-            let pool = crate::db::ensure_pool(&self.database).await?;
-            history::append(&pool, &text, chrono::Utc::now()).await?;
+            self.save_optional_history(&text).await;
         }
         Ok(true)
     }
@@ -703,9 +702,8 @@ impl DictationCommands {
                 data.complete && !data.history_saved
             }
         {
-            let pool = crate::db::ensure_pool(&self.database).await?;
-            history::append(&pool, &snapshot.text, chrono::Utc::now()).await?;
-            self.data.lock().unwrap().history_saved = true;
+            let saved = self.save_optional_history(&snapshot.text).await;
+            self.data.lock().unwrap().history_saved = saved;
         }
         let complete = self.data.lock().unwrap().complete;
         // Keep review until the exit succeeds. Quit consumes it atomically with
@@ -780,6 +778,20 @@ impl DictationCommands {
         {
             self.platform.show_review();
         }
+    }
+    // History is optional and cannot undo a successful Copy or delivery. Keep
+    // storage failures out of the command result and never log dictated text or
+    // database errors, which may contain sensitive paths or values.
+    async fn save_optional_history(&self, text: &str) -> bool {
+        let result = async {
+            let pool = crate::db::ensure_pool(&self.database).await?;
+            history::append(&pool, text, chrono::Utc::now()).await
+        }
+        .await;
+        if result.is_err() {
+            eprintln!("[dictation] warning: could not save optional history for completed text");
+        }
+        result.is_ok()
     }
     pub async fn list_dictation_history(&self) -> Result<Vec<HistoryEntry>, String> {
         let pool = crate::db::ensure_pool(&self.database).await?;
@@ -1324,6 +1336,7 @@ mod tests {
         sink: Mutex<Option<AudioSink>>,
         pasted: Arc<Mutex<Vec<String>>>,
         copied: Mutex<Vec<String>>,
+        copy_error: AtomicBool,
         capture_starts: AtomicUsize,
         cleanup_started: AtomicBool,
         cleanup_release: tokio::sync::Notify,
@@ -1520,6 +1533,9 @@ mod tests {
             .await
         }
         fn copy(&self, text: &str) -> Result<(), String> {
+            if self.copy_error.load(Ordering::SeqCst) {
+                return Err("Clipboard unavailable.".into());
+            }
             self.copied.lock().unwrap().push(text.into());
             Ok(())
         }
@@ -1571,6 +1587,7 @@ mod tests {
             sink: Mutex::new(None),
             pasted: Arc::new(Mutex::new(vec![])),
             copied: Mutex::new(vec![]),
+            copy_error: AtomicBool::new(false),
             capture_starts: AtomicUsize::new(0),
             cleanup_started: AtomicBool::new(false),
             cleanup_release: tokio::sync::Notify::new(),
@@ -1671,6 +1688,379 @@ mod tests {
     impl Drop for ScratchDatabase {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum HistoryFault {
+        Unavailable,
+        Append,
+        Expire,
+    }
+    impl HistoryFault {
+        async fn inject(self, platform: &FakePlatform) {
+            if matches!(self, Self::Unavailable) {
+                platform.scratch.database.suspend().await.unwrap();
+                return;
+            }
+            let event = if matches!(self, Self::Append) {
+                "INSERT"
+            } else {
+                // Seed an expired entry so append's expiry really executes DELETE.
+                sqlx::query(
+                    "INSERT INTO dictation_history(text, created_at) VALUES ('expired', ?)",
+                )
+                .bind((chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339())
+                .execute(&platform.pool)
+                .await
+                .unwrap();
+                "DELETE"
+            };
+            sqlx::raw_sql(&format!(
+                "CREATE TRIGGER reject_history BEFORE {event} ON dictation_history \
+                 BEGIN SELECT RAISE(FAIL, 'synthetic history storage failure'); END;"
+            ))
+            .execute(&platform.pool)
+            .await
+            .unwrap();
+        }
+        async fn restore(self, platform: &FakePlatform) {
+            if matches!(self, Self::Unavailable) {
+                platform.scratch.database.resume().await;
+            } else {
+                sqlx::raw_sql("DROP TRIGGER reject_history;")
+                    .execute(&platform.pool)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+    async fn completed_review(outcome: Delivery) -> (Arc<DictationCommands>, Arc<FakePlatform>) {
+        let (commands, platform) = fixture().await;
+        *platform.outcome.lock().unwrap() = outcome;
+        enable(&commands, Cleanup::Raw, outcome != Delivery::None).await;
+        commands.start_dictation().await.unwrap();
+        wait_phase(&commands, Phase::Listening).await;
+        let review = commands.stop_dictation().await.unwrap();
+        assert_eq!(review.phase, Phase::Review);
+        assert_eq!(review.text, "raw words");
+        assert_eq!(review.delivery, outcome);
+        assert!(commands.list_dictation_history().await.unwrap().is_empty());
+        (commands, platform)
+    }
+    async fn request_review_exit(commands: &Arc<DictationCommands>, exit: Option<ExitIntent>) {
+        match exit {
+            Some(ExitIntent::Quit) => commands.request_quit().await.unwrap(),
+            Some(ExitIntent::Disable) => {
+                let mut settings = commands.get_dictation_state().await.unwrap().settings;
+                settings.enabled = false;
+                commands
+                    .set_dictation_settings(SettingsInput {
+                        settings,
+                        consent_provider: false,
+                    })
+                    .await
+                    .unwrap();
+            }
+            None => {}
+        }
+        assert_eq!(
+            commands.get_dictation_state().await.unwrap().exit_intent,
+            exit
+        );
+    }
+    async fn resolve_with_history_failure(
+        action: ResolveAction,
+        exit: Option<ExitIntent>,
+        fault: HistoryFault,
+    ) {
+        let outcome = if action == ResolveAction::Confirm {
+            Delivery::Uncertain
+        } else {
+            Delivery::None
+        };
+        let (commands, platform) = completed_review(outcome).await;
+        request_review_exit(&commands, exit).await;
+        fault.inject(&platform).await;
+        // The real gate must remain closed until Quit consumes review atomically.
+        platform.race_update.store(true, Ordering::SeqCst);
+        let result = commands.resolve_dictation(action).await;
+        assert_eq!(
+            *platform.copied.lock().unwrap(),
+            if action == ResolveAction::Copy {
+                vec!["raw words"]
+            } else {
+                vec![]
+            }
+        );
+        let resolved = result.unwrap_or_else(|error| {
+            panic!("{fault:?} history failure must not fail {action:?}/{exit:?}: {error}")
+        });
+        assert_eq!(
+            resolved.phase,
+            if exit == Some(ExitIntent::Disable) {
+                Phase::Disabled
+            } else {
+                Phase::Idle
+            }
+        );
+        assert!(resolved.text.is_empty());
+        assert!(resolved.raw_text.is_empty());
+        assert!(resolved.error.is_none());
+        assert_eq!(resolved.exit_intent, None);
+        assert!(!platform.gate.has_dictation_review());
+        assert_eq!(
+            platform.quits.load(Ordering::SeqCst),
+            usize::from(exit == Some(ExitIntent::Quit))
+        );
+        assert!(platform.update_claim.lock().unwrap().is_none());
+        if exit == Some(ExitIntent::Quit) {
+            assert!(platform.gate.claim(CaptureOwner::Update).is_err());
+            assert!(platform.gate.claim(CaptureOwner::Meeting).is_err());
+        } else {
+            assert!(platform.gate.claim(CaptureOwner::Update).is_ok());
+        }
+        // A redundant resolution must not copy or paste again.
+        assert!(commands.resolve_dictation(action).await.is_err());
+        assert_eq!(
+            platform.copied.lock().unwrap().len(),
+            usize::from(action == ResolveAction::Copy)
+        );
+        assert_eq!(
+            platform.pasted.lock().unwrap().len(),
+            usize::from(action == ResolveAction::Confirm)
+        );
+        fault.restore(&platform).await;
+        assert!(commands.list_dictation_history().await.unwrap().is_empty());
+        if exit == Some(ExitIntent::Disable) {
+            assert!(!resolved.settings.enabled);
+            assert!(platform.bindings.current().is_none());
+            let pool = platform.scratch.database.pool().await.unwrap();
+            assert!(
+                !history::load_settings::<SavedSettings>(&pool)
+                    .await
+                    .unwrap()
+                    .settings
+                    .enabled
+            );
+        }
+        platform.scratch.database.suspend().await.unwrap();
+    }
+    #[tokio::test]
+    async fn history_failure_does_not_block_copy() {
+        for fault in [
+            HistoryFault::Append,
+            HistoryFault::Expire,
+            HistoryFault::Unavailable,
+        ] {
+            resolve_with_history_failure(ResolveAction::Copy, None, fault).await;
+        }
+    }
+    #[tokio::test]
+    async fn history_failure_does_not_block_copy_and_quit() {
+        for fault in [
+            HistoryFault::Append,
+            HistoryFault::Expire,
+            HistoryFault::Unavailable,
+        ] {
+            resolve_with_history_failure(ResolveAction::Copy, Some(ExitIntent::Quit), fault).await;
+        }
+    }
+    #[tokio::test]
+    async fn history_failure_does_not_block_copy_and_disable() {
+        for fault in [HistoryFault::Append, HistoryFault::Expire] {
+            resolve_with_history_failure(ResolveAction::Copy, Some(ExitIntent::Disable), fault)
+                .await;
+        }
+    }
+    #[tokio::test]
+    async fn history_failure_does_not_block_confirmation() {
+        for exit in [None, Some(ExitIntent::Quit), Some(ExitIntent::Disable)] {
+            for fault in [
+                HistoryFault::Append,
+                HistoryFault::Expire,
+                HistoryFault::Unavailable,
+            ] {
+                // An unavailable database also blocks required Disable persistence.
+                if exit == Some(ExitIntent::Disable) && matches!(fault, HistoryFault::Unavailable) {
+                    continue;
+                }
+                resolve_with_history_failure(ResolveAction::Confirm, exit, fault).await;
+            }
+        }
+    }
+    #[tokio::test]
+    async fn history_failure_does_not_report_verified_delivery_as_failed() {
+        for fault in [
+            HistoryFault::Append,
+            HistoryFault::Expire,
+            HistoryFault::Unavailable,
+        ] {
+            let (commands, platform) = fixture().await;
+            enable(&commands, Cleanup::Raw, true).await;
+            commands.start_dictation().await.unwrap();
+            wait_phase(&commands, Phase::Listening).await;
+            fault.inject(&platform).await;
+            let delivered = commands.stop_dictation().await.unwrap();
+            assert_eq!(*platform.pasted.lock().unwrap(), vec!["raw words"]);
+            assert_eq!(delivered.delivery, Delivery::Verified);
+            assert_eq!(delivered.phase, Phase::Idle);
+            assert!(
+                delivered.error.is_none(),
+                "{fault:?}: {:?}",
+                delivered.error
+            );
+            assert!(delivered.text.is_empty());
+            assert!(delivered.raw_text.is_empty());
+            assert!(!platform.gate.has_dictation_review());
+            assert!(platform.gate.claim(CaptureOwner::Update).is_ok());
+            commands.stop_dictation().await.unwrap();
+            assert!(commands
+                .resolve_dictation(ResolveAction::Copy)
+                .await
+                .is_err());
+            assert_eq!(*platform.pasted.lock().unwrap(), vec!["raw words"]);
+            assert!(platform.copied.lock().unwrap().is_empty());
+            fault.restore(&platform).await;
+            assert!(commands.list_dictation_history().await.unwrap().is_empty());
+            // A later session can save normally; the failed optional write did
+            // not poison either the database owner or lifecycle state.
+            commands.start_dictation().await.unwrap();
+            wait_phase(&commands, Phase::Listening).await;
+            assert!(commands.stop_dictation().await.unwrap().error.is_none());
+            assert_eq!(commands.list_dictation_history().await.unwrap().len(), 1);
+            assert_eq!(platform.pasted.lock().unwrap().len(), 2);
+            platform.scratch.database.suspend().await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn failed_copy_keeps_review_and_pending_exit_without_saving_history() {
+        for exit in [None, Some(ExitIntent::Quit), Some(ExitIntent::Disable)] {
+            let (commands, platform) = completed_review(Delivery::None).await;
+            request_review_exit(&commands, exit).await;
+            platform.copy_error.store(true, Ordering::SeqCst);
+            assert_eq!(
+                commands
+                    .resolve_dictation(ResolveAction::Copy)
+                    .await
+                    .unwrap_err(),
+                "Clipboard unavailable."
+            );
+            let review = commands.get_dictation_state().await.unwrap();
+            assert_eq!(review.phase, Phase::Review);
+            assert_eq!(review.text, "raw words");
+            assert_eq!(review.raw_text, "raw words");
+            assert_eq!(review.exit_intent, exit);
+            assert!(review.settings.enabled);
+            assert!(platform.copied.lock().unwrap().is_empty());
+            assert!(commands.list_dictation_history().await.unwrap().is_empty());
+            assert_eq!(platform.quits.load(Ordering::SeqCst), 0);
+            assert!(platform.gate.has_dictation_review());
+            assert!(platform.gate.claim(CaptureOwner::Update).is_err());
+            assert!(commands.start_dictation().await.is_err());
+            platform.copy_error.store(false, Ordering::SeqCst);
+            commands
+                .resolve_dictation(ResolveAction::Copy)
+                .await
+                .unwrap();
+            assert_eq!(*platform.copied.lock().unwrap(), vec!["raw words"]);
+            assert_eq!(commands.list_dictation_history().await.unwrap().len(), 1);
+            platform.scratch.database.suspend().await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn history_failure_does_not_hide_failed_quit_or_release_review() {
+        for action in [ResolveAction::Copy, ResolveAction::Confirm] {
+            for fault in [
+                HistoryFault::Append,
+                HistoryFault::Expire,
+                HistoryFault::Unavailable,
+            ] {
+                let (commands, platform) = completed_review(Delivery::Uncertain).await;
+                request_review_exit(&commands, Some(ExitIntent::Quit)).await;
+                let meeting = platform.gate.claim(CaptureOwner::Meeting).unwrap();
+                fault.inject(&platform).await;
+                let error = commands.resolve_dictation(action).await.unwrap_err();
+                assert!(error.contains("Finish the current Meeting"), "{error}");
+                let review = commands.get_dictation_state().await.unwrap();
+                assert_eq!(review.phase, Phase::Review);
+                assert_eq!(review.text, "raw words");
+                assert_eq!(review.raw_text, "raw words");
+                assert_eq!(review.delivery, Delivery::Uncertain);
+                assert_eq!(review.error.as_deref(), Some(error.as_str()));
+                assert_eq!(review.exit_intent, Some(ExitIntent::Quit));
+                assert_eq!(platform.quits.load(Ordering::SeqCst), 0);
+                assert!(platform.gate.has_dictation_review());
+                drop(meeting);
+                assert!(platform.gate.claim(CaptureOwner::Update).is_err());
+                assert!(commands.start_dictation().await.is_err());
+                fault.restore(&platform).await;
+                assert!(commands.list_dictation_history().await.unwrap().is_empty());
+                // History can retry after a real exit failure, but only because
+                // review is still pending. No automatic delivery may retry.
+                platform.race_update.store(true, Ordering::SeqCst);
+                commands.resolve_dictation(action).await.unwrap();
+                assert_eq!(platform.quits.load(Ordering::SeqCst), 1);
+                assert!(platform.update_claim.lock().unwrap().is_none());
+                assert!(platform.gate.claim(CaptureOwner::Update).is_err());
+                assert!(!platform.gate.has_dictation_review());
+                assert_eq!(*platform.pasted.lock().unwrap(), vec!["raw words"]);
+                assert_eq!(commands.list_dictation_history().await.unwrap().len(), 1);
+                platform.scratch.database.suspend().await.unwrap();
+            }
+        }
+    }
+    #[tokio::test]
+    async fn history_failure_does_not_hide_failed_disable_or_release_review() {
+        for action in [ResolveAction::Copy, ResolveAction::Confirm] {
+            for fault in [HistoryFault::Append, HistoryFault::Unavailable] {
+                let (commands, platform) = completed_review(Delivery::Uncertain).await;
+                request_review_exit(&commands, Some(ExitIntent::Disable)).await;
+                sqlx::raw_sql("CREATE TRIGGER reject_disable BEFORE UPDATE ON settings BEGIN SELECT RAISE(FAIL, 'synthetic settings storage failure'); END;")
+                    .execute(&platform.pool).await.unwrap();
+                fault.inject(&platform).await;
+                let error = commands.resolve_dictation(action).await.unwrap_err();
+                let expected = if matches!(fault, HistoryFault::Unavailable) {
+                    "The app is preparing to update. Try again after it restarts."
+                } else {
+                    "Could not save dictation settings."
+                };
+                assert_eq!(error, expected);
+                let review = commands.get_dictation_state().await.unwrap();
+                assert_eq!(review.phase, Phase::Review);
+                assert_eq!(review.text, "raw words");
+                assert_eq!(review.raw_text, "raw words");
+                assert_eq!(review.delivery, Delivery::Uncertain);
+                assert_eq!(review.error.as_deref(), Some(expected));
+                assert_eq!(review.exit_intent, Some(ExitIntent::Disable));
+                assert!(review.settings.enabled);
+                assert!(platform.bindings.current().is_some());
+                assert!(platform.gate.has_dictation_review());
+                assert!(platform.gate.claim(CaptureOwner::Update).is_err());
+                assert!(platform.gate.claim(CaptureOwner::Quit).is_err());
+                assert!(commands.start_dictation().await.is_err());
+                fault.restore(&platform).await;
+                assert!(commands.list_dictation_history().await.unwrap().is_empty());
+                let pool = platform.scratch.database.pool().await.unwrap();
+                assert!(
+                    history::load_settings::<SavedSettings>(&pool)
+                        .await
+                        .unwrap()
+                        .settings
+                        .enabled
+                );
+                sqlx::raw_sql("DROP TRIGGER reject_disable;")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let disabled = commands.resolve_dictation(action).await.unwrap();
+                assert_eq!(disabled.phase, Phase::Disabled);
+                assert!(!disabled.settings.enabled);
+                assert!(!platform.gate.has_dictation_review());
+                assert!(platform.gate.claim(CaptureOwner::Update).is_ok());
+                assert_eq!(*platform.pasted.lock().unwrap(), vec!["raw words"]);
+                assert_eq!(commands.list_dictation_history().await.unwrap().len(), 1);
+                platform.scratch.database.suspend().await.unwrap();
+            }
         }
     }
     #[tokio::test]

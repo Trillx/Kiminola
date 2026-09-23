@@ -167,7 +167,7 @@ pub fn clear_process_loopback_target(app: &AppHandle) {
 /// Get the shared ASR engine, loading the model on first use. Failed loads stay
 /// retryable so a model installed during onboarding works without an app
 /// restart; successful loads remain cached for the process lifetime.
-async fn ensure_asr_engine(cache: &Mutex<Option<Arc<AsrEngine>>>) -> Option<Arc<AsrEngine>> {
+async fn ensure_asr_engine(cache: &Arc<Mutex<Option<Arc<AsrEngine>>>>) -> Option<Arc<AsrEngine>> {
     let start = std::time::Instant::now();
     let engine = get_or_try_init(cache, || {
         resolve_asr_model_dir().and_then(|directory| AsrEngine::new(&directory))
@@ -182,25 +182,28 @@ pub(crate) async fn shared_asr_engine(app: &AppHandle) -> Option<Arc<AsrEngine>>
     ensure_asr_engine(&state.asr_engine).await
 }
 
-async fn get_or_try_init<T, F>(cache: &Mutex<Option<Arc<T>>>, loader: F) -> Option<Arc<T>>
+async fn get_or_try_init<T, F>(cache: &Arc<Mutex<Option<Arc<T>>>>, loader: F) -> Option<Arc<T>>
 where
-    T: Send + 'static,
+    T: Send + Sync + 'static,
     F: FnOnce() -> Option<T> + Send + 'static,
 {
-    let mut cached = cache.lock().await;
+    let mut cached = Arc::clone(cache).lock_owned().await;
     if let Some(value) = cached.as_ref() {
         return Some(Arc::clone(value));
     }
 
-    let loaded = tokio::task::spawn_blocking(loader)
-        .await
-        .ok()
-        .flatten()
-        .map(Arc::new);
-    if let Some(value) = loaded.as_ref() {
-        *cached = Some(Arc::clone(value));
-    }
-    loaded
+    // The blocking load cannot be cancelled once started. Give it ownership of
+    // the cache guard as well, so dropping any waiter neither permits another
+    // cold load nor loses the completed engine. Only model initialization runs
+    // here; a cancelled caller must never continue into microphone startup.
+    tokio::task::spawn_blocking(move || {
+        let loaded = loader().map(Arc::new);
+        *cached = loaded.clone();
+        loaded
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 struct TauriTranscriptSink {
@@ -415,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn asr_cache_retries_failed_loads_and_keeps_the_first_success() {
-        let cache = Mutex::new(None);
+        let cache = Arc::new(Mutex::new(None));
         let attempts = Arc::new(AtomicUsize::new(0));
 
         let first_attempts = Arc::clone(&attempts);
@@ -445,6 +448,196 @@ mod tests {
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
         assert!(Arc::ptr_eq(&loaded, &cached));
         assert_eq!(cached.as_str(), "ready");
+    }
+
+    #[tokio::test]
+    async fn asr_cache_cancelled_waiter_keeps_cold_load_for_meeting_and_dictation() {
+        let cache = Arc::new(Mutex::new(None));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let microphone_started = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let waiter = {
+            let cache = Arc::clone(&cache);
+            let attempts = Arc::clone(&attempts);
+            let microphone_started = Arc::clone(&microphone_started);
+            tokio::spawn(async move {
+                let engine = get_or_try_init(&cache, move || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Some("original cold load".to_string())
+                })
+                .await;
+                // This stands for the caller's next step, never a real mic.
+                microphone_started.store(true, Ordering::SeqCst);
+                engine
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .expect("the blocking loader should start")
+            .unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+
+        let meeting_attempts = Arc::clone(&attempts);
+        let meeting = get_or_try_init(&cache, move || {
+            meeting_attempts.fetch_add(1, Ordering::SeqCst);
+            Some("duplicate Meeting load".to_string())
+        });
+        let dictation_attempts = Arc::clone(&attempts);
+        let dictation = get_or_try_init(&cache, move || {
+            dictation_attempts.fetch_add(1, Ordering::SeqCst);
+            Some("duplicate Dictation load".to_string())
+        });
+        tokio::pin!(meeting, dictation);
+        // Poll both real cache consumers while the original loader is blocked.
+        // No scheduling sleeps or expensive ASR model instances are needed.
+        assert!(futures::poll!(meeting.as_mut()).is_pending());
+        assert!(futures::poll!(dictation.as_mut()).is_pending());
+        release_tx.send(()).unwrap();
+        let (meeting, dictation) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(meeting, dictation)
+        })
+        .await
+        .expect("both consumers should resolve after the loader is released");
+        let meeting = meeting.unwrap();
+        let dictation = dictation.unwrap();
+        let cached = get_or_try_init(&cache, || panic!("a warm cache must not reload"))
+            .await
+            .unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "only one cold load");
+        assert_eq!(meeting.as_str(), "original cold load");
+        assert!(Arc::ptr_eq(&meeting, &dictation));
+        assert!(Arc::ptr_eq(&meeting, &cached));
+        assert!(!microphone_started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn asr_cache_cancelled_load_completes_without_any_waiter() {
+        for outcome in [Some("ready"), None] {
+            let cache = Arc::new(Mutex::new(None));
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let waiter = {
+                let cache = Arc::clone(&cache);
+                let attempts = Arc::clone(&attempts);
+                tokio::spawn(async move {
+                    get_or_try_init(&cache, move || {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        outcome.map(str::to_string)
+                    })
+                    .await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(5), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            waiter.abort();
+            assert!(waiter.await.unwrap_err().is_cancelled());
+            release_tx.send(()).unwrap();
+
+            // Observe completion without polling another initialization future.
+            let completed = tokio::time::timeout(Duration::from_secs(5), cache.lock())
+                .await
+                .expect("completion must release the cache even with no waiters")
+                .clone();
+            assert_eq!(completed.as_deref().map(String::as_str), outcome);
+            let retry_attempts = Arc::clone(&attempts);
+            let next = get_or_try_init(&cache, move || {
+                retry_attempts.fetch_add(1, Ordering::SeqCst);
+                Some("retry".to_string())
+            })
+            .await
+            .unwrap();
+            if let Some(completed) = completed {
+                assert!(Arc::ptr_eq(&completed, &next));
+                assert_eq!(attempts.load(Ordering::SeqCst), 1);
+            } else {
+                assert_eq!(next.as_str(), "retry");
+                assert_eq!(attempts.load(Ordering::SeqCst), 2);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn asr_cache_concurrent_cold_consumers_serialize_success_and_retry() {
+        for outcome in [Some("ready"), None] {
+            let cache = Arc::new(Mutex::new(None));
+            let load_active = Arc::new(AtomicBool::new(false));
+            let retry_attempts = Arc::new(AtomicUsize::new(0));
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let meeting = {
+                let cache = Arc::clone(&cache);
+                let load_active = Arc::clone(&load_active);
+                tokio::spawn(async move {
+                    get_or_try_init(&cache, move || {
+                        load_active.store(true, Ordering::SeqCst);
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        load_active.store(false, Ordering::SeqCst);
+                        outcome.map(str::to_string)
+                    })
+                    .await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(5), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let attempts = Arc::clone(&retry_attempts);
+            let dictation = get_or_try_init(&cache, move || {
+                assert!(
+                    !load_active.load(Ordering::SeqCst),
+                    "loads must not overlap"
+                );
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Some("retry".to_string())
+            });
+            tokio::pin!(dictation);
+            assert!(futures::poll!(dictation.as_mut()).is_pending());
+            release_tx.send(()).unwrap();
+            let (meeting, dictation) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(meeting, dictation)
+            })
+            .await
+            .unwrap();
+            let meeting = meeting.unwrap();
+            let dictation = dictation.unwrap();
+            assert_eq!(meeting.as_deref().map(String::as_str), outcome);
+            if let Some(meeting) = meeting {
+                assert!(Arc::ptr_eq(&meeting, &dictation));
+                assert_eq!(retry_attempts.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(dictation.as_str(), "retry");
+                assert_eq!(retry_attempts.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn asr_cache_panicked_loader_releases_ownership_for_retry() {
+        let cache = Arc::new(Mutex::new(None));
+        assert!(
+            get_or_try_init(&cache, || panic!("controlled loader panic"))
+                .await
+                .is_none()
+        );
+        let retry = tokio::time::timeout(
+            Duration::from_secs(5),
+            get_or_try_init(&cache, || Some("retry")),
+        )
+        .await
+        .expect("a panic must not leave initialization locked")
+        .unwrap();
+        assert_eq!(*retry, "retry");
     }
 
     #[test]
