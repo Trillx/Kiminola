@@ -142,6 +142,18 @@ impl Decoder {
             _ => return Some(self.fail("provider returned non-text content")),
         };
         if self.stopped {
+            // OpenRouter's final usage chunk keeps one content-free choice and
+            // repeats the successful finish reason instead of using OpenAI's
+            // empty choices array. It is accounting metadata, not more output.
+            let repeated_usage_stop = text.is_empty()
+                && value.get("usage").is_some_and(|usage| usage.is_object())
+                && choice
+                    .get("finish_reason")
+                    .and_then(|reason| reason.as_str())
+                    == Some("stop");
+            if repeated_usage_stop {
+                return None;
+            }
             return Some(self.fail("provider sent content after completion"));
         }
         match choice.get("finish_reason") {
