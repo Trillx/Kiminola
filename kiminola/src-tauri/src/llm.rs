@@ -1598,7 +1598,7 @@ mod tests {
         let events = provider_events(concat!(
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Complete.\"},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\",\"native_finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":\"stop\",\"native_finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":2}}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":\"stop\",\"native_finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":2}}\n\n",
             "data: [DONE]\n\n"
         ))
         .await;
@@ -1614,6 +1614,24 @@ mod tests {
         let events = provider_events(concat!(
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Complete.\"},\"finish_reason\":\"stop\"}]}\n\n",
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" late\"},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+
+        assert_eq!(
+            events,
+            vec![
+                LlmEvent::Chunk("Complete.".into()),
+                LlmEvent::Error("provider sent content after completion".into())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_chunk_cannot_hide_non_text_output_after_stop() {
+        let events = provider_events(concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Complete.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"audio\":{}},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":2}}\n\n",
             "data: [DONE]\n\n"
         ))
         .await;
