@@ -1,13 +1,13 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
-  import { page } from "$app/state";
   import { Button } from "$lib/components/ui/button";
-  import { compactReleaseNotes, isRecordingPath } from "$lib/update-policy";
+  import { compactReleaseNotes } from "$lib/update-policy";
+  import { captureSession } from "$lib/capture-session.svelte";
   import { installUpdate, updateState } from "$lib/update.svelte";
 
   let dismissedVersion = $state<string | null>(null);
   let actionError = $state("");
-  let isRecording = $derived(isRecordingPath(page.url.pathname));
+  let isRecording = $derived(captureSession.active);
   let visible = $derived(
     updateState.version !== null &&
       dismissedVersion !== updateState.version &&
@@ -17,7 +17,7 @@
 
   async function install() {
     actionError = "";
-    const installed = await installUpdate(() => !isRecording);
+    const installed = await installUpdate(() => !captureSession.active);
     if (!installed && !isRecording && updateState.error) {
       actionError = updateState.error ?? "The update could not be installed.";
     }

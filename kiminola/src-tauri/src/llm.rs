@@ -12,7 +12,7 @@ use reqwest::header::{self, HeaderMap};
 use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, State};
 
-use crate::db::{ensure_pool, update_enhanced_notes_impl, DbState};
+use crate::db::{meeting_store, settings, templates, DbState};
 
 const CONFIG_KEY: &str = "llm_config";
 const KEYRING_SERVICE: &str = "kiminola";
@@ -396,13 +396,7 @@ fn save_api_key(api_key: Option<String>) -> Result<(), String> {
 }
 
 async fn load_config(pool: &sqlx::SqlitePool) -> Result<ProviderConfig, String> {
-    let value: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
-        .bind(CONFIG_KEY)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    match value {
+    match settings::get(pool, CONFIG_KEY).await? {
         Some(json) => serde_json::from_str(&json).map_err(|e| format!("bad config: {e}")),
         None => Ok(ProviderConfig::default()),
     }
@@ -410,16 +404,7 @@ async fn load_config(pool: &sqlx::SqlitePool) -> Result<ProviderConfig, String> 
 
 async fn save_config(pool: &sqlx::SqlitePool, config: &ProviderConfig) -> Result<(), String> {
     let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    sqlx::query(
-        "INSERT INTO settings (key, value) VALUES (?, ?)
-         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-    )
-    .bind(CONFIG_KEY)
-    .bind(json)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    settings::set(pool, CONFIG_KEY, &json).await
 }
 
 fn build_provider(config: &ProviderConfig) -> Result<OpenAiCompatibleProvider, String> {
@@ -427,31 +412,9 @@ fn build_provider(config: &ProviderConfig) -> Result<OpenAiCompatibleProvider, S
     OpenAiCompatibleProvider::new(config, key)
 }
 
-/// Builds the message list sent to the LLM from transcript, notes, and a
-/// template prompt containing `{transcript}` and `{notes}` placeholders.
-pub struct PromptBuilder;
-
-impl PromptBuilder {
-    pub fn build(transcript: &str, notes: &str, template_prompt: &str) -> Vec<Message> {
-        let prompt = template_prompt
-            .replace("{transcript}", transcript)
-            .replace("{notes}", notes);
-        vec![
-            Message {
-                role: "system".into(),
-                content: "You are a concise meeting-note assistant. Respond in Markdown.".into(),
-            },
-            Message {
-                role: "user".into(),
-                content: prompt,
-            },
-        ]
-    }
-}
-
 #[tauri::command]
 pub async fn get_llm_config(state: State<'_, DbState>) -> Result<ProviderConfigView, String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     let config = load_config(&pool).await?;
     let has_api_key = load_api_key()?.is_some();
     Ok(ProviderConfigView::new(config, has_api_key))
@@ -468,7 +431,7 @@ pub async fn set_llm_config(
     config: ProviderConfig,
     api_key: Option<String>,
 ) -> Result<(), String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     save_config(&pool, &config).await?;
     save_api_key(api_key)?;
     Ok(())
@@ -479,7 +442,7 @@ pub async fn test_llm_config(
     state: State<'_, DbState>,
     on_event: Channel<LlmEvent>,
 ) -> Result<(), String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     let config = load_config(&pool).await?;
     let provider = build_provider(&config)?;
 
@@ -510,6 +473,99 @@ pub async fn test_llm_config(
     Ok(())
 }
 
+
+const ENHANCEMENT_SYSTEM_PROMPT: &str =
+    "You are a concise meeting-note assistant. Respond in Markdown.";
+
+/// A Note enhancement whose provider stream is open. Running it forwards
+/// chunks to the caller and persists the enhanced notes when the stream
+/// completes.
+pub(crate) struct Enhancement {
+    pool: sqlx::SqlitePool,
+    meeting_id: i64,
+    stream: BoxStream<'static, LlmEvent>,
+}
+
+/// Start a Note enhancement for `meeting_id` with `provider`.
+///
+/// Selects the template (`template_id`, or the default first template), sends
+/// the channel-labelled transcript plus the Notepad through the template's
+/// `{transcript}`/`{notes}` placeholders, and opens the provider stream.
+/// Unknown Meetings or templates and rejected provider requests fail here,
+/// before any event is delivered or anything is persisted.
+pub(crate) async fn begin_enhancement(
+    pool: &sqlx::SqlitePool,
+    provider: &dyn ChatProvider,
+    meeting_id: i64,
+    template_id: Option<i64>,
+) -> Result<Enhancement, String> {
+    let meeting = meeting_store::get_meeting(pool, meeting_id).await?;
+    let template = templates::resolve(pool, template_id).await?;
+
+    let transcript = meeting
+        .transcript
+        .iter()
+        .map(|segment| format!("{}: {}", segment.channel, segment.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = template
+        .prompt
+        .replace("{transcript}", &transcript)
+        .replace("{notes}", &meeting.notepad);
+    let messages = [
+        Message {
+            role: "system".into(),
+            content: ENHANCEMENT_SYSTEM_PROMPT.into(),
+        },
+        Message {
+            role: "user".into(),
+            content: prompt,
+        },
+    ];
+
+    let stream = provider.complete(&messages).await?;
+    Ok(Enhancement {
+        pool: pool.clone(),
+        meeting_id,
+        stream,
+    })
+}
+
+impl Enhancement {
+    /// Forward every chunk to `on_event`, then send exactly one terminal event:
+    /// `Done` after the full text was saved as the Meeting's enhanced notes, or
+    /// `Error` (provider error, empty output, or save failure). On error the
+    /// previous enhanced notes are kept. Persistence does not depend on the
+    /// channel still being open, so closing the page cannot lose a result.
+    pub(crate) async fn run(mut self, on_event: &Channel<LlmEvent>) {
+        let mut full = String::new();
+        while let Some(event) = self.stream.next().await {
+            match event {
+                LlmEvent::Chunk(chunk) => {
+                    full.push_str(&chunk);
+                    let _ = on_event.send(LlmEvent::Chunk(chunk));
+                }
+                LlmEvent::Done => break,
+                LlmEvent::Error(message) => {
+                    let _ = on_event.send(LlmEvent::Error(message));
+                    return;
+                }
+            }
+        }
+        // Some compatible providers end the stream without an explicit DONE marker.
+        let result = if full.trim().is_empty() {
+            Err("provider returned no content".to_string())
+        } else {
+            meeting_store::update_enhanced_notes(&self.pool, self.meeting_id, &full).await
+        };
+        let event = match result {
+            Ok(()) => LlmEvent::Done,
+            Err(error) => LlmEvent::Error(error),
+        };
+        let _ = on_event.send(event);
+    }
+}
+
 #[tauri::command]
 pub async fn enhance_meeting(
     on_event: Channel<LlmEvent>,
@@ -517,85 +573,23 @@ pub async fn enhance_meeting(
     meeting_id: i64,
     template_id: Option<i64>,
 ) -> Result<(), String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     let config = load_config(&pool).await?;
     let provider = build_provider(&config)?;
-
-    let meeting = crate::db::get_meeting_impl(&pool, meeting_id).await?;
-    let templates = crate::db::list_templates_impl(&pool).await?;
-    let template = if let Some(id) = template_id {
-        templates
-            .into_iter()
-            .find(|t| t.id == id)
-            .ok_or_else(|| "template not found".to_string())?
-    } else {
-        templates
-            .into_iter()
-            .next()
-            .ok_or_else(|| "no templates available".to_string())?
-    };
-
-    let transcript = meeting
-        .transcript
-        .iter()
-        .map(|s| format!("{}: {}", s.channel, s.text))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let notes = meeting.notepad;
-
-    let messages = PromptBuilder::build(&transcript, &notes, &template.prompt);
-    let stream = provider.complete(&messages).await?;
-
-    tauri::async_runtime::spawn(async move {
-        stream_enhancement(&pool, meeting_id, stream, &on_event).await;
-    });
+    let enhancement = begin_enhancement(&pool, &provider, meeting_id, template_id).await?;
+    tauri::async_runtime::spawn(async move { enhancement.run(&on_event).await });
     Ok(())
-}
-
-async fn stream_enhancement(
-    pool: &sqlx::SqlitePool,
-    meeting_id: i64,
-    mut stream: BoxStream<'static, LlmEvent>,
-    on_event: &Channel<LlmEvent>,
-) {
-    let mut full = String::new();
-    while let Some(event) = stream.next().await {
-        match event {
-            LlmEvent::Chunk(chunk) => {
-                full.push_str(&chunk);
-                // Persistence should finish even if the originating page was closed.
-                let _ = on_event.send(LlmEvent::Chunk(chunk));
-            }
-            LlmEvent::Done => break,
-            LlmEvent::Error(message) => {
-                let _ = on_event.send(LlmEvent::Error(message));
-                return;
-            }
-        }
-    }
-    // Some compatible providers end the stream without an explicit DONE marker.
-    let result = if full.trim().is_empty() {
-        Err("provider returned no content".to_string())
-    } else {
-        update_enhanced_notes_impl(pool, meeting_id, &full).await
-    };
-    let event = match result {
-        Ok(()) => LlmEvent::Done,
-        Err(error) => LlmEvent::Error(error),
-    };
-    let _ = on_event.send(event);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
+    use crate::db::meeting_store::{MeetingToSave, NewSegment};
+    use crate::db::test_support::TestDb;
+    use std::sync::{Arc, Mutex};
 
-    fn capture_channel() -> (
-        Channel<LlmEvent>,
-        std::sync::Arc<std::sync::Mutex<Vec<LlmEvent>>>,
-    ) {
-        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    fn capture_channel() -> (Channel<LlmEvent>, Arc<Mutex<Vec<LlmEvent>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
         let received = events.clone();
         let channel = Channel::new(move |body| {
             let tauri::ipc::InvokeResponseBody::Json(json) = body else {
@@ -610,64 +604,232 @@ mod tests {
         (channel, events)
     }
 
-    async fn enhancement_pool() -> sqlx::SqlitePool {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
+    /// Scripted provider that records every request it receives.
+    struct FakeProvider {
+        events: Vec<LlmEvent>,
+        requests: Mutex<Vec<Vec<Message>>>,
+    }
+
+    impl FakeProvider {
+        fn new(events: Vec<LlmEvent>) -> Self {
+            Self {
+                events,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn user_prompts(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|messages| messages.last().unwrap().content.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl ChatProvider for FakeProvider {
+        async fn complete(
+            &self,
+            messages: &[Message],
+        ) -> Result<BoxStream<'static, LlmEvent>, String> {
+            self.requests.lock().unwrap().push(messages.to_vec());
+            Ok(Box::pin(stream::iter(self.events.clone())))
+        }
+    }
+
+    async fn meeting(
+        pool: &sqlx::SqlitePool,
+        notepad: &str,
+        previous_enhancement: Option<&str>,
+    ) -> i64 {
+        let segments = [
+            NewSegment {
+                channel: "you".into(),
+                text: "Can you send the deck?".into(),
+                start_ms: Some(0),
+                end_ms: Some(900),
+            },
+            NewSegment {
+                channel: "others".into(),
+                text: "Sure, by Friday.".into(),
+                start_ms: Some(1_000),
+                end_ms: Some(1_800),
+            },
+        ];
+        let id = meeting_store::save_meeting(
+            pool,
+            MeetingToSave {
+                title: "Sync",
+                duration_seconds: 60,
+                notepad,
+                segments: &segments,
+                ..MeetingToSave::default()
+            },
+        )
+        .await
+        .unwrap();
+        if let Some(previous) = previous_enhancement {
+            meeting_store::update_enhanced_notes(pool, id, previous)
+                .await
+                .unwrap();
+        }
+        id
+    }
+
+    async fn enhanced_notes(pool: &sqlx::SqlitePool, id: i64) -> Option<String> {
+        meeting_store::get_meeting(pool, id)
+            .await
+            .unwrap()
+            .enhanced_markdown
+    }
+
+    #[tokio::test]
+    async fn enhancement_fills_the_selected_template_and_persists_the_stream() {
+        let db = TestDb::new("enhance-template").await;
+        let id = meeting(&db.pool, "deck owner?", None).await;
+        let template = templates::create(&db.pool, "Terse", "T:\n{transcript}\nN:{notes}")
             .await
             .unwrap();
-        crate::migrations::run(&pool).await.unwrap();
-        for id in [101, 202] {
-            sqlx::query("INSERT INTO meetings (id, title, space_id, created_at) SELECT ?, 'Meeting', id, '2026-09-04' FROM spaces WHERE name = 'Personal' LIMIT 1")
-                .bind(id).execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO notes (meeting_id, raw_markdown, enhanced_markdown, updated_at) VALUES (?, 'Original notes', 'Previous enhancement', '2026-09-04')")
-                .bind(id).execute(&pool).await.unwrap();
+        let provider = FakeProvider::new(vec![
+            LlmEvent::Chunk("## Actions\n".into()),
+            LlmEvent::Chunk("- Deck by Friday".into()),
+            LlmEvent::Done,
+        ]);
+        let (channel, events) = capture_channel();
+
+        begin_enhancement(&db.pool, &provider, id, Some(template.id))
+            .await
+            .unwrap()
+            .run(&channel)
+            .await;
+
+        assert_eq!(
+            provider.user_prompts(),
+            vec!["T:\nyou: Can you send the deck?\nothers: Sure, by Friday.\nN:deck owner?"]
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                LlmEvent::Chunk("## Actions\n".into()),
+                LlmEvent::Chunk("- Deck by Friday".into()),
+                LlmEvent::Done
+            ]
+        );
+        assert_eq!(
+            enhanced_notes(&db.pool, id).await.as_deref(),
+            Some("## Actions\n- Deck by Friday")
+        );
+        let detail = meeting_store::get_meeting(&db.pool, id).await.unwrap();
+        assert_eq!(detail.notepad, "deck owner?", "the Notepad is never replaced");
+    }
+
+    #[tokio::test]
+    async fn enhancement_defaults_to_the_first_template_and_works_without_notes() {
+        let db = TestDb::new("enhance-default").await;
+        let id = meeting(&db.pool, "", None).await;
+        let default = templates::resolve(&db.pool, None).await.unwrap();
+        let provider = FakeProvider::new(vec![LlmEvent::Chunk("Summary".into())]);
+        let (channel, events) = capture_channel();
+
+        begin_enhancement(&db.pool, &provider, id, None)
+            .await
+            .unwrap()
+            .run(&channel)
+            .await;
+
+        let expected = default
+            .prompt
+            .replace(
+                "{transcript}",
+                "you: Can you send the deck?\nothers: Sure, by Friday.",
+            )
+            .replace("{notes}", "");
+        assert_eq!(provider.user_prompts(), vec![expected]);
+        // No explicit DONE marker: the end of the stream completes the result.
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![LlmEvent::Chunk("Summary".into()), LlmEvent::Done]
+        );
+        assert_eq!(enhanced_notes(&db.pool, id).await.as_deref(), Some("Summary"));
+    }
+
+    #[tokio::test]
+    async fn unknown_meeting_or_template_fails_before_contacting_the_provider() {
+        let db = TestDb::new("enhance-missing").await;
+        let id = meeting(&db.pool, "", Some("Previous")).await;
+        let provider = FakeProvider::new(vec![LlmEvent::Done]);
+
+        let error = begin_enhancement(&db.pool, &provider, id, Some(9_999))
+            .await
+            .err()
+            .expect("unknown template");
+        assert_eq!(error, "template not found");
+        let error = begin_enhancement(&db.pool, &provider, 9_999, None)
+            .await
+            .err()
+            .expect("unknown meeting");
+        assert_eq!(error, "meeting not found");
+
+        assert!(provider.user_prompts().is_empty());
+        assert_eq!(enhanced_notes(&db.pool, id).await.as_deref(), Some("Previous"));
+    }
+
+    #[tokio::test]
+    async fn failed_or_empty_streams_keep_the_previous_enhancement() {
+        let db = TestDb::new("enhance-failure").await;
+        for (script, expected_terminal) in [
+            (
+                vec![
+                    LlmEvent::Chunk("partial".into()),
+                    LlmEvent::Error("offline".into()),
+                ],
+                LlmEvent::Error("offline".into()),
+            ),
+            (
+                vec![LlmEvent::Chunk("  ".into()), LlmEvent::Done],
+                LlmEvent::Error("provider returned no content".into()),
+            ),
+        ] {
+            let id = meeting(&db.pool, "", Some("Previous enhancement")).await;
+            let provider = FakeProvider::new(script);
+            let (channel, events) = capture_channel();
+            begin_enhancement(&db.pool, &provider, id, None)
+                .await
+                .unwrap()
+                .run(&channel)
+                .await;
+            assert_eq!(events.lock().unwrap().last(), Some(&expected_terminal));
+            assert_eq!(
+                enhanced_notes(&db.pool, id).await.as_deref(),
+                Some("Previous enhancement")
+            );
         }
-        pool
     }
 
     #[tokio::test]
     async fn concurrent_enhancements_keep_channels_and_persistence_separate() {
-        let pool = enhancement_pool().await;
-        let (channel_a, events_a) = capture_channel();
-        let (channel_b, events_b) = capture_channel();
-        let a = stream::iter(vec![LlmEvent::Chunk("A only".into()), LlmEvent::Done]).boxed();
-        let b = stream::iter(vec![LlmEvent::Chunk("B only".into()), LlmEvent::Done]).boxed();
-        tokio::join!(
-            stream_enhancement(&pool, 101, a, &channel_a),
-            stream_enhancement(&pool, 202, b, &channel_b),
-        );
-        assert_eq!(
-            *events_a.lock().unwrap(),
-            vec![LlmEvent::Chunk("A only".into()), LlmEvent::Done]
-        );
-        assert_eq!(
-            *events_b.lock().unwrap(),
-            vec![LlmEvent::Chunk("B only".into()), LlmEvent::Done]
-        );
-        for (id, expected) in [(101, "A only"), (202, "B only")] {
-            let meeting = crate::db::get_meeting_impl(&pool, id).await.unwrap();
-            assert_eq!(meeting.enhanced_markdown.as_deref(), Some(expected));
-            assert_eq!(meeting.notepad, "Original notes");
-        }
-        pool.close().await;
-    }
-
-    #[tokio::test]
-    async fn enhancement_error_does_not_complete_or_overwrite_the_other_meeting() {
-        let pool = enhancement_pool().await;
-        let (channel_a, events_a) = capture_channel();
-        let (channel_b, events_b) = capture_channel();
-        let a = stream::iter(vec![
+        let db = TestDb::new("enhance-concurrent").await;
+        let a_id = meeting(&db.pool, "Original notes", Some("Previous enhancement")).await;
+        let b_id = meeting(&db.pool, "Original notes", Some("Previous enhancement")).await;
+        let a_provider = FakeProvider::new(vec![
             LlmEvent::Chunk("partial".into()),
             LlmEvent::Error("offline".into()),
-        ])
-        .boxed();
-        let b = stream::iter(vec![LlmEvent::Chunk("B complete".into())]).boxed();
-        tokio::join!(
-            stream_enhancement(&pool, 101, a, &channel_a),
-            stream_enhancement(&pool, 202, b, &channel_b)
-        );
+        ]);
+        let b_provider =
+            FakeProvider::new(vec![LlmEvent::Chunk("B complete".into()), LlmEvent::Done]);
+        let (channel_a, events_a) = capture_channel();
+        let (channel_b, events_b) = capture_channel();
+
+        let a = begin_enhancement(&db.pool, &a_provider, a_id, None)
+            .await
+            .unwrap();
+        let b = begin_enhancement(&db.pool, &b_provider, b_id, None)
+            .await
+            .unwrap();
+        tokio::join!(a.run(&channel_a), b.run(&channel_b));
+
         assert_eq!(
             *events_a.lock().unwrap(),
             vec![
@@ -680,36 +842,16 @@ mod tests {
             vec![LlmEvent::Chunk("B complete".into()), LlmEvent::Done]
         );
         assert_eq!(
-            crate::db::get_meeting_impl(&pool, 101)
-                .await
-                .unwrap()
-                .enhanced_markdown
-                .as_deref(),
+            enhanced_notes(&db.pool, a_id).await.as_deref(),
             Some("Previous enhancement")
         );
         assert_eq!(
-            crate::db::get_meeting_impl(&pool, 202)
-                .await
-                .unwrap()
-                .enhanced_markdown
-                .as_deref(),
+            enhanced_notes(&db.pool, b_id).await.as_deref(),
             Some("B complete")
         );
-        pool.close().await;
-    }
-
-    struct FakeProvider {
-        events: Vec<LlmEvent>,
-    }
-
-    #[async_trait]
-    impl ChatProvider for FakeProvider {
-        async fn complete(
-            &self,
-            _messages: &[Message],
-        ) -> Result<BoxStream<'static, LlmEvent>, String> {
-            let events = self.events.clone();
-            Ok(Box::pin(stream::iter(events)))
+        for id in [a_id, b_id] {
+            let notepad = meeting_store::get_meeting(&db.pool, id).await.unwrap().notepad;
+            assert_eq!(notepad, "Original notes");
         }
     }
 
@@ -765,55 +907,5 @@ mod tests {
         assert_eq!(next.path(), "/api/v1/models");
         assert!(openrouter_models_page_url("https://example.com/api/v1/models").is_err());
         assert!(openrouter_models_page_url("/api/v1/models/other").is_err());
-    }
-
-    #[test]
-    fn prompt_builder_includes_transcript_and_notes() {
-        let messages = PromptBuilder::build(
-            "Alice: hello\nBob: hi",
-            "action items",
-            "Transcript:\n{transcript}\n\nNotes:\n{notes}",
-        );
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, "system");
-        assert!(messages[1].role == "user");
-        assert!(messages[1].content.contains("Alice: hello"));
-        assert!(messages[1].content.contains("action items"));
-    }
-
-    #[tokio::test]
-    async fn fake_provider_yields_scripted_stream() {
-        let provider = FakeProvider {
-            events: vec![
-                LlmEvent::Chunk("Hello".into()),
-                LlmEvent::Chunk(" world".into()),
-                LlmEvent::Done,
-            ],
-        };
-        let messages = PromptBuilder::build("t", "n", "{transcript} {notes}");
-        let mut stream = provider.complete(&messages).await.unwrap();
-
-        let mut collected = Vec::new();
-        while let Some(event) = stream.next().await {
-            collected.push(event);
-        }
-
-        assert_eq!(collected.len(), 3);
-        assert_eq!(collected[0], LlmEvent::Chunk("Hello".into()));
-        assert_eq!(collected[1], LlmEvent::Chunk(" world".into()));
-        assert_eq!(collected[2], LlmEvent::Done);
-    }
-
-    #[tokio::test]
-    async fn fake_provider_propagates_error_event() {
-        let provider = FakeProvider {
-            events: vec![LlmEvent::Error("boom".into())],
-        };
-        let messages = PromptBuilder::build("t", "n", "{transcript} {notes}");
-        let mut stream = provider.complete(&messages).await.unwrap();
-
-        let event = stream.next().await.unwrap();
-        assert_eq!(event, LlmEvent::Error("boom".into()));
-        assert!(stream.next().await.is_none());
     }
 }

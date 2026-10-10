@@ -1,10 +1,14 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
-  import { loadMeetingAfterAutosave } from "$lib/meeting-notes";
-  import { meetingNotesAutosave as notesAutosave } from "$lib/meeting-notes-session";
-  import { exportMeeting, type MeetingExportAction } from "$lib/meeting-export";
+  import { onDestroy, untrack } from "svelte";
   import { page } from "$app/state";
   import { registerUpdateGuard } from "$lib/pending-work";
+  import { notepad } from "$lib/notepad-store";
+  import {
+    createMeetingView,
+    initialMeetingViewState,
+    type MeetingExportAction,
+    type MeetingTab,
+  } from "$lib/meeting-view";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
     getMeeting,
@@ -12,11 +16,13 @@
     getLlmConfig,
     listTemplates,
     enhanceMeeting,
+    exportNotesMarkdown,
+    exportTranscriptText,
+    saveNotesExport,
+    saveTranscriptExport,
     updateSegmentText,
     deleteSegment,
     type MeetingDetail,
-    type ProviderConfig,
-    type Template,
     type TranscriptLine,
   } from "$lib/tauri";
   import { renderMarkdown } from "$lib/markdown";
@@ -28,180 +34,43 @@
   import * as Select from "$lib/components/ui/select";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
 
-  type Tab = "mynotes" | "enhance" | "transcript";
+  // The Meeting view owns loading, Note enhancement, and exports; this page renders it.
+  const ui = $state(initialMeetingViewState());
+  const view = createMeetingView(
+    {
+      port: {
+        getMeeting,
+        getLlmConfig,
+        listTemplates,
+        enhanceMeeting,
+        exportNotesMarkdown,
+        exportTranscriptText,
+        saveNotesExport,
+        saveTranscriptExport,
+        writeClipboard: (text) => navigator.clipboard.writeText(text),
+        renderMarkdown,
+        delay(milliseconds, run) {
+          const timer = setTimeout(run, milliseconds);
+          return () => clearTimeout(timer);
+        },
+      },
+      notepad,
+    },
+    ui,
+  );
+  onDestroy(() => view.dispose());
 
-  let meeting = $state<MeetingDetail | null>(null);
-  let notFound = $state(false);
-  let tab = $state<Tab>("mynotes");
-  let notes = $state("");
-  let showTranscriptFinalizationWarning = $state(false);
-  let notesSaveError = $state(false);
-  const unsubscribeNotes = notesAutosave.subscribe((status) => {
-    notesSaveError = status === "error";
-  });
-  let enhancementVersion = 0;
-  onDestroy(() => {
-    enhancementVersion++;
-    clearTimeout(renderTimer);
-    unsubscribeNotes();
-    void notesAutosave.flush().catch((error) => console.error("Failed to save notes:", error));
+  // (Re)load whenever the route changes.
+  $effect(() => {
+    const id = Number(page.params.id);
+    const searchParams = page.url.searchParams;
+    return untrack(() => view.open(id, searchParams));
   });
 
   // Inline title editing
   let editingTitle = $state(false);
   let editTitle = $state("");
   let titleInputRef = $state<HTMLInputElement | null>(null);
-
-  // Enhancement state
-  let templates = $state<Template[]>([]);
-  let selectedTemplateId = $state<number | undefined>(undefined);
-  let config = $state<ProviderConfig | null>(null);
-  let configLoaded = $state(false);
-  let enhancing = $state(false);
-  let enhanceError = $state<string | null>(null);
-  let enhancedMd = $state("");
-  let enhancedGenerated = $state(false);
-  let hasEverEnhanced = $state(false);
-  // Rendered HTML is updated on a throttle while streaming: re-parsing and
-  // sanitizing the whole document on every token chunk stalls the UI.
-  let enhancedHtml = $state("");
-  let renderTimer: ReturnType<typeof setTimeout> | undefined;
-
-  function renderEnhancedNow() {
-    clearTimeout(renderTimer);
-    renderTimer = undefined;
-    enhancedHtml = renderMarkdown(enhancedMd);
-  }
-
-  function scheduleEnhancedRender() {
-    if (renderTimer !== undefined) return;
-    renderTimer = setTimeout(() => {
-      renderTimer = undefined;
-      enhancedHtml = renderMarkdown(enhancedMd);
-    }, 100);
-  }
-
-  function isEnhanceMode(value: string | null): value is "generate" | "enhance" {
-    return value === "generate" || value === "enhance";
-  }
-
-  async function loadConfig(isCurrent: () => boolean) {
-    try {
-      const [nextConfig, nextTemplates] = await Promise.all([getLlmConfig(), listTemplates()]);
-      if (!isCurrent()) return;
-      config = nextConfig;
-      templates = nextTemplates;
-      selectedTemplateId = templates[0]?.id;
-    } catch (err) {
-      if (!isCurrent()) return;
-      console.error("Failed to load LLM config/templates:", err);
-      config = null;
-    } finally {
-      if (isCurrent()) configLoaded = true;
-    }
-  }
-
-  async function refreshConfig() {
-    try {
-      config = await getLlmConfig();
-    } catch (err) {
-      console.error("Failed to refresh LLM config:", err);
-    }
-  }
-
-  async function runEnhancement() {
-    if (!meeting || enhancing) return;
-    const id = meeting.id;
-    const templateId = selectedTemplateId;
-    const version = ++enhancementVersion;
-    enhancing = true;
-    enhanceError = null;
-    try {
-      await notesAutosave.flush(id);
-      if (version !== enhancementVersion) return;
-      enhancedMd = "";
-      enhancedHtml = "";
-      enhancedGenerated = false;
-      await enhanceMeeting(id, templateId, (event) => {
-        if (version !== enhancementVersion) return;
-        if (event.event === "chunk") {
-          enhancedMd += event.data;
-          scheduleEnhancedRender();
-        } else {
-          enhancing = false;
-          if (event.event === "done") {
-            enhancedGenerated = true;
-            hasEverEnhanced = true;
-          } else {
-            enhanceError = event.data;
-          }
-          renderEnhancedNow();
-        }
-      });
-    } catch (err) {
-      if (version !== enhancementVersion) return;
-      enhanceError = String(err);
-      enhancing = false;
-    }
-  }
-
-  // (Re)load whenever the route param changes.
-  $effect(() => {
-    let current = true;
-    const id = Number(page.params.id);
-    const mode = page.url.searchParams.get("mode");
-    const warning = page.url.searchParams.get("warning");
-    enhancementVersion++;
-    enhancing = false;
-    enhanceError = null;
-    clearTimeout(renderTimer);
-    renderTimer = undefined;
-    meeting = null;
-    notFound = false;
-    tab = "mynotes";
-    notes = "";
-    showTranscriptFinalizationWarning = warning === "transcript-finalization";
-    enhancedMd = "";
-    enhancedHtml = "";
-    enhancedGenerated = false;
-    hasEverEnhanced = false;
-    configLoaded = false;
-    config = null;
-    templates = [];
-    selectedTemplateId = undefined;
-    if (!Number.isInteger(id)) {
-      notFound = true;
-      return;
-    }
-    const configReady = loadConfig(() => current);
-    loadMeetingAfterAutosave(
-      notesAutosave,
-      () => getMeeting(id),
-      (error) => console.error("Failed to save notes:", error),
-    )
-      .then(async (m) => {
-        if (!current) return;
-        meeting = m;
-        notes = notesAutosave.pendingNotes(id) ?? m.notepad;
-        if (m.enhanced_markdown) {
-          enhancedMd = m.enhanced_markdown;
-          renderEnhancedNow();
-          enhancedGenerated = true;
-          hasEverEnhanced = true;
-        }
-        if (isEnhanceMode(mode)) {
-          tab = "enhance";
-          await configReady;
-          if (current && config?.model && config.base_url.trim()) {
-            await runEnhancement();
-          }
-        }
-      })
-      .catch(() => {
-        if (current) notFound = true;
-      });
-    return () => { current = false; };
-  });
 
   $effect(() => {
     if (editingTitle && titleInputRef) {
@@ -210,18 +79,18 @@
   });
 
   function startTitleEdit() {
-    if (!meeting) return;
-    editTitle = meeting.title;
+    if (!ui.meeting) return;
+    editTitle = ui.meeting.title;
     editingTitle = true;
   }
 
   async function saveTitle() {
-    if (!meeting) return;
+    if (!ui.meeting) return;
     const trimmed = editTitle.trim();
-    if (trimmed && trimmed !== meeting.title) {
+    if (trimmed && trimmed !== ui.meeting.title) {
       try {
-        await renameMeeting(meeting.id, trimmed);
-        meeting.title = trimmed;
+        await renameMeeting(ui.meeting.id, trimmed);
+        ui.meeting.title = trimmed;
       } catch (err) {
         console.error("Failed to rename meeting:", err);
         return;
@@ -259,10 +128,9 @@
   }
 
   async function runExport(action: MeetingExportAction) {
-    if (!meeting) return;
-    const id = meeting.id;
+    if (!ui.meeting) return;
     try {
-      const result = await exportMeeting(action, id);
+      const result = await view.export(action);
       flashExportStatus(result.message, result.path ?? null);
     } catch (err) {
       flashExportStatus(`Export failed: ${String(err)}`);
@@ -289,7 +157,7 @@
   }
 
   async function saveSegmentEdit() {
-    if (editingSegmentId === undefined || !meeting) return;
+    if (editingSegmentId === undefined || !ui.meeting) return;
     const text = editSegmentText.trim();
     if (!text) {
       cancelSegmentEdit();
@@ -297,7 +165,7 @@
     }
     try {
       await updateSegmentText(editingSegmentId, text);
-      const line = meeting.transcript.find((l) => l.id === editingSegmentId);
+      const line = ui.meeting.transcript.find((l) => l.id === editingSegmentId);
       if (line) line.text = text;
     } catch (err) {
       console.error("Failed to update segment:", err);
@@ -307,10 +175,10 @@
   }
 
   async function removeSegment(segmentId: number) {
-    if (!meeting) return;
+    if (!ui.meeting) return;
     try {
       await deleteSegment(segmentId);
-      meeting.transcript = meeting.transcript.filter((l) => l.id !== segmentId);
+      ui.meeting.transcript = ui.meeting.transcript.filter((l) => l.id !== segmentId);
       if (editingSegmentId === segmentId) cancelSegmentEdit();
     } catch (err) {
       console.error("Failed to delete segment:", err);
@@ -325,11 +193,6 @@
       event.preventDefault();
       saveSegmentEdit();
     }
-  }
-
-  // Notes edits persist automatically, debounced.
-  function onNotesInput() {
-    if (meeting) notesAutosave.schedule(meeting.id, notes);
   }
 
   $effect(() => {
@@ -349,27 +212,26 @@
     return `${date} · ${mins} min`;
   }
 
-  let configured = $derived(configLoaded && config != null && config.base_url.trim() !== "" && config.model.trim() !== "");
-
-  const templateOptions = $derived(templates.map((t) => ({ value: String(t.id), label: t.name })));
+  const templateOptions = $derived(ui.templates.map((t) => ({ value: String(t.id), label: t.name })));
   const selectedTemplateLabel = $derived(
-    templates.find((t) => t.id === selectedTemplateId)?.name ?? "Template",
+    ui.templates.find((t) => t.id === ui.selectedTemplateId)?.name ?? "Template",
   );
 </script>
 
+
 <svelte:head>
-  <title>{meeting?.title ?? "Meeting"} — Kimi Nola</title>
+  <title>{ui.meeting?.title ?? "Meeting"} — Kimi Nola</title>
 </svelte:head>
 
 <div class="main-content">
-  {#if notFound}
+  {#if ui.notFound}
     <div class="post-shell">
       <div class="post-back">
         <Button variant="ghost" size="sm" href="/">← Back to meetings</Button>
       </div>
       <div class="empty-state" style="margin-top:16px;">Meeting not found.</div>
     </div>
-  {:else if meeting}
+  {:else if ui.meeting}
     <div class="post-shell">
       <div class="post-header">
         <div class="post-back">
@@ -387,7 +249,7 @@
             />
           {:else}
             <button class="display editable-title" onclick={startTitleEdit}>
-              {meeting.title}
+              {ui.meeting.title}
             </button>
           {/if}
           <DropdownMenu.Root>
@@ -414,9 +276,9 @@
           </DropdownMenu.Root>
         </div>
         <div class="post-meta-row">
-          <span class="post-meta-pill">{formatMeta(meeting)}</span>
-          {#if meeting.location_path ?? meeting.space_name}
-            <span class="post-meta-pill">{meeting.location_path ?? meeting.space_name}</span>
+          <span class="post-meta-pill">{formatMeta(ui.meeting)}</span>
+          {#if ui.meeting.location_path ?? ui.meeting.space_name}
+            <span class="post-meta-pill">{ui.meeting.location_path ?? ui.meeting.space_name}</span>
           {/if}
         </div>
         {#if exportStatus}
@@ -429,7 +291,7 @@
         {/if}
       </div>
 
-      {#if showTranscriptFinalizationWarning}
+      {#if ui.showFinalizationWarning}
         <div class="finalization-warning" role="alert">
           <div>
             <strong>Meeting saved, but the transcript may end early.</strong>
@@ -443,20 +305,20 @@
               size="sm"
               variant="outline"
               onclick={() => {
-                tab = "transcript";
-                showTranscriptFinalizationWarning = false;
+                ui.tab = "transcript";
+                ui.showFinalizationWarning = false;
               }}>Review transcript</Button
             >
             <Button
               size="sm"
               variant="ghost"
-              onclick={() => (showTranscriptFinalizationWarning = false)}>Dismiss</Button
+              onclick={() => (ui.showFinalizationWarning = false)}>Dismiss</Button
             >
           </div>
         </div>
       {/if}
 
-      <Tabs.Root value={tab} onValueChange={(value) => (tab = value as Tab)} class="w-full">
+      <Tabs.Root value={ui.tab} onValueChange={(value) => (ui.tab = value as MeetingTab)} class="w-full">
         <Tabs.List class="pill-tabs-list">
           <Tabs.Trigger value="mynotes" class="pill-tab">My notes</Tabs.Trigger>
           <Tabs.Trigger value="enhance" class="pill-tab">Enhance Notes</Tabs.Trigger>
@@ -465,28 +327,28 @@
         <Tabs.Content value="mynotes" class="post-content">
           <div class="my-notes-card">
             <Textarea
-              bind:value={notes}
-              oninput={onNotesInput}
+              bind:value={ui.notes}
+              oninput={view.notesChanged}
               placeholder="No notes captured during this meeting."
               aria-label="My notes"
               class="notes-textarea"
             />
-            {#if notesSaveError}
+            {#if ui.notesSaveError}
               <p role="alert">Some edits could not be saved. Retry saving before quitting Kimi Nola.</p>
-              <Button variant="secondary" onclick={() => void notesAutosave.flush().catch((error) => console.error("Failed to save notes:", error))}>
+              <Button variant="secondary" onclick={() => void view.retrySave()}>
                 Retry saving
               </Button>
             {/if}
           </div>
         </Tabs.Content>
         <Tabs.Content value="enhance" class="post-content">
-          {#if !configLoaded}
+          {#if !ui.configLoaded}
             <div class="empty-state">Loading AI provider settings…</div>
-          {:else if !configured}
+          {:else if !view.configured}
             <div class="my-notes-card">
-              <ProviderConfigForm onSaved={refreshConfig} />
+              <ProviderConfigForm onSaved={view.refreshConfig} />
             </div>
-          {:else if !hasEverEnhanced && !enhancing}
+          {:else if !ui.hasEverEnhanced && !ui.enhancing}
             <div class="my-notes-card enhance-prompt">
               <div class="enhance-title">Enhance notes with AI</div>
               <div class="enhance-copy">
@@ -497,8 +359,8 @@
                 <span>Template</span>
                 <Select.Root
                   type="single"
-                  value={selectedTemplateId !== undefined ? String(selectedTemplateId) : ""}
-                  onValueChange={(value) => (selectedTemplateId = Number(value))}
+                  value={ui.selectedTemplateId !== undefined ? String(ui.selectedTemplateId) : ""}
+                  onValueChange={(value) => (ui.selectedTemplateId = Number(value))}
                 >
                   <Select.Trigger class="w-[200px]">
                     {selectedTemplateLabel}
@@ -512,8 +374,8 @@
                   </Select.Content>
                 </Select.Root>
               </div>
-              <Button onclick={runEnhancement} disabled={enhancing}>
-                {enhancing ? "Enhancing…" : "Enhance notes"}
+              <Button onclick={view.enhance} disabled={ui.enhancing}>
+                {ui.enhancing ? "Enhancing…" : "Enhance notes"}
               </Button>
             </div>
           {:else}
@@ -523,8 +385,8 @@
                   <span class="tool-label">Template</span>
                   <Select.Root
                     type="single"
-                    value={selectedTemplateId !== undefined ? String(selectedTemplateId) : ""}
-                    onValueChange={(value) => (selectedTemplateId = Number(value))}
+                    value={ui.selectedTemplateId !== undefined ? String(ui.selectedTemplateId) : ""}
+                    onValueChange={(value) => (ui.selectedTemplateId = Number(value))}
                   >
                     <Select.Trigger class="w-[200px]">
                       {selectedTemplateLabel}
@@ -543,27 +405,27 @@
                   <Button
                     variant="outline"
                     size="sm"
-                    onclick={runEnhancement}
-                    disabled={enhancing}
+                    onclick={view.enhance}
+                    disabled={ui.enhancing}
                   >
-                    {enhancing ? "Regenerating…" : "Regenerate"}
+                    {ui.enhancing ? "Regenerating…" : "Regenerate"}
                   </Button>
                 </div>
               </div>
-              {#if enhancing}
+              {#if ui.enhancing}
                 <div class="streaming-hint">AI is rewriting your notes…</div>
               {/if}
-              {@html enhancedHtml}
+              {@html ui.enhancedHtml}
             </div>
           {/if}
-          {#if enhanceError}
-            <div class="test-output error" style="margin-top: 12px;">{enhanceError}</div>
+          {#if ui.enhanceError}
+            <div class="test-output error" style="margin-top: 12px;">{ui.enhanceError}</div>
           {/if}
         </Tabs.Content>
         <Tabs.Content value="transcript" class="post-content">
-          {#if meeting.transcript.length > 0}
+          {#if ui.meeting.transcript.length > 0}
             <div class="raw-transcript">
-              {#each meeting.transcript as line (line.id ?? line.text)}
+              {#each ui.meeting.transcript as line (line.id ?? line.text)}
                 {#if editingSegmentId === line.id}
                   <div class="raw-line editing">
                     <span class="tag {line.channel}">{line.channel === "you" ? "You" : "Others"}</span>

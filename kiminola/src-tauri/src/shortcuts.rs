@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::db::{ensure_pool, DbState};
+use crate::db::{settings, DbState};
 
 const SHORTCUT_KEY: &str = "global_shortcut";
 
@@ -26,12 +26,7 @@ impl ShortcutState {
 
 #[tauri::command]
 pub async fn get_global_shortcut(state: State<'_, DbState>) -> Result<Option<String>, String> {
-    let pool = ensure_pool(&state.pool).await?;
-    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
-        .bind(SHORTCUT_KEY)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| e.to_string())
+    settings::get(&state.pool().await?, SHORTCUT_KEY).await
 }
 
 #[tauri::command]
@@ -41,7 +36,7 @@ pub async fn set_global_shortcut(
     db: State<'_, DbState>,
     shortcut_state: State<'_, ShortcutState>,
 ) -> Result<(), String> {
-    let pool = ensure_pool(&db.pool).await?;
+    let pool = db.pool().await?;
 
     // Unregister the old shortcut, if any.
     if let Some(old) = shortcut_state.current.lock().unwrap().take() {
@@ -52,21 +47,9 @@ pub async fn set_global_shortcut(
 
     if let Some(s) = stored.as_ref() {
         register_shortcut(&app, s)?;
-        sqlx::query(
-            "INSERT INTO settings (key, value) VALUES (?, ?)
-             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        )
-        .bind(SHORTCUT_KEY)
-        .bind(s)
-        .execute(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
+        settings::set(&pool, SHORTCUT_KEY, s).await?;
     } else {
-        sqlx::query("DELETE FROM settings WHERE key = ?")
-            .bind(SHORTCUT_KEY)
-            .execute(&pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        settings::remove(&pool, SHORTCUT_KEY).await?;
     }
 
     *shortcut_state.current.lock().unwrap() = stored;
@@ -115,13 +98,8 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     tauri::async_runtime::block_on(async move {
         let db_state = handle.state::<DbState>();
-        let pool = ensure_pool(&db_state.pool).await?;
-        let saved: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
-            .bind(SHORTCUT_KEY)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        if let Some(s) = saved {
+        let pool = db_state.pool().await?;
+        if let Some(s) = settings::get(&pool, SHORTCUT_KEY).await? {
             register_shortcut(&handle, &s)?;
             if let Some(state) = handle.try_state::<ShortcutState>() {
                 *state.current.lock().unwrap() = Some(s);

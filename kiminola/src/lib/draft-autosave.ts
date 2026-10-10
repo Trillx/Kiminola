@@ -4,6 +4,8 @@ export interface DraftAutosave<T = string> {
   schedule(value: T): void;
   flush(value: T): Promise<void>;
   flushPending(): Promise<void>;
+  /** The latest value not yet confirmed saved (scheduled, in flight, or failed). */
+  pendingValue(): T | undefined;
   cancel(): void;
 }
 
@@ -64,6 +66,10 @@ export function createDraftAutosave<T = string>(
       clearTimeout(timer);
       timer = undefined;
       return pending ? enqueue(pending) : queue;
+    },
+
+    pendingValue() {
+      return pending?.value;
     },
 
     cancel() {

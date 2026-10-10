@@ -82,6 +82,17 @@ jobs:
           cargo test --lib --target '${{ matrix.target }}' db
           if ($LASTEXITCODE -ne 0) { throw 'Database safety tests failed.' }
 
+      - name: Test capture pipeline and app lifecycle
+        if: matrix.arch == 'x64'
+        working-directory: kiminola/src-tauri
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:SHERPA_ONNX_LIB_DIR;$env:PATH"
+          cargo test --lib --target '${{ matrix.target }}' recording_session
+          if ($LASTEXITCODE -ne 0) { throw 'Capture pipeline tests failed.' }
+          cargo test --lib --target '${{ matrix.target }}' app_lifecycle
+          if ($LASTEXITCODE -ne 0) { throw 'App lifecycle tests failed.' }
+
       # Hosted windows-latest is x64, so execute the native process tests there.
       # The ARM64 matrix still compiles the same code in the installer build below;
       # runtime evidence for ARM64 must come from a native ARM64 runner.

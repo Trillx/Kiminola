@@ -12,6 +12,7 @@
   import MeetingPresencePrompt from "$lib/components/MeetingPresencePrompt.svelte";
   import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import { libraryDestinationState, recordingHref } from "$lib/library-tree.svelte";
+  import { captureSession } from "$lib/capture-session.svelte";
   import { startAutomaticUpdateCheck, updateState } from "$lib/update.svelte";
   import DatabaseGate from "$lib/components/DatabaseGate.svelte";
   import { shouldUseFocusedSettingsShell } from "$lib/settings-ui";
@@ -67,16 +68,14 @@
     }
   }
 
-  // The global shortcut opens the recording view. Once there, the page owns
-  // the stop action so native finalization and durable meeting save stay one
-  // retry-safe transaction.
+  // The global shortcut opens the recording view. While a Capture session
+  // exists, the session owns the shortcut (stop and save, or retry saving) so
+  // native finalization and durable meeting save stay one retry-safe transaction.
   $effect(() => {
     let unlisten: (() => void) | undefined;
     onShortcutTriggered(() => {
-      if (!databaseReady || updateBusy) return;
-      if (page.url.pathname !== "/record") {
-        goto(recordingHref(libraryDestinationState.last));
-      }
+      if (!databaseReady || updateBusy || captureSession.active) return;
+      goto(recordingHref(libraryDestinationState.last));
     }).then((fn) => {
       unlisten = fn;
     });

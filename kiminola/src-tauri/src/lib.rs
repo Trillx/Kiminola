@@ -1,9 +1,11 @@
+mod app_lifecycle;
 mod asr;
+mod audio;
+mod background_companion;
 mod db;
 mod db_safety;
 mod export;
 mod llm;
-mod loopback;
 mod meeting_presence;
 mod models;
 mod migrations;
@@ -18,8 +20,7 @@ mod window_layout;
 #[allow(dead_code)]
 mod vad;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
+use background_companion::ActivationState;
 use startup_coordination::{
     coordinate_startup, emit_local_diagnostic, StartupCoordination, StartupCoordinationConfig,
     WindowsStartupMutex,
@@ -40,56 +41,6 @@ fn signal_startup_test_ready() {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActivationIntent {
-    Ordinary,
-    Background,
-}
-
-impl ActivationIntent {
-    fn from_args(args: &[String]) -> Self {
-        if args.iter().any(|arg| arg == "--background") {
-            Self::Background
-        } else {
-            Self::Ordinary
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActivationDecision {
-    ShowNow,
-    Queued,
-    Ignored,
-}
-
-#[derive(Default)]
-struct ActivationState {
-    requested: AtomicBool,
-    setup_complete: AtomicBool,
-}
-
-impl ActivationState {
-    fn request(&self, intent: ActivationIntent) -> ActivationDecision {
-        if intent == ActivationIntent::Background {
-            return ActivationDecision::Ignored;
-        }
-
-        self.requested.store(true, Ordering::SeqCst);
-        let setup_complete = self.setup_complete.load(Ordering::SeqCst);
-        if setup_complete && self.requested.swap(false, Ordering::SeqCst) {
-            ActivationDecision::ShowNow
-        } else {
-            ActivationDecision::Queued
-        }
-    }
-
-    fn finish_setup(&self) -> bool {
-        self.setup_complete.store(true, Ordering::SeqCst);
-        self.requested.swap(false, Ordering::SeqCst)
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let startup_mutex = WindowsStartupMutex;
@@ -102,13 +53,9 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .manage(ActivationState::default())
+        .manage(app_lifecycle::AppLifecycle::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            let intent = ActivationIntent::from_args(&args);
-            let state = app.state::<ActivationState>();
-            let decision = state.request(intent);
-            if decision == ActivationDecision::ShowNow {
-                meeting_presence::show_main_window(app);
-            }
+            background_companion::handle_relaunch(app, &args);
         }))
         .manage(shortcuts::ShortcutState::new())
         .plugin(tauri_plugin_opener::init())
@@ -144,81 +91,46 @@ pub fn run() {
                 eprintln!("[shortcuts] startup settings unavailable: {error}");
             }
             meeting_presence::setup(app)?;
-            if std::env::args().any(|arg| arg == "--background") {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
-                }
-            }
-            if app.state::<ActivationState>().finish_setup() {
-                meeting_presence::show_main_window(app.handle());
-            }
+            background_companion::finish_startup(app);
             signal_startup_test_ready();
             Ok(())
         })
-        .on_window_event(|window, event| match event {
-            tauri::WindowEvent::Focused(focused) if window.label() == "main" => {
-                if let Some(state) = window
-                    .app_handle()
-                    .try_state::<meeting_presence::MeetingPresenceState>()
-                {
-                    #[cfg(desktop)]
-                    if *focused {
-                        meeting_presence::sync_prompt_overlay(window.app_handle(), &state);
-                    } else {
-                        meeting_presence::notify_background_prompt(window.app_handle(), &state);
-                    }
-                }
-            }
-            tauri::WindowEvent::CloseRequested { api, .. } => {
-                if let Some(state) = window
-                    .app_handle()
-                    .try_state::<meeting_presence::MeetingPresenceState>()
-                {
-                    if !state.is_quitting() {
-                        api.prevent_close();
-                        let _ = window.hide();
-                        #[cfg(desktop)]
-                        meeting_presence::notify_background_prompt(window.app_handle(), &state);
-                    }
-                }
-            }
-            _ => {}
-        })
+        .on_window_event(background_companion::handle_window_event)
         .invoke_handler(tauri::generate_handler![
-            db::database_status,
-            db::retry_database,
-            db::restore_database_backup,
-            recording::prepare_app_update,
-            recording::cancel_app_update,
+            db::commands::database_status,
+            db::commands::retry_database,
+            db::commands::restore_database_backup,
+            app_lifecycle::prepare_app_update,
+            app_lifecycle::cancel_app_update,
             recording::start_recording,
             recording::stop_recording,
             recording::pause_recording,
             recording::resume_recording,
-            db::save_meeting,
-            db::list_meetings,
-            db::get_meeting,
-            db::rename_meeting,
-            db::list_spaces,
-            db::list_library_tree,
-            db::create_space,
-            db::rename_space,
-            db::move_library_node,
-            db::update_notes,
-            db::update_segment_text,
-            db::delete_segment,
-            db::list_templates,
-            db::create_template,
-            db::update_template,
-            db::delete_template,
-            db::search_meetings,
-            db::is_onboarding_complete,
-            db::set_onboarding_complete,
-            db::create_note_draft,
-            db::list_note_drafts,
-            db::get_note_draft,
-            db::update_note_draft,
-            db::update_note_draft_recovery,
-            db::delete_note_draft,
+            db::commands::save_meeting,
+            db::commands::list_meetings,
+            db::commands::get_meeting,
+            db::commands::rename_meeting,
+            db::commands::list_spaces,
+            db::commands::list_library_tree,
+            db::commands::create_space,
+            db::commands::rename_space,
+            db::commands::move_library_node,
+            db::commands::update_notes,
+            db::commands::update_segment_text,
+            db::commands::delete_segment,
+            db::commands::list_templates,
+            db::commands::create_template,
+            db::commands::update_template,
+            db::commands::delete_template,
+            db::commands::search_meetings,
+            db::commands::is_onboarding_complete,
+            db::commands::set_onboarding_complete,
+            db::commands::create_note_draft,
+            db::commands::list_note_drafts,
+            db::commands::get_note_draft,
+            db::commands::update_note_draft,
+            db::commands::update_note_draft_recovery,
+            db::commands::delete_note_draft,
             meeting_presence::get_meeting_presence_state,
             meeting_presence::set_meeting_presence_enabled,
             meeting_presence::set_meeting_presence_paused,
@@ -288,7 +200,7 @@ mod windows_test_runtime {
 
 #[cfg(test)]
 mod startup_wiring_tests {
-    use super::{ActivationDecision, ActivationIntent, ActivationState};
+    use crate::background_companion::{ActivationDecision, ActivationIntent, ActivationState};
 
     #[test]
     fn ordinary_activation_before_setup_is_replayed_after_setup() {

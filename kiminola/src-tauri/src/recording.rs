@@ -1,24 +1,29 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
-use crate::asr::{resolve_asr_model_dir, AsrEngine};
+use crate::asr::{resolve_asr_model_dir, AsrEngine, SherpaTranscriber};
+use crate::audio::DefaultAudioSource;
 use crate::recording_session::{
-    AudioPressureEvent, AudioSource, DefaultAudioSource, RecordingSession, RecordingStartStatus,
-    TranscriptEvent, TranscriptSink,
+    AudioPressureEvent, AudioSource, RecordingSession, RecordingStartStatus, TranscriptEvent,
+    TranscriptSink, Transcriber,
 };
 
-/// Shared Tauri state for recording.
+/// Shared Tauri state for recording. Whether a Capture session is active is
+/// published to `app_lifecycle`, the single owner of quit/update decisions.
 pub struct RecordingState {
     session: Mutex<Option<ActiveRecording>>,
-    asr_engine: Arc<Mutex<Option<Arc<AsrEngine>>>>,
+    transcriber: Arc<Mutex<Option<Arc<SherpaTranscriber>>>>,
     pending_loopback_target: SyncMutex<Option<PendingLoopbackTarget>>,
-    active: AtomicBool,
-    updating: AtomicBool,
+}
+
+/// Proof that no recording start or stop is in flight. Held by the App update
+/// barrier so a session cannot begin between its check and database suspension.
+pub(crate) struct RecordingQuiesced<'a> {
+    _session: tokio::sync::MutexGuard<'a, Option<ActiveRecording>>,
 }
 
 struct ActiveRecording {
@@ -85,24 +90,17 @@ impl RecordingState {
     fn new() -> Self {
         Self {
             session: Mutex::new(None),
-            asr_engine: Arc::new(Mutex::new(None)),
+            transcriber: Arc::new(Mutex::new(None)),
             pending_loopback_target: SyncMutex::new(None),
-            active: AtomicBool::new(false),
-            updating: AtomicBool::new(false),
         }
     }
 
-    fn set_active(&self, active: bool) {
-        self.active.store(active, Ordering::Release);
-    }
-
-    fn set_active_for_app(&self, app: &AppHandle, active: bool) {
-        self.set_active(active);
-        crate::meeting_presence::recording_activity_changed(app, active);
-    }
-
-    fn is_active(&self) -> bool {
-        self.active.load(Ordering::Acquire)
+    /// Wait for any in-flight recording start or stop and keep new ones out
+    /// while the returned guard lives.
+    pub(crate) async fn quiesce(&self) -> RecordingQuiesced<'_> {
+        RecordingQuiesced {
+            _session: self.session.lock().await,
+        }
     }
 
     fn take_loopback_target(&self) -> Option<u32> {
@@ -113,14 +111,6 @@ impl RecordingState {
             .filter(|target| target.queued_at.elapsed() <= PENDING_LOOPBACK_TARGET_TTL)
             .map(|target| target.process_id)
     }
-}
-
-/// Synchronous recording activity check for native lifecycle handlers such as
-/// the tray menu. `true` includes startup and transcript finalization so the
-/// process cannot exit while a session is becoming durable.
-pub fn is_recording_active(app: &AppHandle) -> bool {
-    app.try_state::<RecordingState>()
-        .is_some_and(|state| state.is_active())
 }
 
 /// Carries the detected meeting PID across the prompt-to-recording navigation.
@@ -135,17 +125,21 @@ pub fn queue_process_loopback_target(app: &AppHandle, process_id: u32) {
     }
 }
 
-/// Get the shared ASR engine, loading the model on first use. Failed loads stay
-/// retryable so a model installed during onboarding works without an app
-/// restart; successful loads remain cached for the process lifetime.
-async fn ensure_asr_engine(cache: &Mutex<Option<Arc<AsrEngine>>>) -> Option<Arc<AsrEngine>> {
+/// Get the shared transcriber, loading the ASR model on first use. Failed
+/// loads stay retryable so a model installed during onboarding works without
+/// an app restart; successful loads remain cached for the process lifetime.
+async fn ensure_transcriber(
+    cache: &Mutex<Option<Arc<SherpaTranscriber>>>,
+) -> Option<Arc<SherpaTranscriber>> {
     let start = std::time::Instant::now();
-    let engine = get_or_try_init(cache, || {
-        resolve_asr_model_dir().and_then(|directory| AsrEngine::new(&directory))
+    let transcriber = get_or_try_init(cache, || {
+        resolve_asr_model_dir()
+            .and_then(|directory| AsrEngine::new(&directory))
+            .map(|engine| SherpaTranscriber::new(Arc::new(engine)))
     })
     .await;
     eprintln!("[recording] ASR engine resolved in {:?}", start.elapsed());
-    engine
+    transcriber
 }
 
 async fn get_or_try_init<T, F>(cache: &Mutex<Option<Arc<T>>>, loader: F) -> Option<Arc<T>>
@@ -204,22 +198,22 @@ pub async fn start_recording(
     state: State<'_, RecordingState>,
     database: State<'_, crate::db::DbState>,
 ) -> Result<RecordingStartStatus, String> {
-    crate::db::ensure_pool(&database.pool).await?;
+    database.pool().await?;
     let mut session = state.session.lock().await;
-    if state.updating.load(Ordering::Acquire) {
-        return Err(
-            "The app is preparing to update. Recording is paused until it restarts.".into(),
-        );
-    }
     if session.is_some() {
         return Err("recording already in progress".into());
     }
-    state.set_active_for_app(&app, true);
+    // Marks the session active before capture starts; refused while an App
+    // update is being prepared. (A session and a prepared update never
+    // coexist, so the check order above cannot hide either error.)
+    crate::app_lifecycle::begin_recording(&app)?;
 
     // Grab the preloaded ASR engine (warmed in the background at app launch);
     // lanes are cheap per-recording streams over the shared weights.
-    let engine = ensure_asr_engine(&state.asr_engine).await;
-    if engine.is_none() {
+    let transcriber = ensure_transcriber(&state.transcriber)
+        .await
+        .map(|transcriber| transcriber as Arc<dyn Transcriber>);
+    if transcriber.is_none() {
         eprintln!("ASR model not found; no transcript text will be produced");
     }
 
@@ -231,12 +225,12 @@ pub async fn start_recording(
         app: app.clone(),
         store: Arc::clone(&transcript_store),
     });
-    let new_session = RecordingSession::new(audio_source, engine, sink);
+    let new_session = RecordingSession::new(audio_source, transcriber, sink);
 
     let start_status = match new_session.start().await {
         Ok(status) => status,
         Err(error) => {
-            state.set_active_for_app(&app, false);
+            crate::app_lifecycle::end_recording(&app);
             return Err(error);
         }
     };
@@ -245,34 +239,6 @@ pub async fn start_recording(
         transcript_store,
     });
     Ok(start_status)
-}
-
-#[tauri::command]
-pub async fn prepare_app_update(
-    state: State<'_, RecordingState>,
-    database: State<'_, crate::db::DbState>,
-) -> Result<(), String> {
-    let session = state.session.lock().await;
-    if session.is_some() || state.is_active() {
-        return Err("Finish and save the current recording before updating.".into());
-    }
-    state.updating.store(true, Ordering::Release);
-    if let Err(error) = database.pool.suspend().await {
-        state.updating.store(false, Ordering::Release);
-        return Err(error);
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn cancel_app_update(
-    state: State<'_, RecordingState>,
-    database: State<'_, crate::db::DbState>,
-) -> Result<(), String> {
-    let _session = state.session.lock().await;
-    database.pool.resume().await;
-    state.updating.store(false, Ordering::Release);
-    Ok(())
 }
 
 /// Stops the active recording session and returns the authoritative latest
@@ -287,14 +253,16 @@ pub async fn stop_recording(
 ) -> Result<RecordingStopResult, String> {
     let mut session = state.session.lock().await;
     let Some(active) = session.take() else {
-        state.set_active_for_app(&app, false);
+        crate::app_lifecycle::end_recording(&app);
         return Ok(RecordingStopResult {
             transcript: Vec::new(),
             finalization_warning: None,
         });
     };
     let stop_result = active.session.stop().await;
-    state.set_active_for_app(&app, false);
+    // Activity ends only after finalization so the app cannot quit or update
+    // while the transcript is becoming durable.
+    crate::app_lifecycle::end_recording(&app);
     Ok(result_after_finalization(
         stop_result,
         &active.transcript_store,
@@ -327,13 +295,13 @@ pub async fn resume_recording(
 /// Helper used by `lib.rs` to install the recording state into the Tauri manager.
 pub fn setup(app: &mut tauri::App) {
     let state = RecordingState::new();
-    let cache = Arc::clone(&state.asr_engine);
+    let cache = Arc::clone(&state.transcriber);
     app.manage(state);
 
     // Warm the ASR model in the background so the first recording doesn't
     // wait on the ~650 MB encoder load.
     tauri::async_runtime::spawn(async move {
-        let _ = ensure_asr_engine(&cache).await;
+        let _ = ensure_transcriber(&cache).await;
     });
 }
 
@@ -341,7 +309,7 @@ pub fn setup(app: &mut tauri::App) {
 mod tests {
     use super::*;
     use crate::recording_session::TranscriptChannel;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn event(utterance_id: u64, revision: u32, text: &str) -> TranscriptEvent {
         TranscriptEvent {
@@ -437,17 +405,5 @@ mod tests {
             queued_at: Instant::now() - PENDING_LOOPBACK_TARGET_TTL - Duration::from_secs(1),
         });
         assert_eq!(state.take_loopback_target(), None);
-    }
-
-    #[test]
-    fn recording_activity_covers_the_full_native_lifecycle() {
-        let state = RecordingState::new();
-        assert!(!state.is_active());
-
-        state.set_active(true);
-        assert!(state.is_active());
-
-        state.set_active(false);
-        assert!(!state.is_active());
     }
 }

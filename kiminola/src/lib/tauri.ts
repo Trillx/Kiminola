@@ -4,8 +4,54 @@ import { trackOperation } from "./pending-work.ts";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
+/**
+ * Commands an App update must let finish before the app shuts down: every
+ * command that writes the database, the key store, settings, or an export
+ * file. Unsaved Notepad text and Capture sessions are owned elsewhere (the
+ * Notepad store and Capture session register their own pending work, and an
+ * active session blocks installation), so this list only covers the write
+ * itself once it has been sent. Add new writers here; when unsure, add it.
+ *
+ * Deliberately not awaited, because interrupting them loses no user data:
+ * - enhance_meeting: the backend persists the enhancement in one write when
+ *   the stream completes, so an interrupted run keeps the previous enhanced
+ *   notes and can be regenerated. Waiting could hold an update for minutes.
+ * - test_llm_config: a connection check that persists nothing.
+ * - download_model_pack: files download to `.part` and are renamed after
+ *   verification; an interrupted download is redone, never half-installed.
+ * - start/pause/resume/stop_recording: native capture state, guarded by the
+ *   Capture session, which blocks installation while it is active.
+ */
+const DATA_WRITES = new Set([
+  "save_meeting",
+  "rename_meeting",
+  "create_space",
+  "rename_space",
+  "move_library_node",
+  "update_notes",
+  "create_note_draft",
+  "update_note_draft",
+  "update_note_draft_recovery",
+  "delete_note_draft",
+  "set_llm_config",
+  "create_template",
+  "update_template",
+  "delete_template",
+  "update_segment_text",
+  "delete_segment",
+  "save_notes_export",
+  "save_transcript_export",
+  "set_global_shortcut",
+  "set_onboarding_complete",
+  "set_meeting_presence_enabled",
+  "set_meeting_presence_paused",
+  "set_meeting_presence_start_with_windows",
+  "jot_notes_from_meeting_prompt",
+]);
+
 function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
-  return trackOperation(nativeInvoke<T>(command, args));
+  const request = nativeInvoke<T>(command, args);
+  return DATA_WRITES.has(command) ? trackOperation(request) : request;
 }
 
 export type TranscriptChannel = "you" | "others";
