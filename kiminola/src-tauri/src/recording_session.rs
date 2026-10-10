@@ -595,7 +595,11 @@ mod tests {
     }
 
     impl FakeAudioSource {
-        fn new(buffers: Vec<(TranscriptChannel, Vec<f32>)>, mic_rate: u32, loopback_rate: u32) -> Self {
+        fn new(
+            buffers: Vec<(TranscriptChannel, Vec<f32>)>,
+            mic_rate: u32,
+            loopback_rate: u32,
+        ) -> Self {
             Self {
                 buffers,
                 mic_rate,
@@ -856,8 +860,16 @@ mod tests {
                 )
             })
             .collect();
-        let you: Vec<_> = summary.iter().filter(|(c, _)| *c == You).map(|(_, r)| r.clone()).collect();
-        let others: Vec<_> = summary.iter().filter(|(c, _)| *c == Others).map(|(_, r)| r.clone()).collect();
+        let you: Vec<_> = summary
+            .iter()
+            .filter(|(c, _)| *c == You)
+            .map(|(_, r)| r.clone())
+            .collect();
+        let others: Vec<_> = summary
+            .iter()
+            .filter(|(c, _)| *c == Others)
+            .map(|(_, r)| r.clone())
+            .collect();
         assert_eq!(
             you,
             vec![
@@ -865,18 +877,30 @@ mod tests {
                 vec![(1, "next", true), (2, "next steps", false)],
             ]
         );
-        assert_eq!(others, vec![vec![(1, "Go ahead", true), (2, "Go ahead", false)]]);
+        assert_eq!(
+            others,
+            vec![vec![(1, "Go ahead", true), (2, "Go ahead", false)]]
+        );
 
         // Utterance ids are unique across channels and every revision of an
         // utterance stays on one channel with a stable start.
         assert_eq!(utterances.len(), 3);
         for revisions in utterances.values() {
             assert!(revisions.iter().all(|e| e.channel == revisions[0].channel));
-            assert!(revisions.iter().all(|e| e.start_ms == revisions[0].start_ms));
+            assert!(revisions
+                .iter()
+                .all(|e| e.start_ms == revisions[0].start_ms));
             assert!(revisions.windows(2).all(|w| w[0].end_ms <= w[1].end_ms));
         }
-        let second_you = &utterances.values().filter(|r| r[0].channel == You).nth(1).unwrap()[0];
-        assert!(second_you.start_ms >= 512, "a new utterance starts at the previous endpoint");
+        let second_you = &utterances
+            .values()
+            .filter(|r| r[0].channel == You)
+            .nth(1)
+            .unwrap()[0];
+        assert!(
+            second_you.start_ms >= 512,
+            "a new utterance starts at the previous endpoint"
+        );
 
         // Mic audio is boosted (and clipped); System audio is resampled to 16 kHz unboosted.
         let mic = transcriber.fed(You);
@@ -886,7 +910,10 @@ mod tests {
         assert!(mic.contains(&1.0), "boosted Mic audio clips at full scale");
         assert_eq!(system.len(), resampled_len(48_000, &[3072; 32]));
         assert!(system.iter().all(|s| *s <= 0.26));
-        assert!(sink.pressure.lock().unwrap().is_empty(), "nothing was dropped");
+        assert!(
+            sink.pressure.lock().unwrap().is_empty(),
+            "nothing was dropped"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -916,9 +943,10 @@ mod tests {
             let gate = Arc::clone(&gate);
             tokio::spawn(async move {
                 loop {
-                    let mic_final = sink.events.lock().unwrap().iter().any(|e| {
-                        e.channel == You && !e.is_partial && e.text == "last mic words"
-                    });
+                    let mic_final =
+                        sink.events.lock().unwrap().iter().any(|e| {
+                            e.channel == You && !e.is_partial && e.text == "last mic words"
+                        });
                     if mic_final {
                         gate.store(true, Ordering::Release);
                         return;
@@ -936,7 +964,9 @@ mod tests {
 
         stopped.expect("the Mic final is emitted without waiting for the System finish");
         let events = sink.events.lock().unwrap().clone();
-        assert!(events.iter().any(|e| e.channel == Others && e.text == "last system words"));
+        assert!(events
+            .iter()
+            .any(|e| e.channel == Others && e.text == "last system words"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1088,7 +1118,11 @@ mod tests {
             .join("../..")
             .join(".scratch")
             .join("speech-test.wav");
-        assert!(wav_path.exists(), "speech-test.wav not found at {}", wav_path.display());
+        assert!(
+            wav_path.exists(),
+            "speech-test.wav not found at {}",
+            wav_path.display()
+        );
 
         let engine = crate::asr::resolve_asr_model_dir()
             .and_then(|d| crate::asr::AsrEngine::new(&d))
@@ -1132,8 +1166,10 @@ mod tests {
             if tag == b"data" {
                 let data = &bytes[pos + 8..(pos + 8 + size).min(bytes.len())];
                 return data
-                    .chunks_exact(2)
-                    .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / i16::MAX as f32)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|bytes| i16::from_le_bytes(*bytes) as f32 / i16::MAX as f32)
                     .collect();
             }
             pos += 8 + size + (size % 2);

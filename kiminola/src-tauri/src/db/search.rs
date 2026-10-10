@@ -17,7 +17,10 @@ fn fts_query(query: &str) -> String {
 }
 
 /// Up to 50 best-ranked Meetings matching every term; blank queries match nothing.
-pub(crate) async fn search_meetings(pool: &SqlitePool, query: &str) -> Result<Vec<MeetingSummary>, String> {
+pub(crate) async fn search_meetings(
+    pool: &SqlitePool,
+    query: &str,
+) -> Result<Vec<MeetingSummary>, String> {
     let safe = fts_query(query.trim());
     if safe.is_empty() {
         return Ok(vec![]);
@@ -78,8 +81,22 @@ mod tests {
     async fn search_indexes_titles_notes_and_transcript() {
         let db = TestDb::new("search").await;
         let pool = &db.pool;
-        let id1 = save(pool, "CLI strategy meeting", "discussed CLI and VPS", "you", "we need a CLI").await;
-        let id2 = save(pool, "Design sync", "colors and buttons", "others", "the navbar needs work").await;
+        let id1 = save(
+            pool,
+            "CLI strategy meeting",
+            "discussed CLI and VPS",
+            "you",
+            "we need a CLI",
+        )
+        .await;
+        let id2 = save(
+            pool,
+            "Design sync",
+            "colors and buttons",
+            "others",
+            "the navbar needs work",
+        )
+        .await;
 
         assert_eq!(ids(pool, "CLI").await, vec![id1], "title");
         assert_eq!(ids(pool, "VPS").await, vec![id1], "notes");
@@ -87,7 +104,11 @@ mod tests {
         assert_eq!(ids(pool, "strat").await, vec![id1], "prefix");
 
         update_notes(pool, id2, "launch checklist").await.unwrap();
-        assert_eq!(ids(pool, "checklist").await, vec![id2], "edited notes are indexed");
+        assert_eq!(
+            ids(pool, "checklist").await,
+            vec![id2],
+            "edited notes are indexed"
+        );
 
         let summary = &search_meetings(pool, "navbar").await.unwrap()[0];
         assert_eq!(summary.space_name.as_deref(), Some("Personal"));

@@ -12,9 +12,9 @@ use std::time::Duration;
 #[cfg(target_os = "windows")]
 use tauri::Manager;
 
-use crate::meeting_presence::{PendingPrompt, PROMPT_MESSAGE, PROMPT_NOT_RECORDING_MESSAGE};
 #[cfg(target_os = "windows")]
 use crate::meeting_presence::{prompt_is_current, MeetingPresenceState};
+use crate::meeting_presence::{PendingPrompt, PROMPT_MESSAGE, PROMPT_NOT_RECORDING_MESSAGE};
 
 #[cfg(target_os = "windows")]
 const TOAST_APPLICATION_ID: &str = "com.kiminola.app";

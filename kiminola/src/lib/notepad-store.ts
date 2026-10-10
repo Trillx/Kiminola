@@ -29,6 +29,9 @@ export interface NotepadValue {
   recovery?: RecoveryCheckpoint;
 }
 
+/** A checkpoint, or a factory evaluated only when its write runs (not on every edit). */
+export type RecoveryInput = RecoveryCheckpoint | (() => RecoveryCheckpoint);
+
 /** "idle" means the document has no write since the store started (or it was discarded). */
 export type NotepadStatus = "idle" | DraftAutosaveStatus;
 type Listener = (status: NotepadStatus) => void;
@@ -53,10 +56,13 @@ export interface NotepadPort {
  * write succeeds or the document is discarded.
  */
 export interface NotepadStore {
-  /** Schedule a debounced write. A text-only edit keeps an unsaved recovery checkpoint. */
-  edit(key: NotepadKey, text: string, recovery?: RecoveryCheckpoint): void;
+  /**
+   * Schedule a debounced write; continuous edits still write within the
+   * autosave's maximum wait. A text-only edit keeps an unsaved recovery checkpoint.
+   */
+  edit(key: NotepadKey, text: string, recovery?: RecoveryInput): void;
   /** Write now, behind any in-flight write of the same document. Rejects on failure. */
-  save(key: NotepadKey, text: string, recovery?: RecoveryCheckpoint): Promise<void>;
+  save(key: NotepadKey, text: string, recovery?: RecoveryInput): Promise<void>;
   /** Write pending text for one document, or all of them. Rejects if any write fails. */
   flush(key?: NotepadKey): Promise<void>;
   /** The newest value not yet confirmed saved; prefer it over a database read. */
@@ -135,7 +141,10 @@ export function createNotepadStore(
     return entry;
   }
 
-  function nextValue(entry: Entry, text: string, recovery?: RecoveryCheckpoint): NotepadValue {
+  function nextValue(entry: Entry, text: string, recovery?: RecoveryInput): NotepadValue | (() => NotepadValue) {
+    // A lazy checkpoint is built from the latest capture state when the write
+    // runs, so a burst of transcript events copies the transcript once.
+    if (typeof recovery === "function") return () => ({ text, recovery: recovery() });
     // A text-only edit (the note page) must not drop a recovery checkpoint
     // the recording queued for the same draft but could not save yet.
     return { text, recovery: recovery ?? entry.engine.pendingValue()?.recovery };

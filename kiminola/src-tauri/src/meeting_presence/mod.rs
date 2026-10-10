@@ -1,7 +1,8 @@
 //! Opt-in Meeting presence hints and the Meeting prompt lifecycle.
 //!
-//! Detection is deliberately advisory. It requires a visible/known app
-//! signal and an active Core Audio session, and no prompt action records
+//! Detection is deliberately advisory. It requires a known meeting app (or a
+//! visible generic app with both input and output audio, sustained across
+//! polls) and an active Core Audio session, and no prompt action records
 //! audio by itself.
 //!
 //! Structure:
@@ -10,9 +11,11 @@
 //! - [`MeetingPresenceState`]: the episode/prompt state machine. Each app
 //!   family gets one prompt per meeting episode; an episode ends after two
 //!   consecutive polls without its audio, or immediately when the app exits.
-//!   Prompts are single-use and stale ids are rejected. Recording activity is
-//!   an input (received from `app_lifecycle`): while recording, no hints or
-//!   prompts exist and every active episode is consumed.
+//!   Prompts are single-use and stale ids are rejected; a recycled PID starts
+//!   a new episode. Recording activity is an input (received from
+//!   `app_lifecycle` and Dictation): while recording, no hints or prompts
+//!   exist and every active episode is consumed. Pausing hides prompts but
+//!   keeps observing episode endings.
 //! - This file's Tauri glue: IPC commands, the detector loop, prompt actions
 //!   shared by the in-app UI and native toasts, and event emission. Prompt
 //!   *delivery* outside the main window (tray, overlay, toasts) belongs to
@@ -34,14 +37,19 @@ use crate::db::{meeting_store, settings, DbState};
 use classifier::DetectionSnapshot;
 use probe::{PresenceProbe, Win32Probe};
 
+pub(crate) use probe::process_instance_is_current;
+
 const ENABLED_KEY: &str = "meeting_presence_enabled";
 const START_WITH_WINDOWS_KEY: &str = "meeting_presence_start_with_windows";
 const EVENT_STATE: &str = "meeting-presence:state";
 const EVENT_PROMPT: &str = "meeting-presence:prompt";
 const EVENT_ACTION: &str = "meeting-presence:action";
+const EVENT_ERROR: &str = "meeting-presence:error";
 pub(crate) const PROMPT_MESSAGE: &str = "You may be in a meeting. Want to jot notes?";
 pub(crate) const PROMPT_NOT_RECORDING_MESSAGE: &str = "Kimi Nola is not recording.";
 const INACTIVE_POLLS_BEFORE_SESSION_RESET: u8 = 2;
+/// Generic (non-targeted) apps must qualify on consecutive complete polls.
+const GENERIC_POLLS_BEFORE_PROMPT: u8 = 2;
 const POLL_INTERVAL: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -99,6 +107,9 @@ pub(crate) struct PendingPrompt {
     pub(crate) id: String,
     // Stable app-family root for episode suppression and process-loopback capture.
     process_id: u32,
+    // Creation time of `process_id` when readable; guards against PID reuse.
+    process_started_at: Option<u64>,
+    targeted: bool,
     window_process_id: Option<u32>,
     pub(crate) app_label: String,
     confidence: MeetingPresenceConfidence,
@@ -111,6 +122,8 @@ impl PendingPrompt {
         Self {
             id: id.into(),
             process_id: 42,
+            process_started_at: Some(1),
+            targeted: true,
             window_process_id: Some(42),
             app_label: app_label.into(),
             confidence: MeetingPresenceConfidence::Likely,
@@ -139,6 +152,9 @@ struct DetectionSession {
     prompted: bool,
     suppressed: bool,
     inactive_polls: u8,
+    /// Consecutive complete polls on which this family qualified.
+    qualified_polls: u8,
+    process_started_at: Option<u64>,
 }
 
 #[derive(Default)]
@@ -210,8 +226,8 @@ impl MeetingPresenceState {
             paused,
             start_with_windows: self.inner.start_with_windows.load(Ordering::Relaxed),
             mode,
-            hint,
-            prompt,
+            hint: if paused { None } else { hint },
+            prompt: if paused { None } else { prompt },
         }
     }
 
@@ -224,8 +240,10 @@ impl MeetingPresenceState {
         self.inner.paused.load(Ordering::Relaxed)
     }
 
-    fn is_detecting(&self) -> bool {
-        self.inner.enabled.load(Ordering::Relaxed) && !self.inner.paused.load(Ordering::Relaxed)
+    /// Whether the detector polls. Pause hides prompts but still observes
+    /// episode endings; only disabling detection stops local metadata polling.
+    fn is_enabled(&self) -> bool {
+        self.inner.enabled.load(Ordering::Relaxed)
     }
 
     fn set_enabled_runtime(&self, enabled: bool) {
@@ -236,11 +254,16 @@ impl MeetingPresenceState {
     }
 
     fn set_paused_runtime(&self, paused: bool) {
-        self.inner.paused.store(paused, Ordering::Relaxed);
-        if paused {
-            let mut data = self.inner.data.lock().unwrap();
-            data.hint = None;
-            data.prompt = None;
+        let mut data = self.inner.data.lock().unwrap();
+        let was_paused = self.inner.paused.swap(paused, Ordering::Relaxed);
+        if was_paused && !paused {
+            // Resume unanswered prompts, not stale notification actions.
+            if let Some(prompt) = data.prompt.as_mut() {
+                prompt.id = format!(
+                    "meeting-prompt-{}",
+                    self.inner.next_prompt_id.fetch_add(1, Ordering::Relaxed)
+                );
+            }
         }
     }
 
@@ -257,8 +280,23 @@ impl MeetingPresenceState {
         data.sessions.clear();
     }
 
+    /// A failed poll proves nothing about audio: restart onset and gap counts.
+    fn note_detection_failure(&self) {
+        for session in self.inner.data.lock().unwrap().sessions.values_mut() {
+            session.qualified_polls = 0;
+            session.inactive_polls = 0;
+        }
+    }
+
+    #[cfg(test)]
     fn set_recording_active(&self, active: bool) {
+        self.update_recording_active(|| active);
+    }
+
+    /// `active` is evaluated under the state lock so it cannot race a poll.
+    fn update_recording_active(&self, active: impl FnOnce() -> bool) {
         let mut data = self.inner.data.lock().unwrap();
+        let active = active();
         data.recording_active = active;
         if active {
             data.prompt = None;
@@ -274,6 +312,9 @@ impl MeetingPresenceState {
     /// a claimed prompt's episode is suppressed.
     fn claim_prompt(&self, prompt_id: &str) -> Result<PendingPrompt, String> {
         let mut data = self.inner.data.lock().unwrap();
+        if self.inner.paused.load(Ordering::Relaxed) {
+            return Err("meeting prompts are paused".to_string());
+        }
         let prompt = data
             .prompt
             .take()
@@ -296,7 +337,12 @@ impl MeetingPresenceState {
         let mut data = self.inner.data.lock().unwrap();
         if !data.recording_active
             && data.prompt.is_none()
-            && data.sessions.contains_key(&prompt.process_id)
+            && data
+                .sessions
+                .get(&prompt.process_id)
+                .is_some_and(|session| {
+                    session.prompted && session.process_started_at == prompt.process_started_at
+                })
             && self.inner.enabled.load(Ordering::Relaxed)
             && !self.inner.paused.load(Ordering::Relaxed)
         {
@@ -322,7 +368,9 @@ impl MeetingPresenceState {
         show: impl FnOnce() -> Result<bool, E>,
     ) -> Result<bool, E> {
         let mut data = self.inner.data.lock().unwrap();
-        if !should_submit_native_prompt(&data, prompt_id) {
+        if self.inner.paused.load(Ordering::Relaxed)
+            || !should_submit_native_prompt(&data, prompt_id)
+        {
             return Ok(false);
         }
         let shown = show()?;
@@ -344,6 +392,9 @@ fn should_submit_native_prompt(data: &PresenceData, prompt_id: &str) -> bool {
 }
 
 pub(crate) fn prompt_is_current(state: &MeetingPresenceState, prompt_id: &str) -> bool {
+    if state.inner.paused.load(Ordering::Relaxed) {
+        return false;
+    }
     state
         .inner
         .data
@@ -382,12 +433,15 @@ fn update_detections(
     snapshot: DetectionSnapshot,
     allow_prompt: bool,
 ) -> (bool, Option<PendingPrompt>) {
+    let allow_prompt = allow_prompt && !state.inner.paused.load(Ordering::Relaxed);
     let DetectionSnapshot {
         detections,
         possible_hints,
-        live_process_ids,
+        live_process_instances,
+        active_audio_process_ids,
+        audio_scan_complete,
     } = snapshot;
-    let active_process_ids: HashSet<u32> = detections
+    let qualified_process_ids: HashSet<u32> = detections
         .iter()
         .map(|detection| detection.process_id)
         .collect();
@@ -395,12 +449,46 @@ fn update_detections(
     let mut changed = false;
     {
         let mut data = state.inner.data.lock().unwrap();
-        data.sessions
-            .retain(|process_id, _| live_process_ids.contains(process_id));
+        data.sessions.retain(|process_id, session| {
+            live_process_instances
+                .get(process_id)
+                .is_some_and(|current| {
+                    match (session.process_started_at, *current) {
+                        (Some(old), Some(new)) if old != new => false,
+                        (None, Some(new)) => {
+                            // A later readable creation time establishes the identity
+                            // that future polls must compare before preserving state.
+                            session.process_started_at = Some(new);
+                            changed = true;
+                            true
+                        }
+                        // An unreadable current creation time is unknown, not proof
+                        // that a previously identified process was replaced.
+                        _ => true,
+                    }
+                })
+        });
+
+        if let Some(prompt) = data.prompt.as_mut() {
+            if prompt.process_started_at.is_none() {
+                if let Some(started_at) = live_process_instances
+                    .get(&prompt.process_id)
+                    .copied()
+                    .flatten()
+                {
+                    prompt.process_started_at = Some(started_at);
+                    changed = true;
+                }
+            }
+        }
 
         for (process_id, session) in data.sessions.iter_mut() {
-            if update_session_activity(session, active_process_ids.contains(process_id)) {
+            let active = active_audio_process_ids.contains(process_id);
+            if (audio_scan_complete || active) && update_session_activity(session, active) {
                 changed = true;
+            }
+            if !audio_scan_complete {
+                session.inactive_polls = 0;
             }
         }
 
@@ -431,17 +519,31 @@ fn update_detections(
                 .get(&detection.process_id)
                 .is_none_or(|session| !session.prompted && !session.suppressed)
         });
-        for detection in possible_hints.iter().chain(detections.iter()) {
-            data.sessions
-                .entry(detection.process_id)
-                .or_insert_with(|| {
-                    changed = true;
-                    DetectionSession {
-                        prompted: false,
-                        suppressed: false,
-                        inactive_polls: 0,
-                    }
-                });
+        for process_id in possible_hints
+            .iter()
+            .chain(detections.iter())
+            .map(|d| d.process_id)
+            .chain(active_audio_process_ids.iter().copied())
+        {
+            data.sessions.entry(process_id).or_insert_with(|| {
+                changed = true;
+                DetectionSession {
+                    prompted: false,
+                    suppressed: false,
+                    inactive_polls: 0,
+                    qualified_polls: 0,
+                    process_started_at: live_process_instances.get(&process_id).copied().flatten(),
+                }
+            });
+        }
+
+        for (process_id, session) in data.sessions.iter_mut() {
+            session.qualified_polls =
+                if audio_scan_complete && qualified_process_ids.contains(process_id) {
+                    session.qualified_polls.saturating_add(1)
+                } else {
+                    0
+                };
         }
 
         if data.recording_active {
@@ -449,7 +551,7 @@ fn update_detections(
             changed |= data.hint.take().is_some();
             // Track audio gaps normally, but consume every active episode seen
             // during capture so stopping does not immediately prompt again.
-            for process_id in &active_process_ids {
+            for process_id in &active_audio_process_ids {
                 if let Some(session) = data.sessions.get_mut(process_id) {
                     session.prompted = true;
                     session.suppressed = true;
@@ -463,11 +565,32 @@ fn update_detections(
             data.hint = next_hint;
             changed = true;
         }
+        // A generic audio app must not monopolize the single prompt slot when
+        // a recognized meeting app joins later. Leave the old episode consumed
+        // so it cannot immediately return, and retire its action ID.
+        if allow_prompt
+            && data.prompt.as_ref().is_some_and(|p| !p.targeted)
+            && detections.iter().any(|detection| {
+                detection.targeted
+                    && data
+                        .sessions
+                        .get(&detection.process_id)
+                        .is_some_and(|session| !session.prompted && !session.suppressed)
+            })
+        {
+            data.prompt = None;
+            changed = true;
+        }
         if data.prompt.is_none() && allow_prompt {
             let next_detection = detections.iter().find(|detection| {
                 data.sessions
                     .get(&detection.process_id)
-                    .is_some_and(|session| !session.prompted && !session.suppressed)
+                    .is_some_and(|session| {
+                        !session.prompted
+                            && !session.suppressed
+                            && (detection.targeted
+                                || session.qualified_polls >= GENERIC_POLLS_BEFORE_PROMPT)
+                    })
             });
             if let Some(detection) = next_detection {
                 if let Some(session) = data.sessions.get_mut(&detection.process_id) {
@@ -480,6 +603,11 @@ fn update_detections(
                         state.inner.next_prompt_id.fetch_add(1, Ordering::Relaxed)
                     ),
                     process_id: detection.process_id,
+                    process_started_at: live_process_instances
+                        .get(&detection.process_id)
+                        .copied()
+                        .flatten(),
+                    targeted: detection.targeted,
                     window_process_id: detection.window_process_id,
                     app_label: detection.app_label.clone(),
                     confidence: detection.confidence,
@@ -498,13 +626,14 @@ fn update_detections(
 }
 
 /// One detector poll through the probe seam.
-/// `None` when detection was turned off or paused while the probe ran.
+/// `None` when detection was turned off while the probe ran. A paused
+/// detector still tracks episodes but never creates or shows prompts.
 fn poll(
     state: &MeetingPresenceState,
     probe: &dyn PresenceProbe,
 ) -> Result<Option<(bool, Option<PendingPrompt>)>, String> {
     let snapshot = probe.detect()?;
-    if !state.is_detecting() {
+    if !state.is_enabled() {
         return Ok(None);
     }
     let allow_prompt = !probe.prompt_is_deferred();
@@ -513,11 +642,19 @@ fn poll(
 
 /* ---------- Tauri glue ---------- */
 
-/// Recording activity input, delivered by `app_lifecycle` before capture
-/// startup and after startup failure or finalization.
+/// Recording activity input, delivered by `app_lifecycle` (Meetings) and
+/// Dictation before capture startup and after startup failure or
+/// finalization. Any busy capture lease counts as active, so a repeated
+/// Meeting stop cannot re-enable prompts during Dictation; release the
+/// finished lease before calling this with `false`.
 pub(crate) fn recording_activity_changed(app: &tauri::AppHandle, active: bool) {
     if let Some(state) = app.try_state::<MeetingPresenceState>() {
-        state.set_recording_active(active);
+        state.update_recording_active(|| {
+            active
+                || app
+                    .try_state::<crate::capture_gate::CaptureGate>()
+                    .is_some_and(|gate| gate.is_busy())
+        });
         publish(app, &state);
         #[cfg(desktop)]
         background_companion::sync_prompt_overlay(app, &state);
@@ -537,7 +674,8 @@ fn emit_state(app: &tauri::AppHandle, state: &MeetingPresenceState) {
 
 fn emit_prompt(app: &tauri::AppHandle, state: &MeetingPresenceState, prompt: &PendingPrompt) {
     let data = state.inner.data.lock().unwrap();
-    if data.recording_active
+    if state.inner.paused.load(Ordering::Relaxed)
+        || data.recording_active
         || crate::app_lifecycle::is_recording_active(app)
         || !data
             .prompt
@@ -550,9 +688,13 @@ fn emit_prompt(app: &tauri::AppHandle, state: &MeetingPresenceState, prompt: &Pe
     let _ = app.emit(EVENT_PROMPT, prompt.to_ipc());
 }
 
+/// Pause or resume prompts (IPC and tray). Resuming re-delivers an
+/// unanswered prompt under a fresh id; pausing retracts background prompts.
 pub(crate) fn set_paused(app: &tauri::AppHandle, state: &MeetingPresenceState, paused: bool) {
     state.set_paused_runtime(paused);
     publish(app, state);
+    #[cfg(desktop)]
+    background_companion::notify_background_prompt(app, state);
 }
 
 /// Publish the outcome of one detector poll.
@@ -588,7 +730,9 @@ fn start_detector(
             {
                 break;
             }
-            if state.is_detecting() {
+            // Pause hides prompts, but still observes episode endings. Only
+            // disabling detection stops local process/audio metadata polling.
+            if state.is_enabled() {
                 let poll_state = state.clone();
                 let poll_probe = Arc::clone(&probe);
                 let polled =
@@ -597,8 +741,14 @@ fn start_detector(
                 match polled {
                     Ok(Ok(Some((changed, prompt)))) => deliver_poll(&app, &state, changed, prompt),
                     Ok(Ok(None)) => {}
-                    Ok(Err(error)) => eprintln!("[meeting-presence] detection failed: {error}"),
-                    Err(error) => eprintln!("[meeting-presence] detection task failed: {error}"),
+                    Ok(Err(error)) => {
+                        state.note_detection_failure();
+                        eprintln!("[meeting-presence] detection failed: {error}");
+                    }
+                    Err(error) => {
+                        state.note_detection_failure();
+                        eprintln!("[meeting-presence] detection task failed: {error}");
+                    }
                 }
             }
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -660,27 +810,75 @@ async fn jot_notes(
 }
 
 /// Hand a prompt's meeting over to recording: remember its capture target
-/// and arrange the Companion layout. The frontend then starts recording.
+/// (only while the detected process instance still exists) and arrange the
+/// Companion layout. The frontend then starts recording.
 fn start_recording_from_prompt(
     app: &tauri::AppHandle,
     state: &MeetingPresenceState,
     prompt_id: &str,
 ) -> Result<(), String> {
     let prompt = state.claim_prompt(prompt_id)?;
-    crate::recording::queue_process_loopback_target(app, prompt.process_id);
+    let target = match validated_capture_target(&prompt, process_instance_is_current) {
+        Ok(target) => target,
+        Err(error) => {
+            // The prompt has been consumed, so surface the returned explanation
+            // independently of the card that represented it.
+            background_companion::show_main_window(app);
+            let _ = app.emit(
+                EVENT_ERROR,
+                serde_json::json!({ "prompt_id": prompt.id, "message": error }),
+            );
+            emit_state(app, state);
+            return Err(error);
+        }
+    };
+    emit_state(app, state);
+    if let Some((process_id, started_at)) = target {
+        crate::recording::queue_process_loopback_target(app, process_id, started_at);
+    } else {
+        crate::recording::clear_process_loopback_target(app);
+    }
     #[cfg(desktop)]
     {
-        if let Err(error) =
-            crate::window_layout::apply(app, prompt.window_process_id.unwrap_or(prompt.process_id))
-        {
-            // Window arrangement is a convenience around the explicit start
-            // action; a platform window quirk must never block recording.
-            eprintln!("[window-layout] companion layout unavailable: {error}");
+        if target.is_some() {
+            if let Err(error) = crate::window_layout::apply(
+                app,
+                prompt.window_process_id.unwrap_or(prompt.process_id),
+            ) {
+                // Window arrangement is a convenience around the explicit start
+                // action; a platform window quirk must never block recording.
+                eprintln!("[window-layout] companion layout unavailable: {error}");
+                background_companion::show_main_window(app);
+            }
+        } else {
+            // An unreadable identity cannot safely select or arrange a PID.
             background_companion::show_main_window(app);
         }
     }
     emit_state(app, state);
     Ok(())
+}
+
+/// The process-loopback target for a claimed prompt. `Ok(None)` means the
+/// process identity was never readable, so capture uses the safe
+/// default-output path; an identified process that exited (or whose PID was
+/// reused) is an error.
+fn validated_capture_target(
+    prompt: &PendingPrompt,
+    is_current: impl FnOnce(u32, u64) -> bool,
+) -> Result<Option<(u32, u64)>, String> {
+    let Some(started_at) = prompt.process_started_at else {
+        // If Windows denied process-query access when the prompt was created,
+        // retain the useful advisory prompt but use the safe default-output path.
+        return Ok(None);
+    };
+    if !is_current(prompt.process_id, started_at) {
+        return Err(
+            "The detected app is no longer available. Please start a new recording manually."
+                .to_string(),
+        );
+    }
+    Ok(Some((prompt.process_id, started_at)))
 }
 
 /// Apply a prompt action chosen outside the main window (a native toast).
@@ -740,6 +938,8 @@ pub async fn set_meeting_presence_enabled(
     settings::set_flag(&db.pool().await?, ENABLED_KEY, enabled).await?;
     state.set_enabled_runtime(enabled);
     publish(&app, &state);
+    #[cfg(desktop)]
+    background_companion::notify_background_prompt(&app, &state);
     Ok(())
 }
 
@@ -799,12 +999,343 @@ pub async fn dismiss_meeting_prompt(
 
 #[cfg(test)]
 mod tests {
-    use super::probe::{detect_fixture, FixtureProbe};
+    use std::collections::HashMap;
+
+    use super::classifier::{classify_windows, AudioActivity, ProcessIdentity, ProcessInfo};
+    use super::probe::{detect_audio_fixture, detect_fixture, FixtureProbe};
     use super::{
         poll, prompt_is_current, update_session_activity, DetectionSession,
         MeetingPresenceConfidence, MeetingPresenceEvidence, MeetingPresenceMode,
         MeetingPresenceState, PendingPrompt,
     };
+
+    #[test]
+    fn recycled_pid_retires_old_actions_and_dismissal() {
+        for dismissed in [false, true] {
+            let state = MeetingPresenceState::new();
+            let snapshot = |started_at| {
+                classify_windows(
+                    HashMap::from([(
+                        10,
+                        ProcessInfo {
+                            name: "ms-teams.exe".into(),
+                            parent_id: 0,
+                            identity: Some(ProcessIdentity {
+                                executable_path: "C:/Fixture/ms-teams.exe".into(),
+                                started_at,
+                            }),
+                        },
+                    )]),
+                    HashMap::from([(10, vec!["Teams".into()])]),
+                    HashMap::from([(
+                        10,
+                        AudioActivity {
+                            input: true,
+                            output: true,
+                        },
+                    )]),
+                    999,
+                )
+            };
+            let first = super::update_detections(&state, snapshot(1), true)
+                .1
+                .unwrap();
+            if dismissed {
+                state.claim_prompt(&first.id).unwrap();
+            }
+            let next = super::update_detections(&state, snapshot(2), true).1;
+            assert!(
+                state.claim_prompt(&first.id).is_err(),
+                "PID reuse must retire the old action"
+            );
+            assert!(
+                next.is_some(),
+                "suppression must not transfer to the replacement process"
+            );
+        }
+    }
+
+    #[test]
+    fn initially_unknown_process_identity_is_reconciled_before_pid_reuse() {
+        for dismissed in [false, true] {
+            let state = MeetingPresenceState::new();
+            let snapshot = |started_at| {
+                let mut snapshot =
+                    detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], &[10]);
+                snapshot.live_process_instances.insert(10, started_at);
+                snapshot
+            };
+
+            let first = super::update_detections(&state, snapshot(None), true)
+                .1
+                .expect("targeted app should prompt");
+            assert_eq!(
+                state.inner.data.lock().unwrap().sessions[&10].process_started_at,
+                None
+            );
+
+            super::update_detections(&state, snapshot(Some(1)), true);
+            {
+                let data = state.inner.data.lock().unwrap();
+                assert_eq!(data.sessions[&10].process_started_at, Some(1));
+                assert_eq!(data.prompt.as_ref().unwrap().process_started_at, Some(1));
+            }
+            if dismissed {
+                state.claim_prompt(&first.id).unwrap();
+            }
+
+            let replacement = super::update_detections(&state, snapshot(Some(2)), true)
+                .1
+                .expect("replacement process should get a fresh prompt");
+            assert!(state.claim_prompt(&first.id).is_err());
+            assert_ne!(replacement.id, first.id);
+        }
+    }
+
+    #[test]
+    fn prompt_target_validation_falls_back_only_when_identity_was_unknown() {
+        let prompt = |process_started_at| PendingPrompt {
+            id: "prompt".into(),
+            process_id: 10,
+            process_started_at,
+            targeted: true,
+            window_process_id: Some(10),
+            app_label: "Microsoft Teams".into(),
+            confidence: MeetingPresenceConfidence::Likely,
+            evidence: vec![MeetingPresenceEvidence::ActiveCoreAudio],
+        };
+
+        assert_eq!(
+            super::validated_capture_target(&prompt(None), |_, _| false).unwrap(),
+            None,
+            "unknown identity should use safe default-output capture"
+        );
+        assert!(super::validated_capture_target(&prompt(Some(1)), |_, _| false).is_err());
+        assert_eq!(
+            super::validated_capture_target(&prompt(Some(1)), |pid, started_at| {
+                pid == 10 && started_at == 1
+            })
+            .unwrap(),
+            Some((10, 1))
+        );
+    }
+
+    #[test]
+    fn incomplete_audio_scans_cannot_reset_dismissal_or_confirm_generic_onset() {
+        let state = MeetingPresenceState::new();
+        let snapshot = |active, complete| {
+            let mut snapshot = detect_fixture(
+                &[(10, 0, "call-app.exe")],
+                &[(10, "Call")],
+                if active { &[10] } else { &[] },
+            );
+            snapshot.audio_scan_complete = complete;
+            snapshot
+        };
+        super::update_detections(&state, snapshot(true, true), true);
+        state.note_detection_failure();
+        assert!(super::update_detections(&state, snapshot(true, true), true)
+            .1
+            .is_none());
+        assert!(
+            super::update_detections(&state, snapshot(true, false), true)
+                .1
+                .is_none()
+        );
+        assert!(super::update_detections(&state, snapshot(true, true), true)
+            .1
+            .is_none());
+        let first = super::update_detections(&state, snapshot(true, true), true)
+            .1
+            .unwrap();
+        state.claim_prompt(&first.id).unwrap();
+        super::update_detections(&state, snapshot(false, false), true);
+        super::update_detections(&state, snapshot(false, false), true);
+        super::update_detections(&state, snapshot(true, true), true);
+        assert!(super::update_detections(&state, snapshot(true, true), true)
+            .1
+            .is_none());
+    }
+
+    #[test]
+    fn hidden_generic_window_does_not_end_a_dismissed_audio_episode() {
+        let state = MeetingPresenceState::new();
+        let snapshot = |visible| {
+            detect_fixture(
+                &[(10, 0, "call-app.exe")],
+                if visible { &[(10, "Call")] } else { &[] },
+                &[10],
+            )
+        };
+        super::update_detections(&state, snapshot(true), true);
+        let prompt = super::update_detections(&state, snapshot(true), true)
+            .1
+            .unwrap();
+        state.claim_prompt(&prompt.id).unwrap();
+        super::update_detections(&state, snapshot(false), true);
+        super::update_detections(&state, snapshot(false), true);
+        super::update_detections(&state, snapshot(true), true);
+        assert!(
+            super::update_detections(&state, snapshot(true), true)
+                .1
+                .is_none(),
+            "window visibility is not audio inactivity"
+        );
+    }
+
+    #[test]
+    fn meet_title_does_not_promote_playback_only_browser_audio() {
+        let state = MeetingPresenceState::new();
+        let snapshot = |input| {
+            detect_audio_fixture(
+                &[(10, 0, "chrome.exe"), (11, 10, "chrome.exe")],
+                &[(10, "Google Meet - idle tab")],
+                &[(11, input, true)],
+            )
+        };
+        for _ in 0..3 {
+            assert!(
+                super::update_detections(&state, snapshot(false), true)
+                    .1
+                    .is_none(),
+                "a meeting title does not prove which tab is playing audio"
+            );
+        }
+        assert!(super::update_detections(&state, snapshot(true), true)
+            .1
+            .is_none());
+        assert!(super::update_detections(&state, snapshot(true), true)
+            .1
+            .is_some());
+    }
+
+    #[test]
+    fn generic_onset_is_debounced_and_losing_one_direction_does_not_reprompt() {
+        let state = MeetingPresenceState::new();
+        let snapshot = |input, output| {
+            detect_audio_fixture(
+                &[(10, 0, "call-app.exe")],
+                &[(10, "Call")],
+                &[(10, input, output)],
+            )
+        };
+        assert!(super::update_detections(&state, snapshot(true, true), true)
+            .1
+            .is_none());
+        super::update_detections(&state, snapshot(false, false), true);
+        assert!(super::update_detections(&state, snapshot(true, true), true)
+            .1
+            .is_none());
+        let first = super::update_detections(&state, snapshot(true, true), true)
+            .1
+            .unwrap();
+        state.claim_prompt(&first.id).unwrap();
+        // Some apps close input on mute but keep output running. This is still
+        // the same episode, not an invitation to nag when input returns.
+        for (input, output) in [(false, true), (false, true), (true, true), (true, true)] {
+            assert!(
+                super::update_detections(&state, snapshot(input, output), true)
+                    .1
+                    .is_none()
+            );
+        }
+        super::update_detections(&state, snapshot(false, false), true);
+        super::update_detections(&state, snapshot(false, false), true);
+        assert!(super::update_detections(&state, snapshot(true, true), true)
+            .1
+            .is_none());
+        let next = super::update_detections(&state, snapshot(true, true), true)
+            .1
+            .unwrap();
+        assert_ne!(next.id, first.id);
+    }
+
+    #[test]
+    fn teams_supersedes_an_unanswered_generic_prompt_without_repeating_it() {
+        let state = MeetingPresenceState::new();
+        let generic = || detect_fixture(&[(1, 0, "call-app.exe")], &[(1, "Call")], &[1]);
+        super::update_detections(&state, generic(), true);
+        super::update_detections(&state, generic(), true);
+        let old_id = state.snapshot().prompt.unwrap().id;
+        let both = || {
+            detect_fixture(
+                &[(1, 0, "call-app.exe"), (10, 0, "ms-teams.exe")],
+                &[(1, "Call"), (10, "Teams")],
+                &[1, 10],
+            )
+        };
+        let (_, prompt) = super::update_detections(&state, both(), true);
+        let prompt = prompt.expect("Teams must not wait behind an unrelated unanswered prompt");
+        assert_eq!(prompt.app_label, "Microsoft Teams");
+        assert!(state.claim_prompt(&old_id).is_err());
+        state.claim_prompt(&prompt.id).unwrap();
+        let (_, next) = super::update_detections(&state, both(), true);
+        assert!(
+            next.is_none(),
+            "the superseded generic episode must not nag again"
+        );
+    }
+
+    #[test]
+    fn pause_hides_and_resume_restores_an_unanswered_prompt_with_a_fresh_id() {
+        let state = MeetingPresenceState::new();
+        state.set_enabled_runtime(true);
+        let snapshot = || detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], &[10]);
+        let (_, prompt) = super::update_detections(&state, snapshot(), true);
+        let old_id = prompt.unwrap().id;
+        state.set_paused_runtime(true);
+        assert!(state.snapshot().prompt.is_none());
+        assert!(!prompt_is_current(&state, &old_id));
+        assert!(state.claim_prompt(&old_id).is_err());
+        super::update_detections(&state, snapshot(), false);
+        assert!(state.snapshot().prompt.is_none());
+        state.set_paused_runtime(false);
+        let resumed = state
+            .snapshot()
+            .prompt
+            .expect("an unanswered prompt must survive pause");
+        assert_ne!(resumed.id, old_id);
+        assert!(state.claim_prompt(&old_id).is_err());
+        state.claim_prompt(&resumed.id).unwrap();
+        assert!(super::update_detections(&state, snapshot(), true)
+            .1
+            .is_none());
+    }
+
+    #[test]
+    fn pause_preserves_dismissal_and_tracks_meetings_ending_while_paused() {
+        let state = MeetingPresenceState::new();
+        state.set_enabled_runtime(true);
+        let snapshot =
+            |audio: &[u32]| detect_fixture(&[(10, 0, "ms-teams.exe")], &[(10, "Teams")], audio);
+        let first = super::update_detections(&state, snapshot(&[10]), true)
+            .1
+            .unwrap();
+        state.claim_prompt(&first.id).unwrap();
+        state.set_paused_runtime(true);
+        super::update_detections(&state, snapshot(&[10]), true);
+        state.set_paused_runtime(false);
+        assert!(
+            super::update_detections(&state, snapshot(&[10]), true)
+                .1
+                .is_none(),
+            "resume must respect Not now for the same episode"
+        );
+        state.set_paused_runtime(true);
+        super::update_detections(&state, snapshot(&[]), true);
+        super::update_detections(&state, snapshot(&[]), true);
+        assert!(
+            super::update_detections(&state, snapshot(&[10]), true)
+                .1
+                .is_none(),
+            "a new episode cannot interrupt while paused"
+        );
+        state.set_paused_runtime(false);
+        let next = super::update_detections(&state, snapshot(&[10]), true)
+            .1
+            .unwrap();
+        assert_ne!(next.id, first.id);
+    }
 
     #[test]
     #[cfg(target_os = "windows")]
@@ -978,6 +1509,8 @@ mod tests {
             prompted: true,
             suppressed: true,
             inactive_polls: 0,
+            qualified_polls: 0,
+            process_started_at: Some(1),
         };
 
         assert!(!update_session_activity(&mut session, false));
@@ -1007,11 +1540,15 @@ mod tests {
                     prompted: true,
                     suppressed: false,
                     inactive_polls: 0,
+                    qualified_polls: 0,
+                    process_started_at: Some(1),
                 },
             );
             data.prompt = Some(PendingPrompt {
                 id: "prompt-current".into(),
                 process_id: 42,
+                process_started_at: Some(1),
+                targeted: true,
                 window_process_id: Some(42),
                 app_label: "Granola".into(),
                 confidence: MeetingPresenceConfidence::Likely,
@@ -1037,7 +1574,7 @@ mod tests {
         let mut probe = FixtureProbe {
             processes: vec![(10, 0, "ms-teams.exe"), (11, 10, "msedgewebview2.exe")],
             windows: vec![(10, "Microsoft Teams")],
-            audio: vec![11],
+            audio: vec![(11, true, true)],
             deferred: true,
         };
         let (changed, prompt) = poll(&state, &probe).unwrap().expect("detecting");
@@ -1061,9 +1598,16 @@ mod tests {
         );
 
         state.set_paused_runtime(true);
+        let (_, prompt) = poll(&state, &probe)
+            .unwrap()
+            .expect("a paused detector still observes episodes");
+        assert!(prompt.is_none(), "a paused detector never prompts");
+        assert!(state.snapshot().prompt.is_none());
+
+        state.set_enabled_runtime(false);
         assert!(
             poll(&state, &probe).unwrap().is_none(),
-            "a paused detector ignores the probe result"
+            "a disabled detector ignores the probe result"
         );
     }
 }

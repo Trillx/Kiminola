@@ -1,13 +1,13 @@
-//! Tray menu: detection status, pause/resume, open, and quit. Quit is gated by
-//! `app_lifecycle`: during a Capture session it surfaces the main window and
-//! emits `recording:quit-blocked` instead of exiting.
+//! Tray menu: detection status, pause/resume, open, and quit. Quit is gated:
+//! during a Meeting Capture session it surfaces the main window and emits
+//! `recording:quit-blocked` instead of exiting; otherwise Dictation resolves
+//! any pending review before the capture-gated quit.
 
 use std::sync::Mutex;
 
 use tauri::menu::MenuItem;
 use tauri::{Emitter, Manager, Wry};
 
-use crate::app_lifecycle::{AppLifecycle, QuitDecision};
 use crate::meeting_presence::{self, MeetingPresenceMode, MeetingPresenceState};
 
 const EVENT_RECORDING_QUIT_BLOCKED: &str = "recording:quit-blocked";
@@ -51,13 +51,16 @@ pub(super) fn setup(
                 meeting_presence::set_paused(app, &event_state, !event_state.is_paused());
             }
             "presence-open" => super::show_main_window(app),
-            "presence-quit" => match app.state::<AppLifecycle>().request_quit() {
-                QuitDecision::Exit => app.exit(0),
-                QuitDecision::BlockedByRecording => {
+            "presence-quit" => {
+                if crate::app_lifecycle::is_recording_active(app) {
                     super::show_main_window(app);
                     let _ = app.emit(EVENT_RECORDING_QUIT_BLOCKED, ());
+                    return;
                 }
-            },
+                // Dictation may need an exit decision (pending review) first;
+                // it then quits through the capture-gated lifecycle path.
+                tauri::async_runtime::spawn(crate::dictation::request_quit(app.clone()));
+            }
             _ => {}
         })
         .build(app)?;

@@ -108,7 +108,10 @@ pub(crate) struct MeetingToSave<'a> {
     pub(crate) location: Option<LibraryLocation>,
 }
 
-pub(crate) async fn save_meeting(pool: &SqlitePool, meeting: MeetingToSave<'_>) -> Result<i64, String> {
+pub(crate) async fn save_meeting(
+    pool: &SqlitePool,
+    meeting: MeetingToSave<'_>,
+) -> Result<i64, String> {
     if let Some(draft_id) = meeting.note_draft_id {
         let attached_meeting =
             sqlx::query_scalar::<_, Option<i64>>("SELECT meeting_id FROM note_drafts WHERE id = ?")
@@ -125,7 +128,8 @@ pub(crate) async fn save_meeting(pool: &SqlitePool, meeting: MeetingToSave<'_>) 
         }
     }
 
-    let (space_id, parent_meeting_id) = library::resolve_destination(pool, meeting.location).await?;
+    let (space_id, parent_meeting_id) =
+        library::resolve_destination(pool, meeting.location).await?;
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let meeting_id = sqlx::query_scalar::<_, i64>(
@@ -254,7 +258,11 @@ pub(crate) async fn get_meeting(pool: &SqlitePool, id: i64) -> Result<MeetingDet
     })
 }
 
-pub(crate) async fn rename_meeting(pool: &SqlitePool, meeting_id: i64, title: &str) -> Result<(), String> {
+pub(crate) async fn rename_meeting(
+    pool: &SqlitePool,
+    meeting_id: i64,
+    title: &str,
+) -> Result<(), String> {
     let trimmed = title.trim();
     if trimmed.is_empty() {
         return Err("Meeting title cannot be empty".to_string());
@@ -273,7 +281,11 @@ pub(crate) async fn rename_meeting(pool: &SqlitePool, meeting_id: i64, title: &s
 }
 
 /// Replace the user's Notepad text; enhanced notes are left untouched.
-pub(crate) async fn update_notes(pool: &SqlitePool, meeting_id: i64, raw_markdown: &str) -> Result<(), String> {
+pub(crate) async fn update_notes(
+    pool: &SqlitePool,
+    meeting_id: i64,
+    raw_markdown: &str,
+) -> Result<(), String> {
     sqlx::query(
         "INSERT INTO notes (meeting_id, raw_markdown, updated_at) VALUES (?, ?, ?)
          ON CONFLICT (meeting_id) DO UPDATE SET
@@ -311,7 +323,11 @@ pub(crate) async fn update_enhanced_notes(
     Ok(())
 }
 
-pub(crate) async fn update_segment_text(pool: &SqlitePool, segment_id: i64, text: &str) -> Result<(), String> {
+pub(crate) async fn update_segment_text(
+    pool: &SqlitePool,
+    segment_id: i64,
+    text: &str,
+) -> Result<(), String> {
     let rows = sqlx::query("UPDATE transcript_segments SET text = ? WHERE id = ?")
         .bind(text)
         .bind(segment_id)
@@ -347,7 +363,9 @@ fn note_draft_title() -> String {
     )
 }
 
-fn encode_location(location: Option<&LibraryLocation>) -> Result<Option<String>, String> {
+pub(super) fn encode_location(
+    location: Option<&LibraryLocation>,
+) -> Result<Option<String>, String> {
     location
         .map(serde_json::to_string)
         .transpose()
@@ -430,7 +448,11 @@ pub(crate) async fn get_note_draft(pool: &SqlitePool, id: i64) -> Result<NoteDra
     })
 }
 
-pub(crate) async fn update_note_draft(pool: &SqlitePool, id: i64, raw_markdown: &str) -> Result<(), String> {
+pub(crate) async fn update_note_draft(
+    pool: &SqlitePool,
+    id: i64,
+    raw_markdown: &str,
+) -> Result<(), String> {
     let rows = sqlx::query(
         "UPDATE note_drafts SET raw_markdown = ?, updated_at = ?
          WHERE id = ? AND meeting_id IS NULL",
@@ -499,7 +521,12 @@ mod tests {
     use super::*;
     use crate::db::test_support::TestDb;
 
-    fn segment(channel: &str, text: &str, start_ms: Option<i64>, end_ms: Option<i64>) -> NewSegment {
+    fn segment(
+        channel: &str,
+        text: &str,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+    ) -> NewSegment {
         NewSegment {
             channel: channel.into(),
             text: text.into(),
@@ -543,7 +570,9 @@ mod tests {
         assert_eq!(detail.transcript[0].start_ms, Some(100));
         assert_eq!(detail.transcript[0].end_ms, Some(1_200));
 
-        update_notes(pool, id, "edited notes").await.expect("update notes");
+        update_notes(pool, id, "edited notes")
+            .await
+            .expect("update notes");
         update_enhanced_notes(pool, id, "## Summary").await.unwrap();
         let detail = get_meeting(pool, id).await.expect("get again");
         assert_eq!(detail.notepad, "edited notes");
@@ -591,7 +620,8 @@ mod tests {
         update_note_draft(pool, draft_id, "follow up with the team")
             .await
             .expect("update draft");
-        let recovery_transcript = vec![segment("others", "recovered words", Some(500), Some(1_500))];
+        let recovery_transcript =
+            vec![segment("others", "recovered words", Some(500), Some(1_500))];
         update_note_draft_recovery(
             pool,
             draft_id,
@@ -615,9 +645,13 @@ mod tests {
             note_draft_id: Some(draft_id),
             ..MeetingToSave::default()
         };
-        let meeting_id = save_meeting(pool, save).await.expect("save meeting with draft");
+        let meeting_id = save_meeting(pool, save)
+            .await
+            .expect("save meeting with draft");
         // A retry after a lost IPC response must not duplicate the Meeting.
-        let retried_meeting_id = save_meeting(pool, save).await.expect("retry attached draft save");
+        let retried_meeting_id = save_meeting(pool, save)
+            .await
+            .expect("retry attached draft save");
         assert_eq!(retried_meeting_id, meeting_id);
 
         let meeting = get_meeting(pool, meeting_id).await.expect("get meeting");
@@ -630,17 +664,23 @@ mod tests {
         );
 
         // An attached draft is frozen.
-        assert!(update_note_draft(pool, draft_id, "late edit").await.is_err());
-        assert!(update_note_draft_recovery(pool, draft_id, "late", 1, &[], None)
+        assert!(update_note_draft(pool, draft_id, "late edit")
             .await
             .is_err());
+        assert!(
+            update_note_draft_recovery(pool, draft_id, "late", 1, &[], None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn explicit_notepad_wins_over_the_draft_notepad() {
         let db = TestDb::new("note-draft-notepad").await;
         let draft_id = create_note_draft(&db.pool, None).await.unwrap();
-        update_note_draft(&db.pool, draft_id, "draft text").await.unwrap();
+        update_note_draft(&db.pool, draft_id, "draft text")
+            .await
+            .unwrap();
         let id = save_meeting(
             &db.pool,
             MeetingToSave {
@@ -652,7 +692,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(get_meeting(&db.pool, id).await.unwrap().notepad, "typed during capture");
+        assert_eq!(
+            get_meeting(&db.pool, id).await.unwrap().notepad,
+            "typed during capture"
+        );
     }
 
     #[tokio::test]
@@ -686,21 +729,29 @@ mod tests {
             .await
             .expect("create recovery draft");
         assert_eq!(
-            get_note_draft(&db.pool, draft_id).await.unwrap().recovery_location,
+            get_note_draft(&db.pool, draft_id)
+                .await
+                .unwrap()
+                .recovery_location,
             Some(location)
         );
 
         update_note_draft_recovery(&db.pool, draft_id, "notes", 12, &[], Some(&location))
             .await
             .expect("save recovery location");
-        let draft = get_note_draft(&db.pool, draft_id).await.expect("get recovery draft");
+        let draft = get_note_draft(&db.pool, draft_id)
+            .await
+            .expect("get recovery draft");
         assert_eq!(draft.recovery_location, Some(location));
     }
 
     #[tokio::test]
     async fn segment_update_and_delete() {
         let db = TestDb::new("segments").await;
-        let segments = vec![segment("you", "hello", None, None), segment("others", "hi there", None, None)];
+        let segments = vec![
+            segment("you", "hello", None, None),
+            segment("others", "hi there", None, None),
+        ];
         let id = save_meeting(
             &db.pool,
             MeetingToSave {
@@ -718,7 +769,9 @@ mod tests {
         assert_eq!(detail.transcript.len(), 2);
         let seg_id = detail.transcript[0].id;
 
-        update_segment_text(&db.pool, seg_id, "hello world").await.expect("update");
+        update_segment_text(&db.pool, seg_id, "hello world")
+            .await
+            .expect("update");
         let detail = get_meeting(&db.pool, id).await.expect("get after update");
         assert_eq!(detail.transcript[0].text, "hello world");
 

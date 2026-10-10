@@ -60,7 +60,10 @@ pub(crate) async fn onboarding_complete(pool: &SqlitePool) -> Result<bool, Strin
     Ok(get(pool, ONBOARDING_COMPLETE_KEY).await?.as_deref() == Some("1"))
 }
 
-pub(crate) async fn set_onboarding_complete(pool: &SqlitePool, complete: bool) -> Result<(), String> {
+pub(crate) async fn set_onboarding_complete(
+    pool: &SqlitePool,
+    complete: bool,
+) -> Result<(), String> {
     set_flag(pool, ONBOARDING_COMPLETE_KEY, complete).await
 }
 
@@ -76,7 +79,10 @@ mod tests {
 
         set(&db.pool, "theme", "dark").await.unwrap();
         set(&db.pool, "theme", "light").await.unwrap();
-        assert_eq!(get(&db.pool, "theme").await.unwrap().as_deref(), Some("light"));
+        assert_eq!(
+            get(&db.pool, "theme").await.unwrap().as_deref(),
+            Some("light")
+        );
 
         remove(&db.pool, "theme").await.unwrap();
         remove(&db.pool, "theme").await.unwrap();

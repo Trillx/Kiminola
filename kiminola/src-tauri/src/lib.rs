@@ -2,13 +2,19 @@ mod app_lifecycle;
 mod asr;
 mod audio;
 mod background_companion;
+mod boards;
+mod capture_gate;
 mod db;
 mod db_safety;
+mod dictation;
+mod dictation_capture;
+mod dictation_history;
+mod dictation_native;
 mod export;
 mod llm;
 mod meeting_presence;
-mod models;
 mod migrations;
+mod models;
 mod recording;
 mod recording_session;
 mod resampler;
@@ -29,7 +35,7 @@ use tauri::{Emitter, Manager};
 
 // The real-process harness opts into this PID file so it can wait for `.setup()`
 // deterministically before sending native window messages.
-fn signal_startup_test_ready() {
+pub(crate) fn signal_startup_test_ready() {
     let Some(path) = std::env::var_os("KIMINOLA_STARTUP_TEST_READY_FILE") else {
         return;
     };
@@ -39,6 +45,13 @@ fn signal_startup_test_ready() {
             std::path::Path::new(&path).display()
         );
     }
+}
+
+fn manage_database_state<R: tauri::Runtime>(
+    builder: tauri::Builder<R>,
+    state: db::DbState,
+) -> tauri::Builder<R> {
+    builder.manage(state)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -51,13 +64,14 @@ pub fn run() {
         StartupCoordination::Degraded(diagnostic) => emit_local_diagnostic(diagnostic),
     }
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(ActivationState::default())
         .manage(app_lifecycle::AppLifecycle::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             background_companion::handle_relaunch(app, &args);
         }))
-        .manage(shortcuts::ShortcutState::new())
+        .manage(shortcuts::ShortcutState::new());
+    let app = manage_database_state(builder, db::state())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
@@ -65,6 +79,9 @@ pub fn run() {
                 .with_handler(|app, shortcut, event| {
                     use std::str::FromStr;
                     use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
+                    if dictation::handle_shortcut(app, shortcut, event.state()) {
+                        return;
+                    }
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
@@ -86,13 +103,25 @@ pub fn run() {
         )
         .setup(|app| {
             recording::setup(app);
-            db::setup(app);
+            let database = std::sync::Arc::clone(&app.state::<db::DbState>().database);
             if let Err(error) = shortcuts::setup(app) {
                 eprintln!("[shortcuts] startup settings unavailable: {error}");
             }
+            // Finish main-thread database initialization before starting tasks
+            // that synchronously dispatch UI work back to this thread. SQLx
+            // returns pooled connections in spawned tasks; a worker waiting on
+            // UI can strand that task in its non-stealable Tokio LIFO slot.
+            if let Err(error) = dictation::setup(app) {
+                eprintln!("[dictation] startup unavailable: {error}");
+            }
             meeting_presence::setup(app)?;
             background_companion::finish_startup(app);
-            signal_startup_test_ready();
+            tauri::async_runtime::spawn(async move {
+                match database.pool().await {
+                    Ok(_) => signal_startup_test_ready(),
+                    Err(error) => eprintln!("[db] warm-up failed: {error}"),
+                }
+            });
             Ok(())
         })
         .on_window_event(background_companion::handle_window_event)
@@ -106,6 +135,15 @@ pub fn run() {
             recording::stop_recording,
             recording::pause_recording,
             recording::resume_recording,
+            dictation::get_dictation_state,
+            dictation::set_dictation_settings,
+            dictation::start_dictation,
+            dictation::stop_dictation,
+            dictation::cancel_dictation,
+            dictation::resolve_dictation,
+            dictation::list_dictation_microphones,
+            dictation::list_dictation_history,
+            dictation::delete_dictation_history,
             db::commands::save_meeting,
             db::commands::list_meetings,
             db::commands::get_meeting,
@@ -115,6 +153,14 @@ pub fn run() {
             db::commands::create_space,
             db::commands::rename_space,
             db::commands::move_library_node,
+            boards::list_boards,
+            boards::create_board,
+            boards::rename_board,
+            boards::create_board_column,
+            boards::rename_board_column,
+            boards::add_board_card,
+            boards::move_board_card,
+            boards::update_enhanced_action_items,
             db::commands::update_notes,
             db::commands::update_segment_text,
             db::commands::delete_segment,
@@ -200,7 +246,44 @@ mod windows_test_runtime {
 
 #[cfg(test)]
 mod startup_wiring_tests {
+    use super::{db, manage_database_state};
     use crate::background_companion::{ActivationDecision, ActivationIntent, ActivationState};
+
+    #[test]
+    fn database_status_is_available_before_setup_callback_runs() {
+        let builder = manage_database_state(
+            tauri::test::mock_builder(),
+            db::DbState::new(Err("test database path is unavailable".to_string())),
+        );
+        let app = builder
+            .setup(|_| panic!("setup must not run before this command"))
+            .invoke_handler(tauri::generate_handler![db::commands::database_status])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("build mock webview");
+
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "database_status".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "http://tauri.localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::default(),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        );
+
+        let status = response
+            .expect("database_status must resolve before setup")
+            .deserialize::<serde_json::Value>()
+            .expect("database status response must be JSON");
+        assert_eq!(status["ready"], false);
+        assert_eq!(status["error"], "test database path is unavailable");
+    }
 
     #[test]
     fn ordinary_activation_before_setup_is_replayed_after_setup() {

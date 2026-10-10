@@ -430,8 +430,61 @@ pub async fn open_model_folder(app: AppHandle) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::Mutex;
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    #[ignore = "requires the provisioned production model pack"]
+    fn production_model_pack_matches_embedded_manifest() {
+        let directory = std::env::var_os("KIMINOLA_ASR_MODEL_DIR")
+            .map(PathBuf::from)
+            .expect("KIMINOLA_ASR_MODEL_DIR is required for hardware validation");
+        assert!(
+            is_model_pack_present_at(&directory, manifest()),
+            "provisioned model pack at '{}' does not match the embedded production manifest",
+            directory.display()
+        );
+    }
+
+    fn microphone_tone_amplitude(samples: &[f32], sample_rate: u32, frequency: f32) -> f32 {
+        if samples.is_empty() || sample_rate == 0 {
+            return 0.0;
+        }
+        let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+        let radians_per_sample = 2.0 * std::f32::consts::PI * frequency / sample_rate as f32;
+        let (in_phase, quadrature) = samples.iter().enumerate().fold(
+            (0.0_f32, 0.0_f32),
+            |(in_phase, quadrature), (index, sample)| {
+                let phase = radians_per_sample * index as f32;
+                let centered = *sample - mean;
+                (
+                    in_phase + centered * phase.cos(),
+                    quadrature + centered * phase.sin(),
+                )
+            },
+        );
+        2.0 * in_phase.hypot(quadrature) / samples.len() as f32
+    }
+
+    #[test]
+    fn microphone_tone_amplitude_identifies_the_known_stimulus() {
+        let sample_rate = 48_000_u32;
+        let samples: Vec<f32> = (0..sample_rate)
+            .map(|sample| {
+                (2.0 * std::f32::consts::PI * 440.0 * sample as f32 / sample_rate as f32).sin()
+                    * 0.2
+            })
+            .collect();
+
+        let target = microphone_tone_amplitude(&samples, sample_rate, 440.0);
+        let off_target = microphone_tone_amplitude(&samples, sample_rate, 520.0);
+        assert!(target > 0.19, "known tone amplitude was {target}");
+        assert!(
+            target > off_target * 20.0,
+            "known tone {target} was not isolated from off-target energy {off_target}"
+        );
+    }
 
     #[test]
     fn model_pack_validation_requires_every_expected_file_size() {
@@ -634,5 +687,172 @@ mod tests {
         assert!(!is_model_file_present_async(path, file).await.unwrap());
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the configured physical microphone and an audible 440 Hz runner stimulus"]
+    fn physical_microphone_captures_known_tone() {
+        fn record_samples<I>(samples: I, captured: &Mutex<Vec<f32>>)
+        where
+            I: Iterator<Item = f32>,
+        {
+            captured
+                .lock()
+                .expect("microphone samples lock")
+                .extend(samples);
+        }
+
+        let expected_device_name = std::env::var("KIMINOLA_EXPECTED_MICROPHONE_NAME")
+            .expect("KIMINOLA_EXPECTED_MICROPHONE_NAME must identify the provisioned microphone");
+        assert!(
+            !expected_device_name.trim().is_empty(),
+            "KIMINOLA_EXPECTED_MICROPHONE_NAME must not be empty"
+        );
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .expect("the hardware runner must expose a default input device");
+        let device_name = device
+            .name()
+            .expect("the default input device must expose its name");
+        assert!(
+            device_name.eq_ignore_ascii_case(expected_device_name.trim()),
+            "default input device '{device_name}' does not match provisioned physical microphone '{}'",
+            expected_device_name.trim()
+        );
+        let normalized_device_name = device_name.to_ascii_lowercase();
+        for virtual_marker in [
+            "loopback",
+            "stereo mix",
+            "what u hear",
+            "virtual",
+            "voicemeeter",
+            "cable output",
+        ] {
+            assert!(
+                !normalized_device_name.contains(virtual_marker),
+                "configured input device '{device_name}' appears to be virtual or loopback"
+            );
+        }
+
+        let supported = device
+            .default_input_config()
+            .expect("the default microphone must expose an input format");
+        let sample_rate = supported.sample_rate().0;
+        let channels = usize::from(supported.channels());
+        let sample_format = supported.sample_format();
+        let config = supported.config();
+        let captured = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let stream_failed = Arc::new(AtomicBool::new(false));
+
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => {
+                let captured = Arc::clone(&captured);
+                let stream_failed = Arc::clone(&stream_failed);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[f32], _| {
+                        record_samples(data.iter().copied(), &captured);
+                    },
+                    move |_| stream_failed.store(true, AtomicOrdering::Relaxed),
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let captured = Arc::clone(&captured);
+                let stream_failed = Arc::clone(&stream_failed);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[i16], _| {
+                        record_samples(
+                            data.iter()
+                                .map(|sample| f32::from(*sample) / f32::from(i16::MAX)),
+                            &captured,
+                        );
+                    },
+                    move |_| stream_failed.store(true, AtomicOrdering::Relaxed),
+                    None,
+                )
+            }
+            cpal::SampleFormat::U16 => {
+                let captured = Arc::clone(&captured);
+                let stream_failed = Arc::clone(&stream_failed);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[u16], _| {
+                        record_samples(
+                            data.iter()
+                                .map(|sample| (f32::from(*sample) - 32_768.0) / 32_768.0),
+                            &captured,
+                        );
+                    },
+                    move |_| stream_failed.store(true, AtomicOrdering::Relaxed),
+                    None,
+                )
+            }
+            other => panic!("unsupported hardware microphone sample format: {other:?}"),
+        }
+        .expect("the hardware runner microphone stream must open");
+
+        stream.play().expect("the microphone stream must start");
+        std::thread::sleep(Duration::from_secs(3));
+        drop(stream);
+
+        assert!(
+            !stream_failed.load(AtomicOrdering::Relaxed),
+            "the physical microphone stream reported an asynchronous error"
+        );
+        let captured = captured.lock().expect("microphone samples lock");
+        let mono: Vec<f32> = captured
+            .chunks_exact(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect();
+        assert!(
+            mono.len() >= sample_rate as usize,
+            "the physical microphone captured only {} frames",
+            mono.len()
+        );
+        let peak = mono.iter().map(|sample| sample.abs()).fold(0.0, f32::max);
+        let target_amplitude = microphone_tone_amplitude(&mono, sample_rate, 440.0);
+        let off_target_amplitude = [320.0_f32, 360.0, 520.0, 700.0]
+            .into_iter()
+            .map(|frequency| microphone_tone_amplitude(&mono, sample_rate, frequency))
+            .fold(0.0, f32::max);
+        let rms =
+            (mono.iter().map(|sample| sample * sample).sum::<f32>() / mono.len() as f32).sqrt();
+        let capture_mode = std::env::var("KIMINOLA_MICROPHONE_CAPTURE_MODE")
+            .expect("KIMINOLA_MICROPHONE_CAPTURE_MODE must be baseline or stimulus");
+        assert!(
+            matches!(capture_mode.as_str(), "baseline" | "stimulus"),
+            "KIMINOLA_MICROPHONE_CAPTURE_MODE must be baseline or stimulus"
+        );
+        let metrics_path = std::env::var("KIMINOLA_MICROPHONE_METRICS_PATH")
+            .expect("KIMINOLA_MICROPHONE_METRICS_PATH must name the metrics output file");
+        fs::write(
+            metrics_path,
+            format!(
+                "{{\"target_amplitude\":{target_amplitude},\"off_target_amplitude\":{off_target_amplitude},\"rms\":{rms},\"peak\":{peak}}}"
+            ),
+        )
+        .expect("microphone capture metrics must be written");
+        if capture_mode == "baseline" {
+            return;
+        }
+        assert!(
+            peak >= 0.005,
+            "the physical microphone was silent (normalized peak {peak})"
+        );
+        assert!(
+            target_amplitude >= 0.001,
+            "the physical microphone did not capture the 440 Hz stimulus (amplitude {target_amplitude})"
+        );
+        assert!(
+            target_amplitude > off_target_amplitude * 2.0,
+            "440 Hz amplitude {target_amplitude} was not isolated from off-target amplitude {off_target_amplitude}"
+        );
+        assert!(
+            target_amplitude >= rms * 0.15,
+            "440 Hz amplitude {target_amplitude} was too small relative to captured RMS {rms}"
+        );
     }
 }

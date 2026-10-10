@@ -75,6 +75,31 @@ test("a text-only edit keeps the recovery checkpoint it has not saved yet", asyn
   assert.match(db.writes.at(-1)!, /^update_note_draft_recovery /);
 });
 
+test("a lazy recovery checkpoint is built once, from the latest state, when its write runs", async () => {
+  const db = database();
+  const store = createNotepadStore(db.port, { delayMs: 60_000 });
+  const draft = draftNotepad(5);
+  let built = 0;
+  let seconds = 0;
+  const live = () => { built++; return checkpoint(seconds, `speech at ${seconds}s`); };
+
+  for (seconds = 1; seconds <= 50; seconds++) store.edit(draft, "notes", live);
+  assert.equal(built, 0, "edits only schedule");
+  seconds = 99;
+  await store.flush(draft);
+  assert.equal(built, 1);
+  assert.equal(db.rows.get(draft)?.recovery?.durationSeconds, 99);
+
+  // A text-only edit keeps a lazy checkpoint that failed to save.
+  db.fail.add(draft);
+  store.edit(draft, "notes", live);
+  await assert.rejects(store.flush(draft));
+  store.edit(draft, "notes edited on the recovery copy");
+  db.fail.delete(draft);
+  await store.flush(draft);
+  assert.deepEqual(db.rows.get(draft), { text: "notes edited on the recovery copy", recovery: checkpoint(99, "speech at 99s") });
+});
+
 test("every status listener keeps receiving updates whoever writes, until it unsubscribes", async () => {
   const db = database();
   const store = createNotepadStore(db.port, { delayMs: 60_000 });

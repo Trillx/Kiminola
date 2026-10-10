@@ -277,7 +277,12 @@ impl TreeBuilder<'_> {
             .ok_or_else(|| "Space hierarchy references a missing Space".to_string())?;
 
         let mut children = Vec::new();
-        for child_id in self.child_spaces.get(&Some(id)).cloned().unwrap_or_default() {
+        for child_id in self
+            .child_spaces
+            .get(&Some(id))
+            .cloned()
+            .unwrap_or_default()
+        {
             children.push(self.space(child_id)?);
         }
         for meeting_id in self.meetings_by_space.get(&id).cloned().unwrap_or_default() {
@@ -301,7 +306,11 @@ impl TreeBuilder<'_> {
             .meetings
             .get(&id)
             .ok_or_else(|| "meeting hierarchy references a missing meeting".to_string())?;
-        let child_ids = self.meetings_by_parent.get(&id).cloned().unwrap_or_default();
+        let child_ids = self
+            .meetings_by_parent
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
         let mut children = Vec::with_capacity(child_ids.len());
         for child_id in child_ids {
             children.push(self.meeting(child_id)?);
@@ -375,7 +384,11 @@ pub(crate) async fn create_space(
     .map_err(|e| e.to_string())
 }
 
-pub(crate) async fn rename_space(pool: &SqlitePool, space_id: i64, name: &str) -> Result<(), String> {
+pub(crate) async fn rename_space(
+    pool: &SqlitePool,
+    space_id: i64,
+    name: &str,
+) -> Result<(), String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("Space name cannot be empty".to_string());
@@ -630,7 +643,12 @@ mod tests {
             .expect("create Engineering child");
 
         let parent_id = save_in(pool, "Planning", LibraryLocation::Space { id: work_id }).await;
-        let child_id = save_in(pool, "Follow-up", LibraryLocation::Meeting { id: parent_id }).await;
+        let child_id = save_in(
+            pool,
+            "Follow-up",
+            LibraryLocation::Meeting { id: parent_id },
+        )
+        .await;
         let grandchild_id =
             save_in(pool, "Decision", LibraryLocation::Meeting { id: child_id }).await;
 
@@ -696,7 +714,10 @@ mod tests {
         move_node(pool, LibraryLocation::Space { id: engineering_id }, None)
             .await
             .expect("move Engineering Space to library root");
-        assert_eq!(path_of(pool, child_id).await.as_deref(), Some("Engineering"));
+        assert_eq!(
+            path_of(pool, child_id).await.as_deref(),
+            Some("Engineering")
+        );
 
         move_node(
             pool,
@@ -767,8 +788,14 @@ mod tests {
     async fn saving_into_a_missing_container_is_rejected() {
         let db = TestDb::new("library-missing-destination").await;
         for (location, expected) in [
-            (LibraryLocation::Space { id: 404 }, "destination Space not found"),
-            (LibraryLocation::Meeting { id: 404 }, "destination Meeting not found"),
+            (
+                LibraryLocation::Space { id: 404 },
+                "destination Space not found",
+            ),
+            (
+                LibraryLocation::Meeting { id: 404 },
+                "destination Meeting not found",
+            ),
         ] {
             let error = meeting_store::save_meeting(
                 &db.pool,
@@ -782,7 +809,10 @@ mod tests {
             .expect_err("missing destination");
             assert_eq!(error, expected);
         }
-        assert!(meeting_store::list_meetings(&db.pool).await.unwrap().is_empty());
+        assert!(meeting_store::list_meetings(&db.pool)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -816,6 +846,8 @@ mod tests {
         assert!(rename_space(&db.pool, id, "").await.is_err());
         assert!(rename_space(&db.pool, 404, "Name").await.is_err());
         let spaces = list_spaces(&db.pool).await.unwrap();
-        assert!(spaces.iter().any(|space| space.id == id && space.name == "Clients"));
+        assert!(spaces
+            .iter()
+            .any(|space| space.id == id && space.name == "Clients"));
     }
 }

@@ -35,8 +35,16 @@ try {
       { kind: "space", id: 3, name: "Empty folder", children: [] },
       meeting(12, "Project kickoff"),
     ] }, { kind: "space", id: 4, name: "Personal", children: [] }];
+    const find = (nodes, ref) => {
+      for (const node of nodes) {
+        if (node.kind === ref.kind && node.id === ref.id) return { node, siblings: nodes };
+        const found = find(node.children, ref);
+        if (found) return found;
+      }
+    };
     let callbackId = 0;
     window.sidebarMoves = [];
+    window.sidebarCreates = [];
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
     window.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
@@ -48,16 +56,15 @@ try {
         if (command === "database_status") return { ready: true, backups: [] };
         if (["list_meetings", "list_note_drafts"].includes(command)) return [];
         if (command === "list_library_tree") return structuredClone(tree);
+        if (command === "create_space") {
+          window.sidebarCreates.push(JSON.parse(JSON.stringify(args)));
+          const parent = find(tree, { kind: "space", id: args.parentSpaceId });
+          parent.node.children.unshift({ kind: "space", id: 5, name: args.name, children: [] });
+          return 5;
+        }
         if (command === "move_library_node") {
           // Native IPC serializes reactive values before crossing the boundary.
           window.sidebarMoves.push(JSON.parse(JSON.stringify(args)));
-          const find = (nodes, ref) => {
-            for (const node of nodes) {
-              if (node.kind === ref.kind && node.id === ref.id) return { node, siblings: nodes };
-              const found = find(node.children, ref);
-              if (found) return found;
-            }
-          };
           const source = find(tree, args.node);
           const destination = find(tree, args.destination);
           source.siblings.splice(source.siblings.indexOf(source.node), 1);
@@ -158,6 +165,36 @@ try {
   assert.equal(x("Weekly review") - x("Design"), 18, "Every level uses consistent indentation");
   assert.equal(await page.locator(".sidebar").evaluate((el) => el.scrollWidth <= el.clientWidth), true, "Sidebar has no horizontal overflow");
   console.log("PASS reduced motion and consistent parent/child alignment");
+
+  await design.click();
+  assert.equal(await design.getAttribute("aria-expanded"), "false", "Creation test starts with its parent collapsed");
+  await page.getByRole("button", { name: "Actions for Design", exact: true }).click();
+  await page.getByRole("menuitem", { name: "New sub-space", exact: true }).click();
+  const newSpaceInput = page.getByPlaceholder("New sub-space");
+  await newSpaceInput.waitFor();
+  assert.equal(await design.getAttribute("aria-expanded"), "true", "Creating a sub-space reveals its inline input");
+  assert.equal(
+    await newSpaceInput.evaluate((input) => input.closest("[id^='library-children-space-']")?.id),
+    "library-children-space-2",
+    "Sub-space input stays inside the selected parent instead of jumping to the top",
+  );
+  await newSpaceInput.fill("Research");
+  await newSpaceInput.press("Enter");
+  const research = page.getByRole("button", { name: "Research", exact: true });
+  await research.waitFor();
+  assert.deepEqual(await page.evaluate(() => window.sidebarCreates), [{ name: "Research", parentSpaceId: 2 }]);
+  const personalForCreate = page.getByRole("button", { name: "Personal", exact: true });
+  const createTransfer = await page.evaluateHandle(() => new DataTransfer());
+  await research.locator("..").dispatchEvent("dragstart", { dataTransfer: createTransfer });
+  await personalForCreate.locator("..").dispatchEvent("dragover", { dataTransfer: createTransfer });
+  await personalForCreate.locator("..").dispatchEvent("drop", { dataTransfer: createTransfer });
+  await page.waitForFunction(() => window.sidebarMoves.length === 1);
+  assert.deepEqual(await page.evaluate(() => window.sidebarMoves[0]), {
+    node: { kind: "space", id: 5 }, destination: { kind: "space", id: 4 },
+  });
+  await page.evaluate(() => { window.sidebarMoves = []; });
+  console.log("PASS sub-space creation stays inline and the created folder can be dragged");
+
   if (process.env.KIMINOLA_SCREENSHOT_DIR) {
     await mkdir(process.env.KIMINOLA_SCREENSHOT_DIR, { recursive: true });
     await page.mouse.move(600, 100);
@@ -188,6 +225,15 @@ try {
   assert.deepEqual(await page.evaluate(() => window.sidebarMoves), [{ node: { kind: "space", id: 2 }, destination: { kind: "space", id: 4 } }]);
   assert.equal(await page.getByRole("link", { name: "Follow-up", exact: true }).count(), 1, "Move preserves descendants without duplication");
   console.log("PASS drag target ownership, cycle prevention, and revealing moved branches");
+
+  const kickoff = page.getByRole("link", { name: "Project kickoff", exact: true });
+  await kickoff.dragTo(personal);
+  await page.waitForFunction(() => window.sidebarMoves.length === 2);
+  assert.deepEqual(await page.evaluate(() => window.sidebarMoves[1]), {
+    node: { kind: "meeting", id: 12 }, destination: { kind: "space", id: 4 },
+  });
+  assert.equal(await personal.getAttribute("aria-expanded"), "true", "Meeting drop keeps its destination revealed");
+  console.log("PASS meetings can be dragged into Spaces with a pointer gesture");
   assert.deepEqual(errors, [], "browser runtime errors");
 } finally {
   await browser?.close();

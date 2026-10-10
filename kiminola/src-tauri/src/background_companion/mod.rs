@@ -210,7 +210,8 @@ pub(crate) fn sync_prompt_overlay(app: &tauri::AppHandle, state: &MeetingPresenc
 #[cfg(desktop)]
 pub(crate) fn notify_background_prompt(app: &tauri::AppHandle, state: &MeetingPresenceState) {
     sync_prompt_overlay(app, state);
-    if crate::app_lifecycle::is_recording_active(app)
+    if state.is_paused()
+        || crate::app_lifecycle::is_recording_active(app)
         || !main_needs_background_prompt(app)
         || prompt_is_deferred()
     {

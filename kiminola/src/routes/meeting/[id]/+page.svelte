@@ -3,6 +3,7 @@
   import { page } from "$app/state";
   import { registerUpdateGuard } from "$lib/pending-work";
   import { notepad } from "$lib/notepad-store";
+  import { settingsSectionHref } from "$lib/settings-ui";
   import {
     createMeetingView,
     initialMeetingViewState,
@@ -20,12 +21,13 @@
     exportTranscriptText,
     saveNotesExport,
     saveTranscriptExport,
+    updateEnhancedActionItems,
     updateSegmentText,
     deleteSegment,
     type MeetingDetail,
-    type TranscriptLine,
   } from "$lib/tauri";
   import { renderMarkdown } from "$lib/markdown";
+  import BoardQuickAdd from "$lib/components/BoardQuickAdd.svelte";
   import ProviderConfigForm from "$lib/components/ProviderConfigForm.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -34,7 +36,8 @@
   import * as Select from "$lib/components/ui/select";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
 
-  // The Meeting view owns loading, Note enhancement, and exports; this page renders it.
+  // The Meeting view owns loading, Note enhancement, exports, and transcript and
+  // action-item edits; this page renders it.
   const ui = $state(initialMeetingViewState());
   const view = createMeetingView(
     {
@@ -47,6 +50,9 @@
         exportTranscriptText,
         saveNotesExport,
         saveTranscriptExport,
+        updateSegmentText,
+        deleteSegment,
+        updateEnhancedActionItems,
         writeClipboard: (text) => navigator.clipboard.writeText(text),
         renderMarkdown,
         delay(milliseconds, run) {
@@ -141,63 +147,21 @@
     if (exportSavedPath) await revealItemInDir(exportSavedPath);
   }
 
-  // Inline transcript editing.
-  let editingSegmentId = $state<number | undefined>(undefined);
-  let editSegmentText = $state("");
-
-  function startSegmentEdit(line: TranscriptLine) {
-    if (line.id === undefined) return;
-    editingSegmentId = line.id;
-    editSegmentText = line.text;
-  }
-
-  function cancelSegmentEdit() {
-    editingSegmentId = undefined;
-    editSegmentText = "";
-  }
-
-  async function saveSegmentEdit() {
-    if (editingSegmentId === undefined || !ui.meeting) return;
-    const text = editSegmentText.trim();
-    if (!text) {
-      cancelSegmentEdit();
-      return;
-    }
-    try {
-      await updateSegmentText(editingSegmentId, text);
-      const line = ui.meeting.transcript.find((l) => l.id === editingSegmentId);
-      if (line) line.text = text;
-    } catch (err) {
-      console.error("Failed to update segment:", err);
-    } finally {
-      cancelSegmentEdit();
-    }
-  }
-
-  async function removeSegment(segmentId: number) {
-    if (!ui.meeting) return;
-    try {
-      await deleteSegment(segmentId);
-      ui.meeting.transcript = ui.meeting.transcript.filter((l) => l.id !== segmentId);
-      if (editingSegmentId === segmentId) cancelSegmentEdit();
-    } catch (err) {
-      console.error("Failed to delete segment:", err);
-    }
-  }
-
+  // Inline transcript editing: Escape cancels, Ctrl/Cmd+Enter saves. Losing
+  // focus never saves, so clicking Cancel cannot persist the correction first.
   function onSegmentKeydown(event: KeyboardEvent) {
     if (event.key === "Escape") {
       event.preventDefault();
-      cancelSegmentEdit();
+      view.cancelSegmentEdit();
     } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
-      saveSegmentEdit();
+      void view.saveSegmentEdit();
     }
   }
 
   $effect(() => {
     return registerUpdateGuard(() => {
-      if (editingTitle || editingSegmentId !== undefined) {
+      if (editingTitle || ui.editingSegmentId !== undefined) {
         throw new Error("Finish or cancel the title or transcript edit before updating.");
       }
     });
@@ -212,6 +176,7 @@
     return `${date} · ${mins} min`;
   }
 
+  const actionItems = $derived(view.actionItems);
   const templateOptions = $derived(ui.templates.map((t) => ({ value: String(t.id), label: t.name })));
   const selectedTemplateLabel = $derived(
     ui.templates.find((t) => t.id === ui.selectedTemplateId)?.name ?? "Template",
@@ -399,14 +364,27 @@
                       {/each}
                     </Select.Content>
                   </Select.Root>
-                  <a class="manage-templates" href="/settings">Manage templates</a>
+                  <a class="manage-templates" href={settingsSectionHref("templates")}>Manage templates</a>
                 </div>
                 <div class="tool-actions">
+                  {#if !ui.editingActionItems && !ui.savingActionItems}
+                    <BoardQuickAdd meetingId={ui.meeting.id} {actionItems} enhancedMarkdown={ui.enhancedMd} />
+                  {/if}
+                  {#if actionItems.length > 0}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onclick={view.startActionItemEdit}
+                      disabled={ui.enhancing || ui.editingActionItems || ui.savingActionItems}
+                    >
+                      Edit action items
+                    </Button>
+                  {/if}
                   <Button
                     variant="outline"
                     size="sm"
                     onclick={view.enhance}
-                    disabled={ui.enhancing}
+                    disabled={ui.enhancing || ui.editingActionItems || ui.savingActionItems}
                   >
                     {ui.enhancing ? "Regenerating…" : "Regenerate"}
                   </Button>
@@ -415,6 +393,30 @@
               {#if ui.enhancing}
                 <div class="streaming-hint">AI is rewriting your notes…</div>
               {/if}
+              {#if ui.editingActionItems}
+                <section class="action-item-editor" aria-label="Edit enhanced action items">
+                  <div class="action-item-editor-heading">
+                    <strong>Action items</strong>
+                    <span>Changes also update linked cards on Boards.</span>
+                  </div>
+                  <div class="action-item-fields">
+                    {#each ui.actionItemDrafts as _, index}
+                      <label>
+                        <span>Action item {index + 1}</span>
+                        <Input bind:value={ui.actionItemDrafts[index]} disabled={ui.savingActionItems} />
+                      </label>
+                    {/each}
+                  </div>
+                  {#if ui.actionItemError}<p class="action-item-edit-error" role="alert">{ui.actionItemError}</p>{/if}
+                  <div class="action-item-edit-actions">
+                    <Button size="sm" onclick={view.saveActionItemEdits} disabled={ui.savingActionItems}>
+                      {ui.savingActionItems ? "Saving…" : "Save action items"}
+                    </Button>
+                    <Button variant="ghost" size="sm" onclick={view.cancelActionItemEdit} disabled={ui.savingActionItems}>Cancel</Button>
+                  </div>
+                </section>
+              {/if}
+              {#if ui.actionItemStatus}<p class="action-item-edit-status" role="status">{ui.actionItemStatus}</p>{/if}
               {@html ui.enhancedHtml}
             </div>
           {/if}
@@ -426,22 +428,49 @@
           {#if ui.meeting.transcript.length > 0}
             <div class="raw-transcript">
               {#each ui.meeting.transcript as line (line.id ?? line.text)}
-                {#if editingSegmentId === line.id}
+                {#if ui.editingSegmentId === line.id}
                   <div class="raw-line editing">
                     <span class="tag {line.channel}">{line.channel === "you" ? "You" : "Others"}</span>
                     <div class="segment-edit-wrap">
                       <Textarea
-                        bind:value={editSegmentText}
+                        bind:value={ui.segmentText}
                         onkeydown={onSegmentKeydown}
-                        onblur={saveSegmentEdit}
+                        disabled={ui.segmentOperation !== null}
                         rows={2}
                         class="segment-edit-textarea"
                       />
+                      {#if ui.segmentError}
+                        <p class="segment-edit-error" role="alert">{ui.segmentError.message}</p>
+                      {/if}
                       <div class="segment-edit-actions">
-                        <button class="segment-action save" onclick={saveSegmentEdit}>Save</button>
-                        <button class="segment-action" onclick={cancelSegmentEdit}>Cancel</button>
+                        <button
+                          class="segment-action save"
+                          disabled={ui.segmentOperation !== null}
+                          onclick={view.saveSegmentEdit}
+                        >
+                          {ui.segmentOperation === "save"
+                            ? "Saving…"
+                            : ui.segmentError?.action === "save"
+                              ? "Retry save"
+                              : "Save"}
+                        </button>
+                        <button
+                          class="segment-action"
+                          disabled={ui.segmentOperation !== null}
+                          onclick={view.cancelSegmentEdit}
+                        >Cancel</button>
                         {#if line.id !== undefined}
-                          <button class="segment-action delete" onclick={() => line.id !== undefined && removeSegment(line.id)}>Delete</button>
+                          <button
+                            class="segment-action delete"
+                            disabled={ui.segmentOperation !== null}
+                            onclick={() => line.id !== undefined && view.deleteSegment(line.id)}
+                          >
+                            {ui.segmentOperation === "delete"
+                              ? "Deleting…"
+                              : ui.segmentError?.action === "delete"
+                                ? "Retry delete"
+                                : "Delete"}
+                          </button>
                         {/if}
                       </div>
                     </div>
@@ -450,7 +479,8 @@
                   <button
                     type="button"
                     class="raw-line"
-                    onclick={() => startSegmentEdit(line)}
+                    disabled={ui.segmentOperation !== null}
+                    onclick={() => view.startSegmentEdit(line)}
                     title="Click to edit"
                   >
                     <span class="tag {line.channel}">{line.channel === "you" ? "You" : "Others"}</span>
@@ -583,6 +613,44 @@
   }
   .manage-templates:hover {
     color: var(--brand-hover);
+  }
+
+  .action-item-editor {
+    display: grid;
+    gap: 14px;
+    margin: 18px 0;
+    padding: 16px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+  }
+  .action-item-editor-heading,
+  .action-item-fields,
+  .action-item-fields label {
+    display: grid;
+    gap: 6px;
+  }
+  .action-item-editor-heading span,
+  .action-item-fields label > span,
+  .action-item-edit-status {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .action-item-fields {
+    gap: 12px;
+  }
+  .action-item-edit-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .action-item-edit-error,
+  .action-item-edit-status {
+    margin: 0;
+  }
+  .action-item-edit-error {
+    color: var(--danger);
+    font-size: 13px;
   }
 
   .raw-line {

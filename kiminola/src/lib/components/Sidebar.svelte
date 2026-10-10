@@ -17,17 +17,23 @@
     recordingHref,
     rememberMeetingLocation,
   } from "$lib/library-tree.svelte";
-  import { destinationKey, moveOptions, nodeKey, nodeRef } from "$lib/library-tree";
+  import { createMoveValidation, destinationKey, moveOptions, nodeKey, nodeRef } from "$lib/library-tree";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import * as Dialog from "$lib/components/ui/dialog";
-  import { ContextMenu } from "bits-ui";
+  import { ContextMenu, Dialog as Drawer } from "bits-ui";
+  import Menu from "@lucide/svelte/icons/menu";
+  import X from "@lucide/svelte/icons/x";
   import Plus from "@lucide/svelte/icons/plus";
   import House from "@lucide/svelte/icons/house";
+  import LayoutDashboard from "@lucide/svelte/icons/layout-dashboard";
   import Search from "@lucide/svelte/icons/search";
   import SettingsIcon from "@lucide/svelte/icons/settings";
   import SearchDialog from "$lib/components/SearchDialog.svelte";
   import LibraryTreeNode from "$lib/components/LibraryTreeNode.svelte";
+
+  let { compact = false }: { compact?: boolean } = $props();
+  let drawerOpenedPath = "";
 
   let collapsedNodes = $state<Record<string, boolean>>({});
   const collapsedStorageKey = "kiminola-library-collapsed";
@@ -76,8 +82,10 @@
   let actionError = $state<string | null>(null);
 
   let pathname = $derived(page.url.pathname);
+  let moveSource = $derived(draggingNode ?? (movingNode ? nodeRef(movingNode) : null));
+  let moveValidation = $derived(createMoveValidation(libraryTree, moveSource));
   let moveDestinationOptions = $derived(
-    moveOptions(libraryTree, movingNode ? nodeRef(movingNode) : null),
+    moveOptions(libraryTree, moveSource, moveValidation),
   );
 
   $effect(() => {
@@ -141,6 +149,7 @@
 
   function beginCreateSpace(parentSpaceId: number | null = null) {
     actionError = null;
+    if (parentSpaceId !== null) expandNode({ kind: "space", id: parentSpaceId });
     addingSpaceParentId = parentSpaceId;
     newSpaceName = "";
     addingSpace = true;
@@ -250,7 +259,7 @@
   }
 
   async function chooseMoveDestination(destination: LibraryLocation | null) {
-    if (!movingNode || actionBusy) return;
+    if (!movingNode || actionBusy || !moveValidation.canDrop(destination)) return;
     await performMove(nodeRef(movingNode), destination);
   }
 
@@ -270,7 +279,7 @@
 
   async function dropOn(destination: LibraryLocation) {
     const source = draggingNode;
-    if (!source || actionBusy) return;
+    if (!source || actionBusy || !moveValidation.canDrop(destination)) return;
     endDrag();
     await performMove(source, destination);
   }
@@ -296,16 +305,58 @@
   });
 </script>
 
-<aside class="sidebar">
+{#if compact}
+  <Drawer.Root bind:open={sidebarState.compactOpen}
+    onOpenChange={(open) => { if (open) drawerOpenedPath = pathname; }}>
+    <Drawer.Trigger class="sidebar-collapse-btn sidebar-open-btn" aria-label="Open sidebar" title="Open sidebar">
+      <Menu size={18} aria-hidden="true" />
+    </Drawer.Trigger>
+    <Drawer.Portal>
+      <Drawer.Overlay class="sidebar-overlay" />
+      <Drawer.Content class="sidebar sidebar-drawer"
+        onCloseAutoFocus={(event) => { if (!compact || drawerOpenedPath !== pathname) event.preventDefault(); }}>
+        <Drawer.Title class="sr-only">Library navigation</Drawer.Title>
+        <Drawer.Description class="sr-only">Browse Spaces and meetings, search, or open Settings.</Drawer.Description>
+        <Drawer.Close class="sidebar-close-btn" aria-label="Close sidebar" title="Close sidebar">
+          <X size={18} aria-hidden="true" />
+        </Drawer.Close>
+        {@render sidebarContent()}
+      </Drawer.Content>
+    </Drawer.Portal>
+  </Drawer.Root>
+{:else}
   <button
     class="sidebar-collapse-btn"
     onclick={toggleSidebar}
     title={sidebarState.collapsed ? "Expand sidebar" : "Collapse sidebar"}
     aria-label={sidebarState.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+    aria-expanded={!sidebarState.collapsed}
+    aria-controls="desktop-sidebar"
   >
     {sidebarState.collapsed ? "›" : "‹"}
   </button>
+{/if}
 
+<aside id="desktop-sidebar" class="sidebar" aria-label="Library navigation" inert={compact || sidebarState.collapsed}>
+  {#if !compact}{@render sidebarContent()}{/if}
+</aside>
+
+<SearchDialog bind:open={searchOpen} />
+
+{#snippet spaceInput(placeholder: string)}
+  <input
+    class="space-input"
+    type="text"
+    {placeholder}
+    aria-label={placeholder}
+    bind:value={newSpaceName}
+    bind:this={spaceInputRef}
+    onkeydown={onSpaceInputKeydown}
+    disabled={actionBusy}
+  />
+{/snippet}
+
+{#snippet sidebarContent()}
   <a class="wordmark" href="/" aria-label="Kimi Nola — home">
     <img
       src={themeState.theme === "dark"
@@ -320,10 +371,9 @@
     <span>Ctrl+K</span>
   </button>
 
-  <SearchDialog bind:open={searchOpen} />
-
-  <nav>
+  <nav aria-label="Library">
     <a class="nav-item" class:active={pathname === "/"} href="/"><House size={16} aria-hidden="true" /> <span>Home</span></a>
+    <a class="nav-item" class:active={pathname.startsWith("/boards")} href="/boards"><LayoutDashboard size={16} aria-hidden="true" /> <span>Boards</span></a>
 
     <ContextMenu.Root>
       <ContextMenu.Trigger class="spaces-header-trigger" role="group" tabindex={0}>
@@ -348,16 +398,8 @@
       </ContextMenu.Portal>
     </ContextMenu.Root>
 
-    {#if addingSpace}
-      <input
-        class="space-input"
-        type="text"
-        placeholder={addingSpaceParentId === null ? "New Space" : "New sub-space"}
-        bind:value={newSpaceName}
-        bind:this={spaceInputRef}
-        onkeydown={onSpaceInputKeydown}
-        disabled={actionBusy}
-      />
+    {#if addingSpace && addingSpaceParentId === null}
+      {@render spaceInput("New Space")}
     {/if}
 
     {#if treeLoadError}
@@ -378,9 +420,11 @@
           depth={0}
           collapsed={collapsedNodes}
           {pathname}
-          tree={libraryTree}
+          {moveValidation}
           {draggingNode}
           {dropTarget}
+          creatingSpaceParentId={addingSpace ? addingSpaceParentId : null}
+          createSpaceInput={spaceInput}
           onToggle={toggleNode}
           onNewMeeting={startMeeting}
           onNewSpace={(parentId) => beginCreateSpace(parentId)}
@@ -411,7 +455,7 @@
       </div>
     </div>
   </div>
-</aside>
+{/snippet}
 
 <Dialog.Root bind:open={moveDialogOpen}>
   <Dialog.Content class="library-dialog">

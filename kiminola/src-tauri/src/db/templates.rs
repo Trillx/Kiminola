@@ -21,7 +21,10 @@ pub(crate) async fn list(pool: &SqlitePool) -> Result<Vec<Template>, String> {
 
 /// The template a Note enhancement should use: the requested one, or the
 /// first template (the default built-in) when none is requested.
-pub(crate) async fn resolve(pool: &SqlitePool, template_id: Option<i64>) -> Result<Template, String> {
+pub(crate) async fn resolve(
+    pool: &SqlitePool,
+    template_id: Option<i64>,
+) -> Result<Template, String> {
     let mut templates = list(pool).await?.into_iter();
     match template_id {
         Some(id) => templates
@@ -43,7 +46,11 @@ fn validate_prompt(prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) async fn create(pool: &SqlitePool, name: &str, prompt: &str) -> Result<Template, String> {
+pub(crate) async fn create(
+    pool: &SqlitePool,
+    name: &str,
+    prompt: &str,
+) -> Result<Template, String> {
     validate_prompt(prompt)?;
     sqlx::query("INSERT INTO templates (name, prompt, is_builtin) VALUES (?, ?, 0)")
         .bind(name)
@@ -63,7 +70,12 @@ pub(crate) async fn create(pool: &SqlitePool, name: &str, prompt: &str) -> Resul
     })
 }
 
-pub(crate) async fn update(pool: &SqlitePool, id: i64, name: &str, prompt: &str) -> Result<(), String> {
+pub(crate) async fn update(
+    pool: &SqlitePool,
+    id: i64,
+    name: &str,
+    prompt: &str,
+) -> Result<(), String> {
     validate_prompt(prompt)?;
     let rows =
         sqlx::query("UPDATE templates SET name = ?, prompt = ? WHERE id = ? AND is_builtin = 0")
@@ -151,10 +163,15 @@ mod tests {
     async fn resolve_picks_the_requested_template_or_the_first() {
         let db = TestDb::new("templates-resolve").await;
         let first = list(&db.pool).await.unwrap().remove(0);
-        let custom = create(&db.pool, "Custom", "{transcript} {notes}").await.unwrap();
+        let custom = create(&db.pool, "Custom", "{transcript} {notes}")
+            .await
+            .unwrap();
 
         assert_eq!(resolve(&db.pool, None).await.unwrap().id, first.id);
-        assert_eq!(resolve(&db.pool, Some(custom.id)).await.unwrap().id, custom.id);
+        assert_eq!(
+            resolve(&db.pool, Some(custom.id)).await.unwrap().id,
+            custom.id
+        );
         assert_eq!(
             resolve(&db.pool, Some(9_999)).await.unwrap_err(),
             "template not found"

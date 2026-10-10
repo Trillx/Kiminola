@@ -4,7 +4,7 @@ import { test } from "node:test";
 import ts from "typescript";
 
 // @ts-expect-error Node's strip-types test runner imports the TypeScript source directly.
-import { isProviderConfigDirty, nextSettingsSection, openRouterModelOptionLabel, providerIsConfigured, resolveSettingsSection, SETTINGS_SECTIONS, settingsSectionHref, shouldUseFocusedSettingsShell, templateNeedsDeleteConfirmation, uniqueOpenRouterModels } from "../src/lib/settings-ui.ts";
+import { isProviderConfigDirty, nextSettingsSection, openRouterModelOptionLabel, providerIdentityChanged, providerIsConfigured, resolveSettingsSection, SETTINGS_SECTIONS, settingsSectionHref, shouldUseFocusedSettingsShell, templateNeedsDeleteConfirmation, uniqueOpenRouterModels } from "../src/lib/settings-ui.ts";
 
 type OpenRouterModel = {
   id: string;
@@ -35,6 +35,7 @@ function providerConfigController(
     onDestroy: (destroy: () => void) => destroyers.push(destroy),
     tick: async () => {},
     isProviderConfigDirty,
+    providerIdentityChanged,
     providerIsConfigured,
     uniqueOpenRouterModels,
   };
@@ -73,8 +74,8 @@ function deferred<T>() {
 }
 
 test("every settings section can be opened directly", () => {
-  assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.label), ["General", "Speech model", "AI provider", "Shortcut", "Templates", "About"]);
-  for (const section of ["general", "models", "ai", "shortcut", "templates", "about"] as const) {
+  assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.label), ["General", "Speech model", "AI provider", "Dictation", "Shortcut", "Templates", "About"]);
+  for (const section of ["general", "models", "ai", "dictation", "shortcut", "templates", "about"] as const) {
     assert.equal(resolveSettingsSection(section), section);
   }
   assert.equal(resolveSettingsSection(null), "general");

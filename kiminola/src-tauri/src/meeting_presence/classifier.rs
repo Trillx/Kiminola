@@ -1,13 +1,20 @@
 //! Pure Meeting presence classifier: turns one local snapshot of processes,
 //! visible windows and active Core Audio sessions into meeting candidates.
 //!
-//! A *detection* (likely) needs a known meeting app (or a visible window of
-//! the audio process itself) **and** active audio in that app's process
-//! family. A *possible hint* is a known app or browser that is merely running.
-//! Results are attributed to a stable app-family root process (the
-//! process-loopback capture target) plus the window that best represents the
-//! call. Our own processes, malformed process trees and exited processes never
-//! produce candidates, and labels never expose unknown process names.
+//! A *detection* (likely) needs active audio in an app family plus either a
+//! known meeting app (*targeted*) or a visible window of a generic app family
+//! whose input **and** output are both active. A *possible hint* is a known
+//! app or browser that is merely running, or a generic audio app that does
+//! not (yet) qualify. Results are attributed to a stable app-family root
+//! process (the process-loopback capture target) plus the window that best
+//! represents the call. Our own processes, malformed process trees, recycled
+//! parent PIDs and exited processes never produce candidates, and labels never
+//! expose unknown process names.
+//!
+//! The snapshot also reports per-process creation times (to detect PID reuse),
+//! every app family with active audio (episode activity is independent of
+//! window visibility), and whether the audio scan was complete enough that a
+//! family's absence can be read as confirmed inactivity.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,34 +23,79 @@ use super::{MeetingPresenceConfidence, MeetingPresenceEvidence};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Detection {
     pub(crate) process_id: u32,
+    /// A recognized meeting app (rather than a generic audio app).
+    pub(crate) targeted: bool,
     pub(crate) window_process_id: Option<u32>,
     pub(crate) app_label: String,
     pub(crate) confidence: MeetingPresenceConfidence,
     pub(crate) evidence: Vec<MeetingPresenceEvidence>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct DetectionSnapshot {
     pub(crate) detections: Vec<Detection>,
     pub(crate) possible_hints: Vec<Detection>,
-    pub(crate) live_process_ids: HashSet<u32>,
+    /// Every live PID with its creation time when readable.
+    pub(crate) live_process_instances: HashMap<u32, Option<u64>>,
+    /// App-family roots with any active audio, visible window or not.
+    pub(crate) active_audio_process_ids: HashSet<u32>,
+    /// False when missing audio/process metadata means absent activity is
+    /// unknown rather than confirmed silence.
+    pub(crate) audio_scan_complete: bool,
+}
+
+impl Default for DetectionSnapshot {
+    fn default() -> Self {
+        Self {
+            detections: Vec::new(),
+            possible_hints: Vec::new(),
+            live_process_instances: HashMap::new(),
+            active_audio_process_ids: HashSet::new(),
+            audio_scan_complete: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProcessInfo {
     pub(crate) name: String,
     pub(crate) parent_id: u32,
+    pub(crate) identity: Option<ProcessIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProcessIdentity {
+    // Transient ownership evidence only; never emitted, logged, or persisted.
+    pub(crate) executable_path: String,
+    pub(crate) started_at: u64,
+}
+
+/// Running sessions on input/output endpoints, never audio samples. Endpoint
+/// direction is evidence, not proof of a physical mic or remote conversation.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AudioActivity {
+    pub(crate) input: bool,
+    pub(crate) output: bool,
+}
+
+impl AudioActivity {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.input |= other.input;
+        self.output |= other.output;
+    }
 }
 
 pub(crate) fn classify_windows(
     processes: HashMap<u32, ProcessInfo>,
     windows: HashMap<u32, Vec<String>>,
-    active_audio: HashSet<u32>,
+    active_audio: HashMap<u32, AudioActivity>,
     current_pid: u32,
 ) -> DetectionSnapshot {
     let mut detections = Vec::new();
     let mut possible_hints = Vec::new();
     let mut possible_seen = HashSet::new();
+    let mut family_audio = HashMap::<u32, AudioActivity>::new();
+    let mut audio_scan_complete = true;
 
     for (&pid, process) in &processes {
         // Only named apps contribute quiet hints. Audio candidates additionally
@@ -60,9 +112,42 @@ pub(crate) fn classify_windows(
         }
     }
 
-    for pid in active_audio {
-        if let Some(detection) = resolve_app(pid, &processes, &windows, current_pid) {
-            detections.push(detection);
+    for (pid, activity) in active_audio {
+        if !activity.input && !activity.output {
+            continue;
+        }
+        let lineage = process_lineage(pid, &processes);
+        let own_audio = lineage
+            .iter()
+            .any(|id| *id == current_pid || is_kiminola_process(&processes[id].name));
+        let detection = resolve_app(pid, &processes, &windows, current_pid);
+        if let Some(detection) = detection {
+            let attributed_lineage = lineage
+                .iter()
+                .position(|id| *id == detection.process_id)
+                .map(|root_index| &lineage[..=root_index]);
+            if !own_audio
+                && attributed_lineage
+                    .is_none_or(|ids| ids.iter().any(|id| processes[id].identity.is_none()))
+            {
+                // Only ancestry required to reach the attributed family affects
+                // completeness. An unreadable launcher above the root does not.
+                audio_scan_complete = false;
+            }
+            family_audio
+                .entry(detection.process_id)
+                .or_default()
+                .merge(activity);
+            // Visibility controls prompt eligibility, not episode activity.
+            if detection.targeted || detection.window_process_id.is_some() {
+                detections.push(detection);
+            }
+        } else if !own_audio
+            && (lineage.is_empty() || lineage.iter().any(|id| processes[id].identity.is_none()))
+        {
+            // Missing process metadata may explain failed attribution. Do not
+            // interpret the family's absence as confirmed episode inactivity.
+            audio_scan_complete = false;
         }
     }
     // A call window on an active helper's branch is more specific than the
@@ -70,20 +155,45 @@ pub(crate) fn classify_windows(
     detections.sort_by_key(|d| {
         (
             d.process_id,
-            d.app_label == "another app",
+            !d.targeted,
             d.window_process_id.is_none(),
             d.window_process_id == Some(d.process_id),
             d.window_process_id.unwrap_or(u32::MAX),
         )
     });
     detections.dedup_by_key(|d| d.process_id);
+    detections.retain(|detection| {
+        if detection.targeted {
+            return true;
+        }
+        // Unknown apps do not get a visible prompt for music or dictation
+        // alone. Input and output may belong to different helpers/devices.
+        let activity = family_audio[&detection.process_id];
+        let mut hint = detection.clone();
+        hint.confidence = MeetingPresenceConfidence::Possible;
+        possible_hints.push(hint);
+        activity.input && activity.output
+    });
     // Hash-map iteration must not randomly change which app gets the prompt.
-    detections.sort_by_key(|d| (d.app_label == "another app", d.process_id));
+    detections.sort_by_key(|d| (!d.targeted, d.process_id));
     possible_hints.sort_by_key(|d| d.process_id);
     DetectionSnapshot {
         detections,
         possible_hints,
-        live_process_ids: processes.keys().copied().collect(),
+        live_process_instances: processes
+            .iter()
+            .map(|(&pid, process)| {
+                (
+                    pid,
+                    process
+                        .identity
+                        .as_ref()
+                        .map(|identity| identity.started_at),
+                )
+            })
+            .collect(),
+        active_audio_process_ids: family_audio.keys().copied().collect(),
+        audio_scan_complete,
     }
 }
 
@@ -95,6 +205,18 @@ fn process_lineage(pid: u32, processes: &HashMap<u32, ProcessInfo>) -> Vec<u32> 
             break;
         };
         lineage.push(next);
+        if let (Some(child), Some(parent)) = (
+            process.identity.as_ref(),
+            processes
+                .get(&process.parent_id)
+                .and_then(|p| p.identity.as_ref()),
+        ) {
+            if parent.started_at > child.started_at {
+                // The old parent exited and Windows reused its PID.
+                next = 0;
+                break;
+            }
+        }
         next = process.parent_id;
     }
     if next != 0 && processes.contains_key(&next) {
@@ -102,6 +224,51 @@ fn process_lineage(pid: u32, processes: &HashMap<u32, ProcessInfo>) -> Vec<u32> 
         return Vec::new();
     }
     lineage
+}
+
+fn same_executable(a: &ProcessInfo, b: &ProcessInfo) -> bool {
+    a.identity
+        .as_ref()
+        .zip(b.identity.as_ref())
+        .is_some_and(|(a, b)| a.executable_path.eq_ignore_ascii_case(&b.executable_path))
+}
+
+fn generic_family_root(pid: u32, processes: &HashMap<u32, ProcessInfo>) -> Option<u32> {
+    let lineage = process_lineage(pid, processes);
+    let owner_index = lineage
+        .iter()
+        .position(|id| normalized_process_name(&processes[id].name) != "msedgewebview2")?;
+    // A WebView can inherit its directly associated application, not an
+    // arbitrary visible shell. Missing identity remains unattributed.
+    if lineage[..=owner_index]
+        .iter()
+        .any(|id| processes[id].identity.is_none())
+        && owner_index != 0
+    {
+        return None;
+    }
+    let mut root = lineage[owner_index];
+    if matches!(
+        normalized_process_name(&processes[&root].name).as_str(),
+        "explorer"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+            | "conhost"
+            | "windowsterminal"
+            | "applicationframehost"
+            | "svchost"
+            | "rundll32"
+    ) {
+        return None;
+    }
+    for &parent in &lineage[owner_index + 1..] {
+        if !same_executable(&processes[&root], &processes[&parent]) {
+            break;
+        }
+        root = parent;
+    }
+    Some(root)
 }
 
 fn resolve_app(
@@ -153,22 +320,21 @@ fn resolve_app(
                     .copied()
                     .min()
             };
-        if window_pid.is_none() && !is_known_meeting_process(name) {
-            return None;
-        }
         (root, window_pid)
     } else {
-        // Preserve the generic fallback only for the actual audio process's
-        // window, never an arbitrary parent such as Explorer.
-        if !has_window(&pid) {
-            return None;
-        }
-        (pid, Some(pid))
+        let root = generic_family_root(pid, processes)?;
+        let window_pid = windows
+            .keys()
+            .filter(|id| has_window(id) && generic_family_root(**id, processes) == Some(root))
+            .copied()
+            .min();
+        (root, window_pid)
     };
     let label_pid = window_pid.unwrap_or(root);
     let titles = windows.get(&label_pid).map(Vec::as_slice).unwrap_or(&[]);
     Some(Detection {
         process_id: root,
+        targeted: is_known_meeting_process(&processes[&root].name),
         window_process_id: window_pid,
         app_label: friendly_app_label(&processes[&label_pid].name, titles).into(),
         confidence: MeetingPresenceConfidence::Likely,
@@ -179,7 +345,7 @@ fn resolve_app(
     })
 }
 
-fn normalized_process_name(process_name: &str) -> String {
+pub(crate) fn normalized_process_name(process_name: &str) -> String {
     process_name
         .rsplit(['\\', '/'])
         .next()
@@ -223,24 +389,28 @@ pub(crate) fn friendly_app_label(process_name: &str, window_titles: &[String]) -
         "zoom" | "zoomphone" => "Zoom",
         "teams" | "ms-teams" | "msteams" => "Microsoft Teams",
         "webex" | "webexmta" | "webexhost" => "Webex",
-        "chrome" | "msedge" | "firefox" | "brave" => {
+        "chrome" | "msedge" | "firefox" | "brave"
             if window_titles.iter().any(|title| {
                 let title = title.to_ascii_lowercase();
                 title.contains("google meet") || title.contains("meet.google.com")
-            }) {
-                "Google Meet"
-            } else {
-                "another app"
-            }
+            }) =>
+        {
+            "Google Meet"
         }
+        "chrome" | "msedge" | "firefox" | "brave" => "another app",
         _ => "another app",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{friendly_app_label, is_known_meeting_process};
-    use crate::meeting_presence::probe::detect_fixture;
+    use std::collections::HashMap;
+
+    use super::{
+        classify_windows, friendly_app_label, generic_family_root, is_known_meeting_process,
+        AudioActivity, ProcessIdentity, ProcessInfo,
+    };
+    use crate::meeting_presence::probe::{detect_audio_fixture, detect_fixture};
     use crate::meeting_presence::MeetingPresenceConfidence;
 
     #[test]
@@ -254,6 +424,154 @@ mod tests {
         assert_eq!(result.detections[0].process_id, 10);
         assert_eq!(result.detections[0].window_process_id, Some(10));
         assert_eq!(result.detections[0].app_label, "Microsoft Teams");
+    }
+
+    #[test]
+    fn unknown_apps_require_input_and_output_from_the_same_family() {
+        let processes = &[(10, 0, "call-app.exe"), (20, 0, "player.exe")];
+        let windows = &[(10, "Call"), (20, "Player")];
+        for audio in [
+            vec![(10, false, true)],
+            vec![(10, true, false)],
+            vec![(10, true, false), (20, false, true)],
+        ] {
+            let snapshot = detect_audio_fixture(processes, windows, &audio);
+            assert!(
+                snapshot.detections.is_empty(),
+                "one-way/unrelated audio must stay quiet"
+            );
+        }
+        let snapshot = detect_audio_fixture(processes, windows, &[(10, true, true)]);
+        assert_eq!(snapshot.detections.len(), 1);
+        assert_eq!(snapshot.detections[0].app_label, "another app");
+        let known = detect_audio_fixture(&[(30, 0, "ms-teams.exe")], &[], &[(30, false, true)]);
+        assert_eq!(
+            known.detections.len(),
+            1,
+            "recognized apps retain targeted detection"
+        );
+    }
+
+    #[test]
+    fn generic_helpers_combine_directions_only_under_their_visible_owner() {
+        let processes = &[
+            (1, 0, "explorer.exe"),
+            (10, 1, "call-app.exe"),
+            (11, 10, "call-app.exe"),
+            (12, 10, "msedgewebview2.exe"),
+            (20, 1, "call-app.exe"),
+            (21, 20, "call-app.exe"),
+        ];
+        let windows = &[(1, "Desktop"), (10, "Call"), (20, "Other instance")];
+        let together =
+            detect_audio_fixture(processes, windows, &[(11, true, false), (12, false, true)]);
+        assert_eq!(together.detections.len(), 1);
+        assert_eq!(together.detections[0].process_id, 10);
+        assert_eq!(together.detections[0].window_process_id, Some(10));
+        let separate =
+            detect_audio_fixture(processes, windows, &[(11, true, false), (21, false, true)]);
+        assert!(separate.detections.is_empty());
+        let shell = detect_audio_fixture(
+            &[(1, 0, "explorer.exe"), (12, 1, "msedgewebview2.exe")],
+            &[(1, "Desktop")],
+            &[(12, true, true)],
+        );
+        assert!(
+            shell.detections.is_empty(),
+            "the shell is never a generic call owner"
+        );
+    }
+
+    #[test]
+    fn unreadable_launcher_does_not_make_a_resolved_app_scan_incomplete() {
+        let processes = HashMap::from([
+            (
+                1,
+                ProcessInfo {
+                    name: "explorer.exe".into(),
+                    parent_id: 0,
+                    identity: None,
+                },
+            ),
+            (
+                10,
+                ProcessInfo {
+                    name: "call-app.exe".into(),
+                    parent_id: 1,
+                    identity: Some(ProcessIdentity {
+                        executable_path: "C:/Fixture/call-app.exe".into(),
+                        started_at: 1,
+                    }),
+                },
+            ),
+        ]);
+        let snapshot = classify_windows(
+            processes,
+            HashMap::from([(10, vec!["Call".into()])]),
+            HashMap::from([(
+                10,
+                AudioActivity {
+                    input: true,
+                    output: true,
+                },
+            )]),
+            999,
+        );
+
+        assert_eq!(snapshot.detections.len(), 1);
+        assert!(
+            snapshot.audio_scan_complete,
+            "identity outside the attributed app family must not stall every onset counter"
+        );
+    }
+
+    #[test]
+    fn generic_ownership_requires_identity_and_rejects_recycled_parents() {
+        let make_process = |parent_id, path: &str, started_at| ProcessInfo {
+            name: "call-app.exe".into(),
+            parent_id,
+            identity: Some(ProcessIdentity {
+                executable_path: path.into(),
+                started_at,
+            }),
+        };
+        let mut processes = HashMap::from([
+            (10, make_process(0, "C:/One/call-app.exe", 1)),
+            (11, make_process(10, "C:/Two/call-app.exe", 2)),
+        ]);
+        assert_eq!(
+            generic_family_root(11, &processes),
+            Some(11),
+            "matching basenames are not enough to combine audio"
+        );
+        processes
+            .get_mut(&11)
+            .unwrap()
+            .identity
+            .as_mut()
+            .unwrap()
+            .executable_path = "c:/one/CALL-APP.EXE".into();
+        assert_eq!(generic_family_root(11, &processes), Some(10));
+        processes
+            .get_mut(&10)
+            .unwrap()
+            .identity
+            .as_mut()
+            .unwrap()
+            .started_at = 3;
+        assert_eq!(
+            generic_family_root(11, &processes),
+            Some(11),
+            "a later process cannot own an earlier child"
+        );
+        processes.get_mut(&10).unwrap().identity = None;
+        assert_eq!(generic_family_root(11, &processes), Some(11));
+        processes.get_mut(&11).unwrap().name = "msedgewebview2.exe".into();
+        assert_eq!(
+            generic_family_root(11, &processes),
+            None,
+            "a WebView with an unverified owner stays unattributed"
+        );
     }
 
     #[test]
@@ -333,7 +651,10 @@ mod tests {
             &[(1, "Desktop"), (10, "Teams"), (20, "Other app")],
             &[21],
         );
-        assert!(result.detections.is_empty());
+        assert!(result
+            .detections
+            .iter()
+            .all(|d| d.app_label != "Microsoft Teams"));
     }
 
     #[test]

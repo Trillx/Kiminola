@@ -41,10 +41,15 @@
   });
 
   beforeNavigate(({ cancel, to }) => {
-    if (!to || to.url.href === page.url.href || !session.guardsNavigation) return;
+    if (!to || to.url.href === page.url.href) return;
+    // A teardown (or a leave queued behind startup) navigates itself once its
+    // writes are done; nothing may bypass a recovery write still pending.
+    if (session.blocksNavigation) {
+      cancel();
+      return;
+    }
+    if (!session.guardsNavigation) return;
     cancel();
-    // A leave requested during startup is already queued; it navigates itself.
-    if (capture.exitPending) return;
     pendingNavigationTarget = `${to.url.pathname}${to.url.search}${to.url.hash}`;
     navigationDialogOpen = true;
   });
@@ -132,13 +137,22 @@
       <div class="recording-finish-error" role="alert">
         <div>
           <strong>The meeting isn't saved yet.</strong>
-          <span>{capture.finishError} Your recovery copy is still available.</span>
+          <span>{capture.finishError} Your latest work is still here. Retry before leaving.</span>
         </div>
         <div class="recording-start-error-actions">
-          <Button size="sm" onclick={session.retryFinish}>Retry saving</Button>
-          <Button size="sm" variant="outline" onclick={() => void session.leave("recovery-copy")}>
-            Open recovery copy
-          </Button>
+          <Button size="sm" onclick={() => void session.retryFinish()}>Retry saving</Button>
+          {#if capture.failedLeave !== null}
+            <Button size="sm" variant="outline" onclick={() => void session.finish("save")}>
+              Save as meeting
+            </Button>
+            <Button size="sm" variant="outline" onclick={() => void session.discard()}>
+              Discard unsaved changes and leave
+            </Button>
+          {:else}
+            <Button size="sm" variant="outline" onclick={() => void session.leave("recovery-copy")}>
+              Open recovery copy
+            </Button>
+          {/if}
         </div>
       </div>
     {/if}
@@ -215,6 +229,7 @@
       </div>
       <Textarea
         bind:value={capture.notes}
+        disabled={stopping}
         oninput={session.notesChanged}
         placeholder="Jot rough thoughts, action items, or quotes here…"
         class="notepad-textarea"
@@ -312,6 +327,8 @@
           transition before stopping capture.
         {:else if phase === "finish_failed"}
           Retry the save, keep the recovery copy and leave, or stay here without losing your work.
+        {:else if phase === "failed"}
+          Keep your notes as a recovery copy and leave, or stay here and try starting again.
         {:else}
           Finish and save the meeting, keep only its recovery copy, or continue recording here.
         {/if}
@@ -319,11 +336,9 @@
     </Dialog.Header>
     <div class="navigation-guard-actions">
       <Button variant="outline" onclick={continueRecordingHere}>
-        {phase === "starting"
+        {phase === "starting" || phase === "failed" || phase === "finish_failed"
           ? "Stay here"
-          : phase === "finish_failed"
-            ? "Stay here"
-            : "Continue recording"}
+          : "Continue recording"}
       </Button>
       <Button
         variant="secondary"

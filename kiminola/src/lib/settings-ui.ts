@@ -2,6 +2,7 @@ export const SETTINGS_SECTIONS = [
   { id: "general", label: "General" },
   { id: "models", label: "Speech model" },
   { id: "ai", label: "AI provider" },
+  { id: "dictation", label: "Dictation" },
   { id: "shortcut", label: "Shortcut" },
   { id: "templates", label: "Templates" },
   { id: "about", label: "About" },
@@ -82,6 +83,15 @@ export function isProviderConfigDirty(
     saved.base_url !== current.base_url ||
     saved.model !== current.model
   );
+}
+
+// UI invalidation is deliberately conservative: any endpoint edit clears key
+// status and pending replacements. The backend owns canonical credential scoping.
+export function providerIdentityChanged(
+  previous: ProviderFormConfig,
+  next: ProviderFormConfig,
+): boolean {
+  return previous.kind !== next.kind || previous.base_url !== next.base_url;
 }
 
 export function providerIsConfigured(config: ProviderFormConfig): boolean {

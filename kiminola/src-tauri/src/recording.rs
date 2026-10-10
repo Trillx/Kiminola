@@ -7,16 +7,17 @@ use tokio::sync::Mutex;
 
 use crate::asr::{resolve_asr_model_dir, AsrEngine, SherpaTranscriber};
 use crate::audio::DefaultAudioSource;
+use crate::capture_gate::{CaptureGate, CaptureLease, CaptureOwner};
 use crate::recording_session::{
-    AudioPressureEvent, AudioSource, RecordingSession, RecordingStartStatus, TranscriptEvent,
-    TranscriptSink, Transcriber,
+    AudioPressureEvent, AudioSource, RecordingSession, RecordingStartStatus, Transcriber,
+    TranscriptEvent, TranscriptSink,
 };
 
 /// Shared Tauri state for recording. Whether a Capture session is active is
 /// published to `app_lifecycle`, the single owner of quit/update decisions.
 pub struct RecordingState {
     session: Mutex<Option<ActiveRecording>>,
-    transcriber: Arc<Mutex<Option<Arc<SherpaTranscriber>>>>,
+    asr_engine: Arc<Mutex<Option<Arc<AsrEngine>>>>,
     pending_loopback_target: SyncMutex<Option<PendingLoopbackTarget>>,
 }
 
@@ -29,6 +30,8 @@ pub(crate) struct RecordingQuiesced<'a> {
 struct ActiveRecording {
     session: RecordingSession,
     transcript_store: Arc<TranscriptEventStore>,
+    // Ownership lasts through pause and the final decoder drain.
+    _capture_lease: CaptureLease,
 }
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
@@ -83,6 +86,7 @@ const PENDING_LOOPBACK_TARGET_TTL: Duration = Duration::from_secs(60);
 
 struct PendingLoopbackTarget {
     process_id: u32,
+    process_started_at: u64,
     queued_at: Instant,
 }
 
@@ -90,7 +94,7 @@ impl RecordingState {
     fn new() -> Self {
         Self {
             session: Mutex::new(None),
-            transcriber: Arc::new(Mutex::new(None)),
+            asr_engine: Arc::new(Mutex::new(None)),
             pending_loopback_target: SyncMutex::new(None),
         }
     }
@@ -103,64 +107,91 @@ impl RecordingState {
         }
     }
 
-    fn take_loopback_target(&self) -> Option<u32> {
-        self.pending_loopback_target
+    fn take_loopback_target(
+        &self,
+        is_current: impl FnOnce(u32, u64) -> bool,
+    ) -> Result<Option<u32>, String> {
+        let target = self
+            .pending_loopback_target
             .lock()
             .unwrap()
             .take()
-            .filter(|target| target.queued_at.elapsed() <= PENDING_LOOPBACK_TARGET_TTL)
-            .map(|target| target.process_id)
+            .filter(|target| target.queued_at.elapsed() <= PENDING_LOOPBACK_TARGET_TTL);
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        if !is_current(target.process_id, target.process_started_at) {
+            return Err("The detected app closed or changed before recording started. Please start a new recording.".into());
+        }
+        Ok(Some(target.process_id))
+    }
+
+    fn clear_pending_loopback_target(&self) {
+        self.pending_loopback_target.lock().unwrap().take();
     }
 }
 
 /// Carries the detected meeting PID across the prompt-to-recording navigation.
 /// It is consumed once by `start_recording` and expires quickly so a later
 /// manual meeting can never inherit a stale capture target.
-pub fn queue_process_loopback_target(app: &AppHandle, process_id: u32) {
+pub fn queue_process_loopback_target(app: &AppHandle, process_id: u32, process_started_at: u64) {
     if let Some(state) = app.try_state::<RecordingState>() {
         *state.pending_loopback_target.lock().unwrap() = Some(PendingLoopbackTarget {
             process_id,
+            process_started_at,
             queued_at: Instant::now(),
         });
     }
 }
 
-/// Get the shared transcriber, loading the ASR model on first use. Failed
-/// loads stay retryable so a model installed during onboarding works without
-/// an app restart; successful loads remain cached for the process lifetime.
-async fn ensure_transcriber(
-    cache: &Mutex<Option<Arc<SherpaTranscriber>>>,
-) -> Option<Arc<SherpaTranscriber>> {
+/// Ensures a default-output start cannot inherit an earlier prompt's
+/// still-unconsumed process target.
+pub fn clear_process_loopback_target(app: &AppHandle) {
+    if let Some(state) = app.try_state::<RecordingState>() {
+        state.clear_pending_loopback_target();
+    }
+}
+
+/// Get the shared ASR engine, loading the model on first use. Failed loads stay
+/// retryable so a model installed during onboarding works without an app
+/// restart; successful loads remain cached for the process lifetime.
+async fn ensure_asr_engine(cache: &Arc<Mutex<Option<Arc<AsrEngine>>>>) -> Option<Arc<AsrEngine>> {
     let start = std::time::Instant::now();
-    let transcriber = get_or_try_init(cache, || {
-        resolve_asr_model_dir()
-            .and_then(|directory| AsrEngine::new(&directory))
-            .map(|engine| SherpaTranscriber::new(Arc::new(engine)))
+    let engine = get_or_try_init(cache, || {
+        resolve_asr_model_dir().and_then(|directory| AsrEngine::new(&directory))
     })
     .await;
     eprintln!("[recording] ASR engine resolved in {:?}", start.elapsed());
-    transcriber
+    engine
 }
 
-async fn get_or_try_init<T, F>(cache: &Mutex<Option<Arc<T>>>, loader: F) -> Option<Arc<T>>
+pub(crate) async fn shared_asr_engine(app: &AppHandle) -> Option<Arc<AsrEngine>> {
+    let state = app.state::<RecordingState>();
+    ensure_asr_engine(&state.asr_engine).await
+}
+
+async fn get_or_try_init<T, F>(cache: &Arc<Mutex<Option<Arc<T>>>>, loader: F) -> Option<Arc<T>>
 where
-    T: Send + 'static,
+    T: Send + Sync + 'static,
     F: FnOnce() -> Option<T> + Send + 'static,
 {
-    let mut cached = cache.lock().await;
+    let mut cached = Arc::clone(cache).lock_owned().await;
     if let Some(value) = cached.as_ref() {
         return Some(Arc::clone(value));
     }
 
-    let loaded = tokio::task::spawn_blocking(loader)
-        .await
-        .ok()
-        .flatten()
-        .map(Arc::new);
-    if let Some(value) = loaded.as_ref() {
-        *cached = Some(Arc::clone(value));
-    }
-    loaded
+    // The blocking load cannot be cancelled once started. Give it ownership of
+    // the cache guard as well, so dropping any waiter neither permits another
+    // cold load nor loses the completed engine. Only model initialization runs
+    // here; a cancelled caller must never continue into microphone startup.
+    tokio::task::spawn_blocking(move || {
+        let loaded = loader().map(Arc::new);
+        *cached = loaded.clone();
+        loaded
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 struct TauriTranscriptSink {
@@ -203,21 +234,31 @@ pub async fn start_recording(
     if session.is_some() {
         return Err("recording already in progress".into());
     }
-    // Marks the session active before capture starts; refused while an App
-    // update is being prepared. (A session and a prepared update never
-    // coexist, so the check order above cannot hide either error.)
+    // Meeting capture ownership excludes Dictation, App updates and quit from
+    // startup through transcript finalization. A prepared update holds the
+    // Update lease, so this claim is what refuses recording during an update.
+    let capture_lease = app.state::<CaptureGate>().claim(CaptureOwner::Meeting)?;
+    // Marks the session active before capture starts.
     crate::app_lifecycle::begin_recording(&app)?;
 
     // Grab the preloaded ASR engine (warmed in the background at app launch);
     // lanes are cheap per-recording streams over the shared weights.
-    let transcriber = ensure_transcriber(&state.transcriber)
+    let transcriber = ensure_asr_engine(&state.asr_engine)
         .await
-        .map(|transcriber| transcriber as Arc<dyn Transcriber>);
+        .map(|engine| Arc::new(SherpaTranscriber::new(engine)) as Arc<dyn Transcriber>);
     if transcriber.is_none() {
         eprintln!("ASR model not found; no transcript text will be produced");
     }
 
-    let target_process_id = state.take_loopback_target();
+    let target_process_id =
+        match state.take_loopback_target(crate::meeting_presence::process_instance_is_current) {
+            Ok(target) => target,
+            Err(error) => {
+                drop(capture_lease);
+                crate::app_lifecycle::end_recording(&app);
+                return Err(error);
+            }
+        };
     let audio_source: Arc<dyn AudioSource> =
         Arc::new(DefaultAudioSource::for_process(target_process_id));
     let transcript_store = Arc::new(TranscriptEventStore::default());
@@ -230,6 +271,9 @@ pub async fn start_recording(
     let start_status = match new_session.start().await {
         Ok(status) => status,
         Err(error) => {
+            // Release ownership before publishing inactivity so presence sees
+            // the capture gate idle.
+            drop(capture_lease);
             crate::app_lifecycle::end_recording(&app);
             return Err(error);
         }
@@ -237,7 +281,11 @@ pub async fn start_recording(
     *session = Some(ActiveRecording {
         session: new_session,
         transcript_store,
+        _capture_lease: capture_lease,
     });
+    if let Err(error) = app.emit("recording:started", ()) {
+        eprintln!("failed to emit recording:started: {error}");
+    }
     Ok(start_status)
 }
 
@@ -260,13 +308,12 @@ pub async fn stop_recording(
         });
     };
     let stop_result = active.session.stop().await;
+    let result = result_after_finalization(stop_result, &active.transcript_store);
     // Activity ends only after finalization so the app cannot quit or update
-    // while the transcript is becoming durable.
+    // while the transcript is becoming durable. The lease is released first.
+    drop(active);
     crate::app_lifecycle::end_recording(&app);
-    Ok(result_after_finalization(
-        stop_result,
-        &active.transcript_store,
-    ))
+    Ok(result)
 }
 
 /// Pauses the active recording session. Capture streams are stopped but the
@@ -294,14 +341,15 @@ pub async fn resume_recording(
 
 /// Helper used by `lib.rs` to install the recording state into the Tauri manager.
 pub fn setup(app: &mut tauri::App) {
+    app.manage(CaptureGate::default());
     let state = RecordingState::new();
-    let cache = Arc::clone(&state.transcriber);
+    let cache = Arc::clone(&state.asr_engine);
     app.manage(state);
 
     // Warm the ASR model in the background so the first recording doesn't
     // wait on the ~650 MB encoder load.
     tauri::async_runtime::spawn(async move {
-        let _ = ensure_transcriber(&cache).await;
+        let _ = ensure_asr_engine(&cache).await;
     });
 }
 
@@ -309,7 +357,7 @@ pub fn setup(app: &mut tauri::App) {
 mod tests {
     use super::*;
     use crate::recording_session::TranscriptChannel;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn event(utterance_id: u64, revision: u32, text: &str) -> TranscriptEvent {
         TranscriptEvent {
@@ -325,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn asr_cache_retries_failed_loads_and_keeps_the_first_success() {
-        let cache = Mutex::new(None);
+        let cache = Arc::new(Mutex::new(None));
         let attempts = Arc::new(AtomicUsize::new(0));
 
         let first_attempts = Arc::clone(&attempts);
@@ -355,6 +403,196 @@ mod tests {
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
         assert!(Arc::ptr_eq(&loaded, &cached));
         assert_eq!(cached.as_str(), "ready");
+    }
+
+    #[tokio::test]
+    async fn asr_cache_cancelled_waiter_keeps_cold_load_for_meeting_and_dictation() {
+        let cache = Arc::new(Mutex::new(None));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let microphone_started = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let waiter = {
+            let cache = Arc::clone(&cache);
+            let attempts = Arc::clone(&attempts);
+            let microphone_started = Arc::clone(&microphone_started);
+            tokio::spawn(async move {
+                let engine = get_or_try_init(&cache, move || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Some("original cold load".to_string())
+                })
+                .await;
+                // This stands for the caller's next step, never a real mic.
+                microphone_started.store(true, Ordering::SeqCst);
+                engine
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .expect("the blocking loader should start")
+            .unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+
+        let meeting_attempts = Arc::clone(&attempts);
+        let meeting = get_or_try_init(&cache, move || {
+            meeting_attempts.fetch_add(1, Ordering::SeqCst);
+            Some("duplicate Meeting load".to_string())
+        });
+        let dictation_attempts = Arc::clone(&attempts);
+        let dictation = get_or_try_init(&cache, move || {
+            dictation_attempts.fetch_add(1, Ordering::SeqCst);
+            Some("duplicate Dictation load".to_string())
+        });
+        tokio::pin!(meeting, dictation);
+        // Poll both real cache consumers while the original loader is blocked.
+        // No scheduling sleeps or expensive ASR model instances are needed.
+        assert!(futures::poll!(meeting.as_mut()).is_pending());
+        assert!(futures::poll!(dictation.as_mut()).is_pending());
+        release_tx.send(()).unwrap();
+        let (meeting, dictation) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(meeting, dictation)
+        })
+        .await
+        .expect("both consumers should resolve after the loader is released");
+        let meeting = meeting.unwrap();
+        let dictation = dictation.unwrap();
+        let cached = get_or_try_init(&cache, || panic!("a warm cache must not reload"))
+            .await
+            .unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "only one cold load");
+        assert_eq!(meeting.as_str(), "original cold load");
+        assert!(Arc::ptr_eq(&meeting, &dictation));
+        assert!(Arc::ptr_eq(&meeting, &cached));
+        assert!(!microphone_started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn asr_cache_cancelled_load_completes_without_any_waiter() {
+        for outcome in [Some("ready"), None] {
+            let cache = Arc::new(Mutex::new(None));
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let waiter = {
+                let cache = Arc::clone(&cache);
+                let attempts = Arc::clone(&attempts);
+                tokio::spawn(async move {
+                    get_or_try_init(&cache, move || {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        outcome.map(str::to_string)
+                    })
+                    .await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(5), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            waiter.abort();
+            assert!(waiter.await.unwrap_err().is_cancelled());
+            release_tx.send(()).unwrap();
+
+            // Observe completion without polling another initialization future.
+            let completed = tokio::time::timeout(Duration::from_secs(5), cache.lock())
+                .await
+                .expect("completion must release the cache even with no waiters")
+                .clone();
+            assert_eq!(completed.as_deref().map(String::as_str), outcome);
+            let retry_attempts = Arc::clone(&attempts);
+            let next = get_or_try_init(&cache, move || {
+                retry_attempts.fetch_add(1, Ordering::SeqCst);
+                Some("retry".to_string())
+            })
+            .await
+            .unwrap();
+            if let Some(completed) = completed {
+                assert!(Arc::ptr_eq(&completed, &next));
+                assert_eq!(attempts.load(Ordering::SeqCst), 1);
+            } else {
+                assert_eq!(next.as_str(), "retry");
+                assert_eq!(attempts.load(Ordering::SeqCst), 2);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn asr_cache_concurrent_cold_consumers_serialize_success_and_retry() {
+        for outcome in [Some("ready"), None] {
+            let cache = Arc::new(Mutex::new(None));
+            let load_active = Arc::new(AtomicBool::new(false));
+            let retry_attempts = Arc::new(AtomicUsize::new(0));
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let meeting = {
+                let cache = Arc::clone(&cache);
+                let load_active = Arc::clone(&load_active);
+                tokio::spawn(async move {
+                    get_or_try_init(&cache, move || {
+                        load_active.store(true, Ordering::SeqCst);
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        load_active.store(false, Ordering::SeqCst);
+                        outcome.map(str::to_string)
+                    })
+                    .await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(5), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let attempts = Arc::clone(&retry_attempts);
+            let dictation = get_or_try_init(&cache, move || {
+                assert!(
+                    !load_active.load(Ordering::SeqCst),
+                    "loads must not overlap"
+                );
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Some("retry".to_string())
+            });
+            tokio::pin!(dictation);
+            assert!(futures::poll!(dictation.as_mut()).is_pending());
+            release_tx.send(()).unwrap();
+            let (meeting, dictation) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(meeting, dictation)
+            })
+            .await
+            .unwrap();
+            let meeting = meeting.unwrap();
+            let dictation = dictation.unwrap();
+            assert_eq!(meeting.as_deref().map(String::as_str), outcome);
+            if let Some(meeting) = meeting {
+                assert!(Arc::ptr_eq(&meeting, &dictation));
+                assert_eq!(retry_attempts.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(dictation.as_str(), "retry");
+                assert_eq!(retry_attempts.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn asr_cache_panicked_loader_releases_ownership_for_retry() {
+        let cache = Arc::new(Mutex::new(None));
+        assert!(
+            get_or_try_init(&cache, || panic!("controlled loader panic"))
+                .await
+                .is_none()
+        );
+        let retry = tokio::time::timeout(
+            Duration::from_secs(5),
+            get_or_try_init(&cache, || Some("retry")),
+        )
+        .await
+        .expect("a panic must not leave initialization locked")
+        .unwrap();
+        assert_eq!(*retry, "retry");
     }
 
     #[test]
@@ -395,15 +633,50 @@ mod tests {
         let state = RecordingState::new();
         *state.pending_loopback_target.lock().unwrap() = Some(PendingLoopbackTarget {
             process_id: 42,
+            process_started_at: 1,
             queued_at: Instant::now(),
         });
-        assert_eq!(state.take_loopback_target(), Some(42));
-        assert_eq!(state.take_loopback_target(), None);
+        assert_eq!(state.take_loopback_target(|_, _| true), Ok(Some(42)));
+        assert_eq!(state.take_loopback_target(|_, _| true), Ok(None));
 
         *state.pending_loopback_target.lock().unwrap() = Some(PendingLoopbackTarget {
             process_id: 99,
+            process_started_at: 1,
             queued_at: Instant::now() - PENDING_LOOPBACK_TARGET_TTL - Duration::from_secs(1),
         });
-        assert_eq!(state.take_loopback_target(), None);
+        assert_eq!(state.take_loopback_target(|_, _| true), Ok(None));
+    }
+
+    #[test]
+    fn pending_process_target_can_be_cleared_before_default_output_capture() {
+        let state = RecordingState::new();
+        *state.pending_loopback_target.lock().unwrap() = Some(PendingLoopbackTarget {
+            process_id: 42,
+            process_started_at: 1,
+            queued_at: Instant::now(),
+        });
+
+        state.clear_pending_loopback_target();
+
+        assert_eq!(state.take_loopback_target(|_, _| true), Ok(None));
+    }
+
+    #[test]
+    fn replaced_process_target_errors_instead_of_capturing_another_app() {
+        let state = RecordingState::new();
+        *state.pending_loopback_target.lock().unwrap() = Some(PendingLoopbackTarget {
+            process_id: 42,
+            process_started_at: 7,
+            queued_at: Instant::now(),
+        });
+        let result = state.take_loopback_target(|pid, started_at| {
+            assert_eq!((pid, started_at), (42, 7));
+            false
+        });
+        assert!(
+            result.is_err(),
+            "a stale target must not fall back to system-wide audio"
+        );
+        assert!(state.pending_loopback_target.lock().unwrap().is_none());
     }
 }

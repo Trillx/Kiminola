@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import {
     checkMicrophonePermission,
@@ -38,9 +39,7 @@
 
   let step = $state<Step>(1);
 
-  let micState = $state<"idle" | "requesting" | "granted" | "denied" | "checking">("idle");
-  let micLevel = $state(0);
-  let micInterval: ReturnType<typeof setInterval> | null = null;
+  let micState = $state<"idle" | "requesting" | "granted" | "denied">("idle");
 
   let downloadState = $state<"idle" | "downloading" | "error" | "done">("idle");
   let progress = $state(0);
@@ -60,23 +59,23 @@
   let providerSkipped = $state(false);
   let testState = $state<"idle" | "testing" | "success" | "error">("idle");
   let testError = $state("");
+  let providerOperation = $state<"saving" | "testing" | null>(null);
+  let providerGeneration = 0;
+  let disposed = false;
+
+  onDestroy(() => {
+    disposed = true;
+    providerGeneration++;
+  });
 
   let busy = $state(false);
 
-  function stopMicCheck() {
-    if (micInterval) {
-      clearInterval(micInterval);
-      micInterval = null;
-    }
-  }
-
   async function requestMic() {
     micState = "requesting";
-    stopMicCheck();
     try {
       const result = await checkMicrophonePermission();
       if (result === "Granted") {
-        startMicCheck();
+        micState = "granted";
       } else if (result === "Denied") {
         micState = "denied";
       } else {
@@ -86,20 +85,6 @@
       micState = "denied";
       console.error("[onboarding] mic permission check failed:", err);
     }
-  }
-
-  function startMicCheck() {
-    micState = "checking";
-    let ticks = 0;
-    micInterval = setInterval(() => {
-      ticks++;
-      micLevel = 0.2 + Math.random() * 0.5;
-      if (ticks > 30) {
-        stopMicCheck();
-        micLevel = 0;
-        micState = "granted";
-      }
-    }, 100);
   }
 
   async function alreadyInstalled() {
@@ -156,43 +141,68 @@
     }
   }
 
-  function applyProviderPreset(kind: ProviderKind) {
-    provider.kind = kind;
-    provider.base_url = PROVIDER_DEFAULTS[kind].base_url;
-    provider.model = PROVIDER_DEFAULTS[kind].model;
+  function invalidateProviderTest() {
+    providerGeneration++;
     testState = "idle";
     testError = "";
   }
 
-  async function saveProvider() {
-    busy = true;
-    try {
-      await setLlmConfig(provider, apiKey || undefined);
-      providerSkipped = false;
-      nextStep();
-    } catch (err) {
-      testState = "error";
-      testError = String(err);
-    } finally {
-      busy = false;
-    }
+  function applyProviderPreset(kind: ProviderKind) {
+    if (disposed || busy || providerOperation !== null) return;
+    apiKey = "";
+    provider.kind = kind;
+    provider.base_url = PROVIDER_DEFAULTS[kind].base_url;
+    provider.model = PROVIDER_DEFAULTS[kind].model;
+    invalidateProviderTest();
+  }
+
+  function saveProvider() {
+    return runProviderOperation("saving");
   }
 
   function skipProvider() {
+    if (disposed || busy || providerOperation !== null) return;
     providerSkipped = true;
     nextStep();
   }
 
-  async function testProvider() {
-    testState = "testing";
+  function testProvider() {
+    return runProviderOperation("testing");
+  }
+
+  async function runProviderOperation(operation: "saving" | "testing") {
+    if (disposed || step !== 3 || busy || providerOperation !== null) return;
+    providerOperation = operation;
+    const generation = ++providerGeneration;
+    const submittedConfig = { ...provider };
+    const submittedKey = apiKey;
+    const isCurrent = () => !disposed && generation === providerGeneration &&
+      submittedConfig.kind === provider.kind &&
+      submittedConfig.base_url === provider.base_url &&
+      submittedConfig.model === provider.model && submittedKey === apiKey;
+    testState = operation === "testing" ? "testing" : "idle";
     testError = "";
     try {
-      await setLlmConfig(provider, apiKey || undefined);
-      await testLlmConfig();
-      testState = "success";
+      await setLlmConfig(submittedConfig, submittedKey || undefined);
+      if (!isCurrent()) return;
+      if (operation === "testing") {
+        await testLlmConfig();
+        if (!isCurrent()) return;
+        testState = "success";
+      } else {
+        providerSkipped = false;
+        nextStep();
+      }
     } catch (err) {
+      if (!isCurrent()) return;
       testState = "error";
       testError = String(err);
+    } finally {
+      // Invalidating a result never releases this lock while IPC is pending.
+      if (!disposed) {
+        providerOperation = null;
+        if (testState === "testing") testState = "idle";
+      }
     }
   }
 
@@ -245,17 +255,10 @@
                 {micState === "requesting" ? "Requesting…" : "Allow microphone"}
               </Button>
             </div>
-          {:else if micState === "checking"}
-            <div class="status-card success">
-              <span>Microphone permission granted.</span>
-            </div>
-            <div class="mic-meter">
-              <div class="mic-meter-bar" style="height: {micLevel * 100}%"></div>
-            </div>
-            <p class="hint">Listening for 3 seconds…</p>
           {:else if micState === "granted"}
-            <div class="status-card success">
-              <span>Microphone check complete.</span>
+            <div class="status-card success" role="status">
+              <span>Microphone access granted.</span>
+              <p class="hint">This checks permission only, not microphone volume. Check that your microphone is unmuted before recording.</p>
             </div>
             <Button onclick={nextStep}>Continue</Button>
           {:else if micState === "denied"}
@@ -328,6 +331,7 @@
               <Label for="provider-kind">Provider</Label>
               <Select.Root
                 type="single"
+                disabled={busy || providerOperation !== null}
                 value={provider.kind}
                 onValueChange={(value) => applyProviderPreset(value as ProviderKind)}
               >
@@ -349,7 +353,9 @@
               <Input
                 id="provider-base-url"
                 type="text"
+                disabled={busy || providerOperation !== null}
                 bind:value={provider.base_url}
+                oninput={() => { apiKey = ""; invalidateProviderTest(); }}
                 placeholder="https://api.openai.com/v1"
               />
             </div>
@@ -359,7 +365,9 @@
               <Input
                 id="provider-model"
                 type="text"
+                disabled={busy || providerOperation !== null}
                 bind:value={provider.model}
+                oninput={invalidateProviderTest}
                 placeholder="gpt-4o-mini"
               />
             </div>
@@ -369,7 +377,9 @@
               <Input
                 id="provider-key"
                 type="password"
+                disabled={busy || providerOperation !== null}
                 bind:value={apiKey}
+                oninput={invalidateProviderTest}
                 placeholder="sk-…"
               />
             </div>
@@ -387,11 +397,11 @@
           </div>
 
           <div class="action-row">
-            <Button onclick={saveProvider} disabled={busy}>Save provider</Button>
-            <Button variant="outline" onclick={testProvider} disabled={busy || testState === "testing"}>
-              {testState === "testing" ? "Testing…" : "Test connection"}
+            <Button onclick={saveProvider} disabled={busy || providerOperation !== null}>Save provider</Button>
+            <Button variant="outline" onclick={testProvider} disabled={busy || providerOperation !== null}>
+              {providerOperation === "testing" ? "Testing…" : "Test connection"}
             </Button>
-            <Button variant="ghost" onclick={skipProvider} disabled={busy}>Skip for now</Button>
+            <Button variant="ghost" onclick={skipProvider} disabled={busy || providerOperation !== null}>Skip for now</Button>
           </div>
         </section>
 
@@ -483,21 +493,6 @@
   .status-card.error {
     background: var(--danger-soft);
     color: var(--danger);
-  }
-
-  .mic-meter {
-    height: 80px;
-    width: 12px;
-    background: var(--surface);
-    border-radius: 6px;
-    overflow: hidden;
-    border: 1px solid var(--hairline-soft);
-  }
-  .mic-meter-bar {
-    width: 100%;
-    background: var(--brand);
-    transition: height 80ms linear;
-    margin-top: auto;
   }
 
   .progress-card {

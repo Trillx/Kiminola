@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { page } from "$app/state";
-  import { goto } from "$app/navigation";
+  import { beforeNavigate, goto } from "$app/navigation";
   import { getVersion } from "@tauri-apps/api/app";
   import ProviderConfigForm from "$lib/components/ProviderConfigForm.svelte";
+  import DictationSettings from "$lib/components/DictationSettings.svelte";
+  import DictationHistory from "$lib/components/DictationHistory.svelte";
   import { themeState, toggleTheme } from "$lib/theme.svelte";
   import {
     getGlobalShortcut,
@@ -45,14 +47,18 @@
   } from "$lib/settings-ui";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import Check from "@lucide/svelte/icons/check";
+  import Copy from "@lucide/svelte/icons/copy";
   import Moon from "@lucide/svelte/icons/moon";
   import Plus from "@lucide/svelte/icons/plus";
   import Sun from "@lucide/svelte/icons/sun";
 
   let active = $state<SettingsSection>(resolveSettingsSection(page.url.searchParams.get("section")));
   let shortcut = $state("");
+  let dictationDirty = $state(false);
+  let dictationBusy = $state(false);
   let savingShortcut = $state(false);
   let shortcutSaved = $state(false);
+  let shortcutError = $state("");
   let appVersion = $state("");
   let presence = $state<MeetingPresenceState>({
     enabled: false,
@@ -79,8 +85,18 @@
   let templatesLoading = $state(false);
   let templateStatus = $state<{ message: string; error: boolean } | null>(null);
   let deleteConfirmOpen = $state(false);
+  let discardConfirmOpen = $state(false);
+  let pendingTemplate: Template | null = null;
+  let pendingSection: SettingsSection | null = null;
+  let savedName = $state("");
+  let savedPrompt = $state("");
   let templateStatusTimer: ReturnType<typeof setTimeout> | undefined;
   const selectedTemplate = $derived(templates.find((t) => t.id === selectedTemplateId));
+  const templateDirty = $derived(
+    selectedTemplateId !== undefined && !selectedTemplate?.is_builtin &&
+    (editingName !== savedName || editingPrompt !== savedPrompt),
+  );
+  const promptError = $derived(validateTemplatePrompt(editingPrompt));
 
   function flashTemplateStatus(message: string, error = false) {
     templateStatus = { message, error };
@@ -88,6 +104,15 @@
     templateStatusTimer = setTimeout(() => {
       templateStatus = null;
     }, 4000);
+  }
+
+  async function copyPlaceholder(placeholder: "{transcript}" | "{notes}") {
+    try {
+      await navigator.clipboard.writeText(placeholder);
+      flashTemplateStatus(`${placeholder} copied to clipboard.`);
+    } catch (err) {
+      flashTemplateStatus(`Could not copy ${placeholder}: ${String(err)}`, true);
+    }
   }
 
   function validateTemplatePrompt(prompt: string): string | null {
@@ -111,11 +136,55 @@
     selectedTemplateId = t.id;
     editingName = t.name;
     editingPrompt = t.prompt;
+    savedName = t.name;
+    savedPrompt = t.prompt;
+  }
+
+  function requestTemplateSelection(t: Template) {
+    if (templateDirty) {
+      pendingTemplate = t;
+      discardConfirmOpen = true;
+    } else {
+      selectTemplate(t);
+    }
+  }
+
+  function onDiscardDialogOpenChange(open: boolean) {
+    discardConfirmOpen = open;
+    if (!open) {
+      pendingTemplate = null;
+      pendingSection = null;
+    }
+  }
+
+  function discardTemplateChanges() {
+    if (pendingTemplate) selectTemplate(pendingTemplate);
+    else {
+      editingName = savedName;
+      editingPrompt = savedPrompt;
+    }
+    pendingTemplate = null;
+    discardConfirmOpen = false;
+    if (pendingSection) {
+      const section = pendingSection;
+      pendingSection = null;
+      activateSection(section);
+    }
   }
 
   function newTemplate() {
     const defaultPrompt = "Summarize the meeting.\n\n## Summary\n## Action items\n\nTranscript:\n{transcript}\n\nRaw notes:\n{notes}";
-    selectTemplate({ id: -1, name: "New template", prompt: defaultPrompt, is_builtin: 0 } as Template);
+    requestTemplateSelection({ id: -1, name: "New template", prompt: defaultPrompt, is_builtin: 0 } as Template);
+  }
+
+  function copyTemplate() {
+    if (!selectedTemplate) return;
+    requestTemplateSelection({
+      id: -1,
+      name: `${selectedTemplate.name} copy`,
+      prompt: selectedTemplate.prompt,
+      is_builtin: 0,
+    });
   }
 
   async function saveTemplate() {
@@ -141,6 +210,8 @@
           t.id === selectedTemplateId ? { ...t, name, prompt: editingPrompt } : t,
         );
       }
+      savedName = editingName;
+      savedPrompt = editingPrompt;
       flashTemplateStatus("Template saved.");
     } catch (err) {
       flashTemplateStatus(String(err), true);
@@ -221,6 +292,13 @@
   }
 
   function activateSection(section: SettingsSection) {
+    if (section !== active && dictationBusy) return;
+    if (section !== active && dictationDirty && !window.confirm("Discard unsaved dictation settings?")) return;
+    if (section !== active && templateDirty) {
+      pendingSection = section;
+      discardConfirmOpen = true;
+      return;
+    }
     if (section === "templates") {
       activateTemplates();
     } else {
@@ -248,6 +326,10 @@
   });
 
   onMount(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (templateDirty || dictationDirty || dictationBusy) event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
     if (active === "models") void refreshModelHealth();
     if (active === "templates") void loadTemplates();
     getGlobalShortcut()
@@ -265,7 +347,18 @@
     getMeetingPresenceState()
       .then((next) => (presence = next))
       .catch((err) => console.error("Failed to load meeting presence settings:", err));
-    return () => unlisten?.();
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeUnload);
+      unlisten?.();
+    };
+  });
+
+  beforeNavigate(({ cancel, to }) => {
+    if (dictationBusy) { cancel(); return; }
+    if (dictationDirty && (to?.url.pathname !== page.url.pathname || to?.url.searchParams.get("section") !== "dictation") &&
+      !window.confirm("Discard unsaved dictation settings?")) { cancel(); return; }
+    if (templateDirty && to?.url.pathname !== page.url.pathname &&
+      !window.confirm("Discard unsaved template changes?")) cancel();
   });
 
   function presenceLabel(): string {
@@ -292,14 +385,16 @@
   }
 
   async function saveShortcut() {
+    if (savingShortcut) return;
     savingShortcut = true;
     shortcutSaved = false;
+    shortcutError = "";
     try {
       await setGlobalShortcut(shortcut.trim() || null);
       shortcutSaved = true;
       setTimeout(() => (shortcutSaved = false), 3000);
     } catch (err) {
-      console.error("Failed to save shortcut:", err);
+      shortcutError = err instanceof Error ? err.message : String(err);
     } finally {
       savingShortcut = false;
     }
@@ -417,6 +512,9 @@
           {/if}
           {#if presenceError}<div class="test-output error" role="alert">{presenceError}</div>{/if}
         </section>
+      {:else if active === "dictation"}
+        <DictationSettings bind:dirty={dictationDirty} bind:busy={dictationBusy} />
+        <DictationHistory />
       {:else if active === "models"}
         <div class="settings-card provider-config">
           <div class="enhance-title">On-device speech model</div>
@@ -426,7 +524,7 @@
           </div>
 
           {#if modelState === "idle" || modelState === "checking"}
-            <div class="model-status" aria-live="polite">Checking the model packâ€¦</div>
+            <div class="model-status" aria-live="polite">Checking the model pack…</div>
           {:else if modelState === "ready"}
             <div class="model-status ready" role="status">
               <strong>Model ready.</strong>
@@ -440,7 +538,7 @@
           {:else if modelState === "downloading"}
             <div class="model-progress" aria-live="polite">
               <div class="model-progress-row">
-                <span>Downloading and verifyingâ€¦</span>
+                <span>Downloading and verifying…</span>
                 <span class="mono">{modelDownloadedMB} / {modelTotalMB} MB</span>
               </div>
               <Progress value={modelProgress} max={100} class="h-2" />
@@ -479,15 +577,18 @@
           </div>
           <label class="field">
             <span>Accelerator</span>
-            <input type="text" bind:value={shortcut} placeholder="Ctrl+Shift+R" />
+            <input type="text" bind:value={shortcut} placeholder="Ctrl+Shift+R" disabled={savingShortcut} aria-invalid={shortcutError ? "true" : undefined} aria-describedby={shortcutError ? "shortcut-error" : undefined} />
           </label>
           <div class="config-actions">
             <button class="btn btn-primary" onclick={saveShortcut} disabled={savingShortcut}>
               {savingShortcut ? "Saving…" : "Save shortcut"}
             </button>
           </div>
+          {#if shortcutError}
+            <div id="shortcut-error" class="test-output error" role="alert">Could not save shortcut: {shortcutError}</div>
+          {/if}
           {#if shortcutSaved}
-            <div class="test-output">Shortcut saved.</div>
+            <div class="test-output" role="status">Shortcut saved.</div>
           {/if}
         </div>
       {:else if active === "about"}
@@ -577,15 +678,48 @@
           <header class="settings-card-header settings-card-header-row">
             <div>
               <h2>Summary templates</h2>
-              <p>Choose a built-in template or create a custom prompt.</p>
+              <p>Choose a built-in template or write instructions for your own meeting notes.</p>
             </div>
             <Button variant="outline" onclick={newTemplate}><Plus size={15} aria-hidden="true" /> New template</Button>
           </header>
 
           <div class="template-requirements">
-            <span>Required variables</span>
-            <code>{`{transcript}`}</code>
-            <code>{`{notes}`}</code>
+            <div class="template-requirements-copy">
+              <span class="template-requirements-label">Required placeholders</span>
+              <span>Keep both tokens in custom prompts so Kimi Nola can read the meeting.</span>
+            </div>
+            <div class="template-placeholder-actions">
+              <Button
+                class="placeholder-copy-button"
+                variant="outline"
+                size="sm"
+                aria-label="Copy {`{transcript}`} placeholder"
+                title="Copy {`{transcript}`} to clipboard"
+                onclick={() => void copyPlaceholder("{transcript}")}
+              >
+                {#if templateStatus?.message === "{transcript} copied to clipboard."}
+                  <Check aria-hidden="true" />
+                {:else}
+                  <Copy aria-hidden="true" />
+                {/if}
+                <code>{`{transcript}`}</code>
+              </Button>
+              <Button
+                class="placeholder-copy-button"
+                variant="outline"
+                size="sm"
+                aria-label="Copy {`{notes}`} placeholder"
+                title="Copy {`{notes}`} to clipboard"
+                onclick={() => void copyPlaceholder("{notes}")}
+              >
+                {#if templateStatus?.message === "{notes} copied to clipboard."}
+                  <Check aria-hidden="true" />
+                {:else}
+                  <Copy aria-hidden="true" />
+                {/if}
+                <code>{`{notes}`}</code>
+              </Button>
+            </div>
           </div>
 
           {#if templatesLoading}
@@ -602,7 +736,7 @@
                   onValueChange={(value) => {
                     const id = Number(value);
                     const t = templates.find((x) => x.id === id);
-                    if (t) selectTemplate(t);
+                    if (t) requestTemplateSelection(t);
                   }}
                 >
                   <Select.Trigger id="template-select" class="w-full">
@@ -628,21 +762,28 @@
                   </div>
                 </div>
                 <pre class="template-preview" role="region" aria-label="Built-in template prompt">{editingPrompt}</pre>
+                <div class="template-actions">
+                  <Button variant="outline" onclick={copyTemplate}>Use as starting point</Button>
+                </div>
               {:else}
                 <div class="template-editor">
                   <div class="field">
-                    <Label for="template-name">Name</Label>
+                    <Label for="template-name">Name {#if templateDirty}<span class="mono">· Unsaved changes</span>{/if}</Label>
                     <Input id="template-name" bind:value={editingName} placeholder="Template name" />
                   </div>
                   <div class="template-editor-scroll">
                     <div class="field">
                       <Label for="template-prompt">Prompt</Label>
+                      <p class="enhance-copy">Tell Kimi Nola which sections to write and what details to capture. Keep both placeholders so it can read the transcript and your notes.</p>
                       <Textarea
                         id="template-prompt"
                         class="template-prompt-editor"
                         bind:value={editingPrompt}
                         rows={12}
+                        aria-invalid={promptError ? "true" : undefined}
+                        aria-describedby={promptError ? "template-prompt-error" : undefined}
                       />
+                      {#if promptError}<p id="template-prompt-error" class="test-output error" role="alert">{promptError}</p>{/if}
                     </div>
                     <div class="template-actions">
                       <Button onclick={saveTemplate}>Save template</Button>
@@ -666,7 +807,7 @@
   </div>
 </div>
 
-<Dialog.Root bind:open={deleteConfirmOpen}>
+  <Dialog.Root bind:open={deleteConfirmOpen}>
   <Dialog.Content>
     <Dialog.Header>
       <Dialog.Title>Delete “{selectedTemplate?.name ?? "template"}”?</Dialog.Title>
@@ -677,6 +818,19 @@
     <Dialog.Footer>
       <Button variant="outline" onclick={() => (deleteConfirmOpen = false)}>Cancel</Button>
       <Button variant="destructive" onclick={() => void deleteSelectedTemplate()}>Delete template</Button>
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
+
+<Dialog.Root bind:open={discardConfirmOpen} onOpenChange={onDiscardDialogOpenChange}>
+  <Dialog.Content>
+    <Dialog.Header>
+      <Dialog.Title>Discard template changes?</Dialog.Title>
+      <Dialog.Description>Your edits to this template have not been saved.</Dialog.Description>
+    </Dialog.Header>
+    <Dialog.Footer>
+      <Button variant="outline" onclick={() => onDiscardDialogOpenChange(false)}>Keep editing</Button>
+      <Button variant="destructive" onclick={discardTemplateChanges}>Discard changes</Button>
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>

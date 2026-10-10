@@ -17,12 +17,13 @@ pub(crate) mod meeting_store;
 pub(crate) mod search;
 pub(crate) mod settings;
 pub(crate) mod templates;
+#[cfg(test)]
+mod tests;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
-use tauri::Manager;
 
 use crate::db_safety::Database;
 
@@ -33,6 +34,12 @@ pub struct DbState {
 }
 
 impl DbState {
+    pub(crate) fn new(path: Result<PathBuf, String>) -> Self {
+        Self {
+            database: Arc::new(Database::new(path)),
+        }
+    }
+
     /// The ready pool, or the startup, recovery or update-suspension error the
     /// UI should surface instead.
     pub(crate) async fn pool(&self) -> Result<SqlitePool, String> {
@@ -60,18 +67,11 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Install DB state and warm the pool at launch.
-pub fn setup(app: &mut tauri::App) {
-    let state = DbState {
-        database: Arc::new(Database::new(db_path())),
-    };
-    let database = Arc::clone(&state.database);
-    app.manage(state);
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = database.pool().await {
-            eprintln!("[db] warm-up failed: {e}");
-        }
-    });
+/// Construct state for registration on the builder. The database gate can
+/// invoke commands before Tauri's setup callback runs, so registration must
+/// happen during builder configuration rather than inside setup.
+pub fn state() -> DbState {
+    DbState::new(db_path())
 }
 
 #[cfg(test)]

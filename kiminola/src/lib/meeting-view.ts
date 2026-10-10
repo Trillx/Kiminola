@@ -1,4 +1,6 @@
-import type { LlmStreamEvent, MeetingDetail, ProviderConfig, Template } from "./tauri";
+import type { LlmStreamEvent, MeetingDetail, ProviderConfig, Template, TranscriptLine } from "./tauri";
+// @ts-expect-error Node strip-types tests import the TypeScript source directly.
+import { extractActionItemEntries, replaceActionItems } from "./action-items.ts";
 // @ts-expect-error Node strip-types tests import the TypeScript source directly.
 import { providerIsConfigured } from "./settings-ui.ts";
 // @ts-expect-error Node strip-types tests import the TypeScript source directly.
@@ -6,6 +8,7 @@ import { meetingNotepad, type NotepadStore } from "./notepad-store.ts";
 
 export type MeetingTab = "mynotes" | "enhance" | "transcript";
 export type MeetingExportAction = "copy-notes" | "copy-transcript" | "save-notes" | "save-transcript";
+export type SegmentOperation = "save" | "delete";
 
 export interface MeetingViewPort {
   getMeeting(id: number): Promise<MeetingDetail>;
@@ -20,6 +23,14 @@ export interface MeetingViewPort {
   exportTranscriptText(meetingId: number): Promise<string>;
   saveNotesExport(meetingId: number): Promise<string>;
   saveTranscriptExport(meetingId: number): Promise<string>;
+  updateSegmentText(segmentId: number, text: string): Promise<void>;
+  deleteSegment(segmentId: number): Promise<void>;
+  updateEnhancedActionItems(input: {
+    meetingId: number;
+    originalMarkdown: string;
+    enhancedMarkdown: string;
+    edits: Array<{ sourceIndex: number; originalTitle: string; title: string }>;
+  }): Promise<void>;
   writeClipboard(text: string): Promise<void>;
   renderMarkdown(markdown: string): string;
   /** One-shot timer; returns its cancel function. */
@@ -32,7 +43,10 @@ export interface MeetingViewDependencies {
   log?: (message: string, error: unknown) => void;
 }
 
-/** Per-route view state. The page may set the UI-only fields: tab, notes (bound), selectedTemplateId, showFinalizationWarning. */
+/**
+ * Per-route view state. The page may set the UI-only fields: tab, notes,
+ * segmentText, and actionItemDrafts (bound), selectedTemplateId, showFinalizationWarning.
+ */
 export interface MeetingViewState {
   meeting: MeetingDetail | null;
   notFound: boolean;
@@ -50,6 +64,18 @@ export interface MeetingViewState {
   enhancedHtml: string;
   enhancedGenerated: boolean;
   hasEverEnhanced: boolean;
+  /** The transcript segment being corrected, if any. */
+  editingSegmentId: number | undefined;
+  segmentText: string;
+  /** A segment write in flight: the editor is locked until it settles. */
+  segmentOperation: SegmentOperation | null;
+  /** A failed segment write; the correction stays for a retry. */
+  segmentError: { action: SegmentOperation; message: string } | null;
+  editingActionItems: boolean;
+  actionItemDrafts: string[];
+  savingActionItems: boolean;
+  actionItemError: string | null;
+  actionItemStatus: string | null;
   /** Some Notepad document (this meeting's or another) failed to save. */
   notesSaveError: boolean;
 }
@@ -71,6 +97,15 @@ function routeState(): Omit<MeetingViewState, "notesSaveError"> {
     enhancedHtml: "",
     enhancedGenerated: false,
     hasEverEnhanced: false,
+    editingSegmentId: undefined,
+    segmentText: "",
+    segmentOperation: null,
+    segmentError: null,
+    editingActionItems: false,
+    actionItemDrafts: [],
+    savingActionItems: false,
+    actionItemError: null,
+    actionItemStatus: null,
   };
 }
 
@@ -82,9 +117,10 @@ const RENDER_THROTTLE_MS = 100;
 
 /**
  * The Meeting view behind meeting/[id]: loads a Meeting per route (after
- * pending notes are saved), streams Note enhancement, and exports. Every
- * response is checked against the route or stream that asked for it, so a
- * late reply for a previous Meeting or an abandoned run never lands.
+ * pending notes are saved), streams Note enhancement, exports, and edits the
+ * transcript and enhanced action items. Every response is checked against the
+ * route, stream, or editor that asked for it, so a late reply for a previous
+ * Meeting, an abandoned run, or a cancelled edit never lands.
  */
 export function createMeetingView(
   { port, notepad, log = (message, error) => console.error(message, error) }: MeetingViewDependencies,
@@ -92,6 +128,9 @@ export function createMeetingView(
 ) {
   let routeToken = 0;
   let streamToken = 0;
+  // A route load, a new or cancelled editor, or disposal retires segment callbacks.
+  let segmentToken = 0;
+  let actionItemToken = 0;
   let cancelRender: (() => void) | null = null;
 
   const unsubscribeNotes = notepad.subscribe("all", (status) => {
@@ -134,7 +173,7 @@ export function createMeetingView(
 
   async function enhance() {
     const meeting = state.meeting;
-    if (!meeting || state.enhancing) return;
+    if (!meeting || state.enhancing || state.editingActionItems || state.savingActionItems) return;
     const run = ++streamToken;
     const isCurrent = () => run === streamToken;
     const templateId = state.selectedTemplateId;
@@ -170,6 +209,145 @@ export function createMeetingView(
     }
   }
 
+  /* ---------- transcript corrections ---------- */
+
+  function resetSegmentEdit() {
+    segmentToken++;
+    state.editingSegmentId = undefined;
+    state.segmentText = "";
+    state.segmentError = null;
+    state.segmentOperation = null;
+  }
+
+  function startSegmentEdit(line: TranscriptLine) {
+    if (line.id === undefined || state.segmentOperation) return;
+    segmentToken++;
+    state.editingSegmentId = line.id;
+    state.segmentText = line.text;
+    state.segmentError = null;
+  }
+
+  function cancelSegmentEdit() {
+    // An IPC write cannot be undone: Cancel must not imply it aborts one in flight.
+    if (state.segmentOperation) return;
+    resetSegmentEdit();
+  }
+
+  /** One segment write at a time; only the editor that started it sees its outcome. */
+  async function writeSegment(
+    action: SegmentOperation,
+    write: () => Promise<void>,
+    apply: (meeting: MeetingDetail) => void,
+    message: string,
+  ) {
+    const meeting = state.meeting;
+    if (!meeting) return;
+    const token = segmentToken;
+    const isCurrent = () => token === segmentToken;
+    state.segmentOperation = action;
+    try {
+      await write();
+      if (!isCurrent()) return;
+      apply(meeting);
+      resetSegmentEdit();
+    } catch (error) {
+      if (!isCurrent()) return;
+      log(`Failed to ${action} segment:`, error);
+      state.segmentError = { action, message };
+    } finally {
+      if (isCurrent()) state.segmentOperation = null;
+    }
+  }
+
+  async function saveSegmentEdit() {
+    const segmentId = state.editingSegmentId;
+    if (segmentId === undefined || !state.meeting || state.segmentOperation) return;
+    const text = state.segmentText.trim();
+    if (!text) {
+      cancelSegmentEdit();
+      return;
+    }
+    await writeSegment(
+      "save",
+      () => port.updateSegmentText(segmentId, text),
+      (meeting) => {
+        const line = meeting.transcript.find((item) => item.id === segmentId);
+        if (line) line.text = text;
+      },
+      "Could not save this correction. Your edit is still here; retry saving or cancel.",
+    );
+  }
+
+  async function deleteSegment(segmentId: number) {
+    if (!state.meeting || state.segmentOperation || state.editingSegmentId !== segmentId) return;
+    await writeSegment(
+      "delete",
+      () => port.deleteSegment(segmentId),
+      (meeting) => {
+        meeting.transcript = meeting.transcript.filter((item) => item.id !== segmentId);
+      },
+      "Could not delete this segment. Your edit is still here; retry deleting or cancel.",
+    );
+  }
+
+  /* ---------- enhanced action items ---------- */
+
+  function startActionItemEdit() {
+    state.actionItemDrafts = extractActionItemEntries(state.enhancedMd).map((item: { title: string }) => item.title);
+    state.actionItemError = null;
+    state.actionItemStatus = null;
+    state.editingActionItems = true;
+  }
+
+  function cancelActionItemEdit() {
+    if (state.savingActionItems) return;
+    state.editingActionItems = false;
+    state.actionItemDrafts = [];
+    state.actionItemError = null;
+  }
+
+  /** Save renamed action items; linked Board cards follow them. */
+  async function saveActionItemEdits() {
+    const meeting = state.meeting;
+    if (!meeting || state.savingActionItems) return;
+    const titles = state.actionItemDrafts.map((item) => item.trim());
+    if (titles.some((item) => !item)) {
+      state.actionItemError = "Action items cannot be empty.";
+      return;
+    }
+    const entries: Array<{ sourceIndex: number; title: string }> = extractActionItemEntries(state.enhancedMd);
+    const edits = entries.flatMap(({ sourceIndex, title: originalTitle }, index) => {
+      const title = titles[index];
+      if (!title || title === originalTitle) return [];
+      return [{ sourceIndex, originalTitle, title }];
+    });
+    if (edits.length === 0) {
+      cancelActionItemEdit();
+      return;
+    }
+
+    const originalMarkdown = state.enhancedMd;
+    const enhancedMarkdown: string = replaceActionItems(originalMarkdown, edits);
+    const token = ++actionItemToken;
+    const isCurrent = () => token === actionItemToken;
+    state.savingActionItems = true;
+    state.actionItemError = null;
+    try {
+      await port.updateEnhancedActionItems({ meetingId: meeting.id, originalMarkdown, enhancedMarkdown, edits });
+      if (!isCurrent()) return;
+      state.enhancedMd = enhancedMarkdown;
+      renderNow();
+      state.editingActionItems = false;
+      state.actionItemDrafts = [];
+      state.actionItemStatus = "Action items updated. Linked board cards were updated too.";
+    } catch (error) {
+      if (!isCurrent()) return;
+      state.actionItemError = `Could not update action items: ${String(error)}`;
+    } finally {
+      if (isCurrent()) state.savingActionItems = false;
+    }
+  }
+
   return {
     state,
 
@@ -186,6 +364,8 @@ export function createMeetingView(
     open(id: number, searchParams: URLSearchParams): () => void {
       const route = ++routeToken;
       streamToken++;
+      segmentToken++;
+      actionItemToken++;
       const isCurrent = () => route === routeToken;
       const mode = searchParams.get("mode");
       cancelRender?.();
@@ -197,6 +377,8 @@ export function createMeetingView(
         if (!isCurrent()) return;
         routeToken++;
         streamToken++;
+        segmentToken++;
+        actionItemToken++;
       };
       if (!Number.isInteger(id)) {
         state.notFound = true;
@@ -230,6 +412,21 @@ export function createMeetingView(
     },
 
     enhance,
+
+    /** The enhanced notes' action items, in document order. */
+    get actionItems(): Array<{ sourceIndex: number; title: string }> {
+      return extractActionItemEntries(state.enhancedMd);
+    },
+
+    startSegmentEdit,
+    cancelSegmentEdit,
+    /** Save the correction; a failure keeps it and offers a retry. */
+    saveSegmentEdit,
+    /** Delete the segment being edited; a failure keeps the editor and offers a retry. */
+    deleteSegment,
+    startActionItemEdit,
+    cancelActionItemEdit,
+    saveActionItemEdits,
 
     /** The notes textarea changed; save it (debounced) to this Meeting. */
     notesChanged() {
@@ -276,6 +473,8 @@ export function createMeetingView(
     dispose() {
       routeToken++;
       streamToken++;
+      segmentToken++;
+      actionItemToken++;
       cancelRender?.();
       cancelRender = null;
       unsubscribeNotes();

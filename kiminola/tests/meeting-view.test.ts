@@ -10,8 +10,9 @@ const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 const configuredProvider: ProviderConfig = {
@@ -24,6 +25,7 @@ const configuredProvider: ProviderConfig = {
 /** A fake database and native side. `observed` records what each read or stream saw in the database. */
 function harness(overrides: Partial<MeetingViewPort> = {}) {
   const notes = new Map([[1, "notes 1"], [2, "notes 2"]]);
+  const enhanced = new Map<number, string>();
   const observed: string[] = [];
   const streams: Array<(event: LlmStreamEvent) => void> = [];
   const timers = new Set<() => void>();
@@ -47,8 +49,11 @@ function harness(overrides: Partial<MeetingViewPort> = {}) {
     location_path: null,
     parent_meeting_id: null,
     notepad: notes.get(id) ?? "",
-    enhanced_markdown: null,
-    transcript: [],
+    enhanced_markdown: enhanced.get(id) ?? null,
+    transcript: [
+      { id: id * 10, channel: "you", text: `Original ${id}` },
+      { id: id * 10 + 1, channel: "others", text: `Other ${id}` },
+    ],
   });
   const port: MeetingViewPort = {
     getMeeting: async (id) => meeting(id),
@@ -62,6 +67,11 @@ function harness(overrides: Partial<MeetingViewPort> = {}) {
     exportTranscriptText: async () => "You: hello",
     saveNotesExport: async (id) => { observed.push(`export ${notes.get(id)}`); return "notes.md"; },
     saveTranscriptExport: async () => "transcript.txt",
+    updateSegmentText: async (id, text) => { observed.push(`segment ${id} "${text}"`); },
+    deleteSegment: async (id) => { observed.push(`delete segment ${id}`); },
+    updateEnhancedActionItems: async ({ meetingId, edits }) => {
+      observed.push(`action items ${meetingId} ${edits.map((edit) => `${edit.sourceIndex}:${edit.title}`).join("|")}`);
+    },
     writeClipboard: async () => {},
     renderMarkdown: (markdown) => { renders.push(markdown); return `<p>${markdown}</p>`; },
     delay: (_milliseconds, run) => { timers.add(run); return () => timers.delete(run); },
@@ -76,6 +86,7 @@ function harness(overrides: Partial<MeetingViewPort> = {}) {
     streams,
     renders,
     writes,
+    enhanced,
     open: (id: number, search = "") => view.open(id, new URLSearchParams(search)),
     edit(text: string) { view.state.notes = text; view.notesChanged(); },
     runTimers() { const due = [...timers]; timers.clear(); due.forEach((run) => run()); },
@@ -272,4 +283,232 @@ test("returning to a meeting shows its unsaved notes, and leaving saves edits", 
   h.view.dispose();
   await settle();
   assert.equal(h.notepad.pending(meetingNotepad(1)), undefined);
+});
+
+/* ---------- transcript corrections ---------- */
+
+async function editing(overrides: Partial<MeetingViewPort> = {}) {
+  const h = harness(overrides);
+  h.open(1);
+  await settle();
+  const [first, second] = h.state.meeting!.transcript;
+  return { h, first, second };
+}
+
+test("a correction saves trimmed text and closes the editor; Cancel never writes", async () => {
+  const { h, first } = await editing();
+  h.view.startSegmentEdit(first);
+  h.state.segmentText = "Unwanted correction";
+  h.view.cancelSegmentEdit();
+  await h.view.saveSegmentEdit();
+  assert.deepEqual(h.observed, []);
+  assert.equal(h.state.editingSegmentId, undefined);
+
+  h.view.startSegmentEdit(first);
+  h.state.segmentText = "  Corrected sentence  ";
+  await h.view.saveSegmentEdit();
+  assert.deepEqual(h.observed, ['segment 10 "Corrected sentence"']);
+  assert.equal(h.state.meeting!.transcript[0].text, "Corrected sentence");
+  assert.equal(h.state.editingSegmentId, undefined);
+});
+
+test("a failed correction keeps the edit and its error until a retry succeeds", async () => {
+  let fail = true;
+  const writes: string[] = [];
+  const { h, first } = await editing({
+    updateSegmentText: async (id, text) => {
+      writes.push(`${id} ${text}`);
+      if (fail) throw new Error("disk full");
+    },
+  });
+  h.view.startSegmentEdit(first);
+  h.state.segmentText = "  Corrected sentence  ";
+  await h.view.saveSegmentEdit();
+  assert.equal(h.state.editingSegmentId, 10);
+  assert.equal(h.state.segmentText, "  Corrected sentence  ");
+  assert.equal(h.state.meeting!.transcript[0].text, "Original 1");
+  assert.equal(h.state.segmentError?.action, "save");
+  assert.match(h.state.segmentError!.message, /retry saving/);
+  assert.equal(h.state.segmentOperation, null);
+
+  fail = false;
+  await h.view.saveSegmentEdit();
+  assert.deepEqual(writes, ["10 Corrected sentence", "10 Corrected sentence"]);
+  assert.equal(h.state.meeting!.transcript[0].text, "Corrected sentence");
+  assert.equal(h.state.editingSegmentId, undefined);
+  assert.equal(h.state.segmentError, null);
+});
+
+test("a failed delete keeps the correction and offers a delete retry", async () => {
+  let fail = true;
+  const deletions: number[] = [];
+  const { h, first } = await editing({
+    deleteSegment: async (id) => {
+      deletions.push(id);
+      if (fail) throw new Error("disk unavailable");
+    },
+  });
+  h.view.startSegmentEdit(first);
+  h.state.segmentText = "Correction to keep after failed deletion";
+  await h.view.deleteSegment(10);
+  assert.equal(h.state.editingSegmentId, 10);
+  assert.equal(h.state.segmentText, "Correction to keep after failed deletion");
+  assert.equal(h.state.meeting!.transcript.length, 2);
+  assert.equal(h.state.segmentError?.action, "delete");
+  assert.match(h.state.segmentError!.message, /could not delete/i);
+
+  fail = false;
+  await h.view.deleteSegment(10);
+  assert.deepEqual(deletions, [10, 10]);
+  assert.equal(h.state.editingSegmentId, undefined);
+  assert.deepEqual(h.state.meeting!.transcript.map((line) => line.id), [11]);
+  assert.equal(h.state.segmentError, null);
+});
+
+for (const operation of ["save", "delete"] as const) {
+  test(`an in-flight ${operation} locks the editor against saves, deletes, Cancel, and switching rows`, async () => {
+    const written = deferred();
+    const writes: string[] = [];
+    const deletions: number[] = [];
+    const { h, first, second } = await editing({
+      updateSegmentText: (id, text) => { writes.push(`${id} ${text}`); return written.promise; },
+      deleteSegment: (id) => { deletions.push(id); return written.promise; },
+    });
+    h.view.startSegmentEdit(first);
+    h.state.segmentText = "In flight";
+    const running = operation === "save" ? h.view.saveSegmentEdit() : h.view.deleteSegment(10);
+    assert.equal(h.state.segmentOperation, operation);
+
+    void h.view.saveSegmentEdit();
+    void h.view.deleteSegment(10);
+    h.view.cancelSegmentEdit();
+    h.view.startSegmentEdit(second);
+    assert.deepEqual(writes, operation === "save" ? ["10 In flight"] : []);
+    assert.deepEqual(deletions, operation === "delete" ? [10] : []);
+    assert.equal(h.state.editingSegmentId, 10);
+    assert.equal(h.state.segmentText, "In flight");
+    assert.equal(h.state.meeting!.transcript.length, 2, "the row changes only after success");
+
+    written.resolve();
+    await running;
+    assert.equal(h.state.segmentOperation, null);
+    assert.equal(h.state.editingSegmentId, undefined);
+    if (operation === "save") assert.equal(h.state.meeting!.transcript[0].text, "In flight");
+    else assert.deepEqual(h.state.meeting!.transcript.map((line) => line.id), [11]);
+  });
+}
+
+for (const operation of ["save", "delete"] as const) {
+  for (const outcome of ["resolve", "reject"] as const) {
+    for (const destination of [1, 2]) {
+      test(`a late ${operation} ${outcome} cannot touch the editor after ${destination === 1 ? "reloading the meeting" : "opening another meeting"}`, async () => {
+        const late = deferred();
+        const next = deferred();
+        let calls = 0;
+        const { h } = await editing({
+          updateSegmentText: () => (++calls === 1 && operation === "save" ? late.promise : next.promise),
+          deleteSegment: () => late.promise,
+        });
+        h.view.startSegmentEdit(h.state.meeting!.transcript[0]);
+        h.state.segmentText = "Old route correction";
+        const first = operation === "save" ? h.view.saveSegmentEdit() : h.view.deleteSegment(10);
+
+        h.open(destination);
+        await settle();
+        assert.equal(h.state.editingSegmentId, undefined, "a route load resets the old editor");
+        const line = h.state.meeting!.transcript[0];
+        h.view.startSegmentEdit(line);
+        h.state.segmentText = "New route correction";
+        const saving = h.view.saveSegmentEdit();
+
+        if (outcome === "resolve") late.resolve();
+        else late.reject(new Error("old route write failed"));
+        await first;
+        assert.equal(h.state.meeting!.id, destination);
+        assert.deepEqual(h.state.meeting!.transcript.map((item) => item.text), [`Original ${destination}`, `Other ${destination}`]);
+        assert.equal(h.state.editingSegmentId, destination * 10);
+        assert.equal(h.state.segmentError, null);
+        assert.equal(h.state.segmentOperation, "save", "the old write must not unlock the newer one");
+
+        next.resolve();
+        await saving;
+        assert.equal(h.state.meeting!.transcript[0].text, "New route correction");
+      });
+    }
+  }
+}
+
+test("a late segment write does not mutate a disposed view", async () => {
+  const written = deferred();
+  const { h, first } = await editing({ updateSegmentText: () => written.promise });
+  h.view.startSegmentEdit(first);
+  h.state.segmentText = "Pending edit";
+  const saving = h.view.saveSegmentEdit();
+  h.view.dispose();
+  written.reject(new Error("destroyed page write failed"));
+  await saving;
+  assert.equal(h.state.segmentError, null);
+  assert.equal(h.state.segmentOperation, "save", "nothing is written back after disposal");
+  assert.equal(h.state.meeting!.transcript[0].text, "Original 1");
+});
+
+/* ---------- enhanced action items ---------- */
+
+test("renamed action items are saved with their source positions and block regeneration meanwhile", async () => {
+  const saved = deferred();
+  const inputs: Array<{ originalMarkdown: string; enhancedMarkdown: string }> = [];
+  const h = harness({
+    updateEnhancedActionItems: (input) => { inputs.push(input); return saved.promise; },
+  });
+  h.enhanced.set(1, "## Action Items\n- Send recap\n- Book room\n");
+  h.open(1);
+  await settle();
+  assert.deepEqual(h.view.actionItems.map((item: { title: string }) => item.title), ["Send recap", "Book room"]);
+
+  h.view.startActionItemEdit();
+  assert.deepEqual(h.state.actionItemDrafts, ["Send recap", "Book room"]);
+  h.state.actionItemDrafts[1] = "  ";
+  await h.view.saveActionItemEdits();
+  assert.equal(h.state.actionItemError, "Action items cannot be empty.");
+  assert.equal(inputs.length, 0);
+
+  h.state.actionItemDrafts[1] = "Book the large room";
+  const saving = h.view.saveActionItemEdits();
+  assert.equal(h.state.savingActionItems, true);
+  await h.view.enhance();
+  assert.equal(h.observed.some((entry) => entry.startsWith("enhance")), false, "no regeneration while editing");
+  h.view.cancelActionItemEdit();
+  assert.equal(h.state.editingActionItems, true, "Cancel cannot abort a save in flight");
+
+  saved.resolve();
+  await saving;
+  assert.equal(inputs[0].enhancedMarkdown, "## Action Items\n- Send recap\n- Book the large room\n");
+  assert.equal(h.state.enhancedMd, inputs[0].enhancedMarkdown);
+  assert.equal(h.state.editingActionItems, false);
+  assert.match(h.state.actionItemStatus!, /Linked board cards/);
+});
+
+test("a failed action-item save keeps the drafts; unchanged drafts just close the editor", async () => {
+  let fail = true;
+  const h = harness({
+    updateEnhancedActionItems: async () => { if (fail) throw new Error("board locked"); },
+  });
+  h.enhanced.set(1, "## Action Items\n- Send recap\n");
+  h.open(1);
+  await settle();
+  h.view.startActionItemEdit();
+  await h.view.saveActionItemEdits();
+  assert.equal(h.state.editingActionItems, false, "nothing changed, nothing saved");
+
+  h.view.startActionItemEdit();
+  h.state.actionItemDrafts[0] = "Send the recap";
+  await h.view.saveActionItemEdits();
+  assert.match(h.state.actionItemError!, /board locked/);
+  assert.equal(h.state.editingActionItems, true);
+  assert.deepEqual(h.state.actionItemDrafts, ["Send the recap"]);
+  assert.equal(h.state.enhancedMd, "## Action Items\n- Send recap\n");
+
+  fail = false;
+  await h.view.saveActionItemEdits();
+  assert.equal(h.state.enhancedMd, "## Action Items\n- Send the recap\n");
 });

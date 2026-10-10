@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, type Snippet } from "svelte";
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { ContextMenu } from "bits-ui";
@@ -14,7 +14,7 @@
   import Pencil from "@lucide/svelte/icons/pencil";
   import Plus from "@lucide/svelte/icons/plus";
   import type { LibraryLocation, LibraryNode } from "$lib/tauri";
-  import { canDropNode, nodeKey, nodeRef } from "$lib/library-tree";
+  import { nodeKey, nodeRef, type LibraryMoveValidation } from "$lib/library-tree";
   import LibraryTreeNode from "./LibraryTreeNode.svelte";
 
   type Props = {
@@ -22,9 +22,11 @@
     depth: number;
     collapsed: Record<string, boolean>;
     pathname: string;
-    tree: LibraryNode[];
+    moveValidation: LibraryMoveValidation;
     draggingNode: LibraryLocation | null;
     dropTarget: LibraryLocation | null;
+    creatingSpaceParentId: number | null;
+    createSpaceInput: Snippet<[placeholder: string]>;
     onToggle: (location: LibraryLocation) => void;
     onNewMeeting: (location: LibraryLocation) => void;
     onNewSpace: (parentSpaceId: number) => void;
@@ -42,9 +44,11 @@
     depth,
     collapsed,
     pathname,
-    tree,
+    moveValidation,
     draggingNode,
     dropTarget,
+    creatingSpaceParentId,
+    createSpaceInput,
     onToggle,
     onNewMeeting,
     onNewSpace,
@@ -74,7 +78,7 @@
     !!draggingNode && dropTarget?.kind === location.kind && dropTarget.id === location.id,
   );
   let isValidDropTarget = $derived(
-    !!draggingNode && canDropNode(draggingNode, location, tree),
+    !!draggingNode && moveValidation.canDrop(location),
   );
 
   function handleDragStart(event: DragEvent) {
@@ -229,15 +233,22 @@
       <div class="library-node-children" role="list" aria-label={`Contents of ${label}`}
         inert={isCollapsed} aria-hidden={isCollapsed}
         transition:slide={{ duration: reducedMotion ? 0 : 180, easing: cubicOut }}>
+        {#if node.kind === "space" && creatingSpaceParentId === node.id}
+          <div class="library-node-create" role="listitem">
+            {@render createSpaceInput("New sub-space")}
+          </div>
+        {/if}
         {#each node.children as child (nodeKey(nodeRef(child)))}
           <LibraryTreeNode
             node={child}
             depth={depth + 1}
             {collapsed}
             {pathname}
-            {tree}
+            {moveValidation}
             {draggingNode}
             {dropTarget}
+            {creatingSpaceParentId}
+            {createSpaceInput}
             {onToggle}
             {onNewMeeting}
             {onNewSpace}
@@ -250,7 +261,7 @@
             {onDragEnd}
           />
         {/each}
-        {#if !hasChildren}
+        {#if !hasChildren && creatingSpaceParentId !== node.id}
           <div class="library-node-empty" role="listitem">Empty Space</div>
         {/if}
       </div>
@@ -419,6 +430,12 @@
     padding: 5px 6px 7px calc(34px + (var(--tree-depth) + 1) * 18px);
     color: var(--text-muted);
     font-size: 11px;
+  }
+
+  .library-node-create :global(.space-input) {
+    box-sizing: border-box;
+    width: calc(100% - 32px - var(--tree-depth) * 18px);
+    margin: 2px 10px 6px calc(22px + var(--tree-depth) * 18px);
   }
 
   .library-node-icon {

@@ -1,6 +1,6 @@
 # Kiminola — Build-Ready Spec
 
-**Status:** Ready for implementation. All wayfinder decision tickets are resolved (see `.scratch/kiminola/map.md` and `issues/`). The library hierarchy decision is also adopted: Spaces and Meetings form a recursive organizational tree with validated reparenting.
+**Status:** The original meeting-product wayfinder is resolved (see `.scratch/kiminola/map.md` and `issues/`). The library hierarchy decision is also adopted: Spaces and Meetings form a recursive organizational tree with validated reparenting. System-wide dictation implementation is authorized under §8.2; native compatibility and release qualification remain unverified.
 
 ## 1. Product definition
 
@@ -12,10 +12,10 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 ## 2. Core loop
 
-1. **Idle / library** — sidebar shows Spaces tree and recent meetings; "New meeting" starts capture.
+1. **Idle / library** — sidebar shows Spaces tree, Boards, and recent meetings; "New meeting" starts capture.
 2. **Recording** — the full screen is a notes-first sketch notepad. A subtle **Live transcript** pill sits bottom-left; clicking it opens a floating square that pushes the notepad right. Mic and loopback channels transcribe in parallel, labeled **You** / **Others**. Concurrent partial utterances remain independent; finalized cross-source copies caused by laptop-speaker bleed are conservatively reconciled in favor of the clean loopback result.
 3. **Stop** — "Stop meeting" ends capture. Post-meeting defaults to the **My notes** tab with pills: **My notes → Enhance Notes → Transcript**.
-4. **Enhance (optional)** — user clicks **Enhance Notes**, picks a template, and gets a read-only AI artifact generated from their raw notes + transcript. Raw notes are never overwritten; re-enhance overwrites the AI artifact.
+4. **Enhance (optional)** — user clicks **Enhance Notes**, picks a template, and gets an AI artifact generated from their raw notes + transcript. Raw notes are never overwritten; re-enhance overwrites the AI artifact. Action items in enhanced notes can be edited and copied to a selected Board column. Editing an action item updates linked Board cards from that Meeting.
 
 ## 3. Stack
 
@@ -34,12 +34,13 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 ### 4.1 Frontend (Svelte + TypeScript)
 
-- Three screens: **Library/Idle**, **Recording**, **Post-meeting**.
+- Four primary surfaces: **Library/Idle**, **Recording**, **Post-meeting**, and **Boards**.
 - Fully collapsible sidebar via floating edge button; state persists in `localStorage`.
 - Top bar: "New meeting" primary action + light/dark theme toggle.
 - Recording view: full-screen notepad; live transcript pill bottom-left; stop button reads "Stop meeting".
 - Post-meeting view: pill tabs **My notes** / **Enhance Notes** / **Transcript**. Default tab: **My notes**.
-- Theme: light/dark; dark mode uses warm amber accent on deep charcoal canvas.
+- Boards view: user-created Boards with customizable ordered columns and movable action-item cards.
+  - The board uses the available workspace width, with a horizontal board switcher above the columns. Board and column creation forms expand on demand. Narrow windows scroll columns inside the board rather than overflowing the page.
 - Updates: after the main app launches, Kimi Nola performs one non-blocking
   check against the published stable GitHub Release feed. A visible update
   notice offers release details, but download and installation always require
@@ -52,7 +53,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - **Audio pipeline**: WASAPI process-tree loopback when a meeting prompt supplies a PID, with classic default-output fallback, plus cpal mic → independent resampling → 16 kHz mono → sherpa-onnx streaming ASR per lane. The lanes are never mixed before ASR.
 - **Transcript events**: each lane emits stable utterance IDs, monotonically increasing revisions, partial/final state, and audio-relative segment timing. On stop, capture queues drain, both ASR lanes flush, and the backend returns an authoritative final snapshot before persistence.
 - **Echo reconciliation**: finalized mic/system segments are compared only when their audio windows overlap. High-confidence text matches retain the system (`Others`) copy; short acknowledgements and non-overlapping repetition are never automatically suppressed. This is a local transcript correction, not speaker diarization or audio retention.
-- **Persistence**: sqlx + SQLite; tables for meetings, timestamped transcript segments, notes, spaces, templates, settings. Each Meeting has exactly one direct container (`space_id` or `parent_meeting_id`), and recursive location paths are computed for library views and exports.
+- **Persistence**: sqlx + SQLite; tables for meetings, timestamped transcript segments, notes, spaces, templates, settings, boards, board columns, and board cards. Each Meeting has exactly one direct container (`space_id` or `parent_meeting_id`), and recursive location paths are computed for library views and exports.
 - **LLM enhancement**: ChatProvider trait with streaming SSE; sends transcript text + raw notes + template prompt to the configured cloud provider.
 - **Model manager**: downloads ASR model on first run from Hugging Face; verifies SHA-256; stores in `%LOCALAPPDATA%\Kiminola\models`.
 - **Updater**: Tauri updater plugin with one embedded public key and the stable
@@ -64,17 +65,22 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 ## 5. UI/UX decisions
 
-- Sidebar navigation: **Home** only; Spaces is a recursive tree. Spaces may contain nested Spaces and Meetings, and Meetings may contain child Meetings at arbitrary depth. Context menus and drag-and-drop use the same validated move operation; sibling ordering is not user-controlled in this pass.
+- Sidebar navigation: **Home** and **Boards**; Spaces is a recursive tree. Spaces may contain nested Spaces and Meetings, and Meetings may contain child Meetings at arbitrary depth. Context menus and drag-and-drop use the same validated move operation; sibling ordering is not user-controlled in this pass.
+- At compact widths (760 CSS pixels or less), navigation opens as a modal drawer with keyboard focus containment, Escape dismissal, and focus restoration. Desktop collapse preference remains independent. Long libraries scroll within the navigation area while Settings stays visible.
 - Space and parent-Meeting branches expand independently, with consistent indentation and hairline connectors. Open/closed state persists locally; navigating to a Meeting reveals its ancestors. Disclosure arrows point right when closed and down when open. Branch height and arrows transition over 180 ms, with no motion when reduced motion is enabled. Enter/Space activate the focused control; Left/Right close/open branches and move between parent and child controls.
 - New meetings inherit an explicit Space or Meeting destination from the action that started them. Global New meeting and the shortcut use the last explicit destination, falling back to Personal. The destination is captured when recording starts.
+- Navigating from one recording URL to another requires the current episode's normal exit guard. After successful recovery persistence, the destination starts a fresh recording episode, with separate draft, notes, transcript, timer, and controls; failed persistence leaves the original episode intact.
 - Removed from prototype: Invite, Shared with me, Chat — out of MVP scope.
-- Live transcript auto-scrolls; scrollbar hidden until user scrolls.
-- Global hotkey: configurable start/stop (Tauri global-shortcut plugin), sensible default.
-- Onboarding: minimal first-run wizard — mic permission → model download with progress → optional BYOK key (skippable).
+- Live transcript opens at the latest speech and follows new lines and partial revisions only while the reader is near the bottom; scrollbar hidden until user scrolls. Recovered rows and live utterances have disjoint stable renderer identities.
+- Transcript corrections save explicitly; Cancel never saves. Failed saves retain the correction and display a retryable error.
+- Global hotkey: configurable start/stop (Tauri global-shortcut plugin), sensible default. Invalid or unavailable replacements preserve the active binding; persistence and compensation failures are visible rather than silently disabling it.
+- Onboarding: minimal first-run wizard — mic permission → model download with progress → optional BYOK key (skippable). The microphone step checks permission only and does not display simulated audio levels. Provider saves/tests lock conflicting edits and actions until IPC settles; results apply only to the submitted configuration in the current wizard instance, and any provider/model/key edit clears the previous test result.
+- AI credentials are scoped to provider kind and normalized full Base URL, excluding model. Provider/endpoint edits clear replacement credentials and stale saved-key status; returning to the unchanged saved identity restores only its previously confirmed presence. Other destinations can be saved without a connection test to read back their own credential status. Legacy unscoped credentials are not reused or migrated because their destination cannot be proven; users re-enter their key. Requests do not follow redirects outside the configured endpoint.
 - AI provider settings: when OpenRouter is selected, an explicit catalog refresh fetches the current model list from OpenRouter and exposes a searchable model selector. A failed refresh leaves manual model-ID entry available.
 - Companion layout: when the user chooses **Start recording** from a Meeting prompt, Kimi Nola arranges the detected meeting window on the left at roughly two-thirds of the active display and its own Notepad window on the right at roughly one-third. Visible windows move and resize together in a 200 ms ease-out transition; reduced motion uses immediate placement. Hidden or minimized notes open at the destination. Starting a user move/resize, closing either window, or requesting another layout cancels the transition. The arrangement is a starting point: normal windows may be resized, true full-screen/presentation windows are not forced to change, and user movement/resizing is never overridden. During manual resizing, content follows the viewport immediately; only an explicit sidebar toggle animates the shell geometry.
 - Meeting-prompt recording also uses the detected meeting process tree as the preferred loopback target. Manual recording and unsupported/failed process activation use classic default-output loopback.
 - Active recordings checkpoint notes, elapsed duration, and the latest transcript revisions into a SQLite note draft. An interrupted session remains visible in the library and can be continued into a normal saved meeting; intentional cancellation removes only drafts created automatically for that recording.
+- Continuous edits cannot postpone the checkpoint attempt beyond five seconds; recovery snapshots are constructed when the serialized write executes. Recovery-only exits wait for successful persistence and retain the editor on failure, with retry or explicit discard. A separate successful meeting save may provide durability when checkpointing fails.
 
 ## 6. Data model & storage
 
@@ -91,6 +97,9 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   - `templates` — id, name, prompt, is_builtin
   - `settings` — key, value
   - `search_index` — FTS5 virtual table over meeting titles, notes, transcript segments
+  - `boards` — id, name, created_at
+  - `board_columns` — id, board_id, name, position
+  - `board_cards` — id, column_id, nullable meeting_id, title, position, created_at
 - **Export**: Markdown rendered from DB with YAML frontmatter (title, date, space, duration).
 
 ## 7. Model management
@@ -110,6 +119,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Summary templates: general default + built-in library (1:1, hiring, weekly team, customer discovery, VC pitch) + user-created custom templates
 - Inline transcript editing
 - Configurable global hotkey
+- User-created Boards with customizable columns and action-item cards linked back to Meetings
 - Minimal first-run wizard
 
 **OUT:**
@@ -129,16 +139,27 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 - Meeting presence is an opt-in background companion. Closing the main window
   hides it and leaves the companion running; tray Quit exits fully.
-- Detection stays local and advisory. A prompt requires two independent
-  signals: a known process or visible app window plus an active Core Audio
-  session. A single signal remains a quiet possible hint with coarse evidence
-  labels; detection never starts recording. Prompts defer while Windows reports
-  presentation mode or a full-screen foreground app.
+- Detection stays local and advisory, inspecting session metadata without
+  opening capture streams. A recognized native meeting app requires its process
+  or visible window plus an active Core Audio session. Other apps use a balanced
+  fallback: a visible app window and both active input and output sessions
+  associated with the same app family for two consecutive successful detector
+  polls. Playback alone or input alone is not enough for an unknown app to
+  prompt. Activity means running streams, not audible speech; this is never
+  proof of a meeting. Partial evidence remains a quiet possible hint with
+  coarse evidence labels; detection never starts recording. Prompts defer
+  while Windows reports presentation mode or a full-screen foreground app.
 - Detection associates helper-process audio with its meeting-app process family
   and checks all active input/output audio endpoints, including non-default
   headsets. Episode suppression and process-loopback capture use the family
   root; Companion layout targets the family's visible application window.
   Unrelated processes are never grouped solely by matching executable names.
+  Unknown apps may associate same-executable descendants and embedded WebView
+  helpers with their visible owner, but never use an arbitrary shell ancestor
+  as the owner. Browser audio is only app-family evidence, not proof about a
+  particular tab. Browsers use the balanced input/output rule even when a
+  meeting title supplies a friendly label. Unattributable activity must not
+  be presented as certain.
 - Initial friendly labels are Granola, Zoom, Microsoft Teams, Google Meet,
   Webex, and a generic “another app” fallback. Raw executable names, window
   titles, URLs, calendar metadata, and detector history are not persisted or
@@ -154,16 +175,81 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   notifications. Episodes observed during recording remain suppressed until the
   normal inactivity reset; a later meeting may prompt again.
 - At most one prompt is shown per active meeting-presence episode for an app.
+  An eligible recognized native meeting app may replace an unanswered generic-app
+  prompt; the superseded episode stays consumed and its old actions are stale.
   Any prompt action suppresses only that episode; after two consecutive
   detector polls without active meeting audio, the next meeting may prompt
   again even if the meeting app process remains open. Prompt actions are
   accepted only while their prompt ID is current; stale or unknown actions
   are rejected without recording.
 - One inactive poll does not discard an unanswered prompt. Two inactive polls
-  clear it and rearm the episode; process exit clears it immediately. Activity
-  continues to update while presentation/full-screen mode defers visible prompts.
+  clear it and rearm the episode; observed process exit or PID reuse clears it
+  immediately. Creation times distinguish successive processes sharing a PID.
+  Explicit recording actions revalidate the process instance before queuing
+  and consuming a capture target; a changed target fails rather than recording
+  a replacement app. Hidden windows and incomplete audio scans do not establish
+  inactivity. Failed scans break onset/inactivity streaks without clearing
+  explicit dismissals. Activity continues to update while presentation/full-screen
+  mode defers visible prompts.
+- Pausing suppresses prompts while local metadata observation continues, so
+  meeting endings still rearm episodes. Unanswered prompts may return on resume
+  with fresh action IDs; explicitly dismissed episodes remain suppressed until
+  their normal inactivity reset. Disabling detection stops observation and
+  clears runtime state.
 - Settings expose Meeting detection and Start with Windows. Tray status is
   “Detecting locally · not recording”, “Paused”, or “Off”.
+
+## 8.2 System-wide dictation
+
+Planning map: [Plan system-wide dictation for Kimi Nola](https://github.com/Trillx/Kiminola/issues/43). The maintainer has authorized implementation of the lifecycle and processing/delivery contract below. Historical research and unresolved qualification tickets do not establish measured runtime behavior or certified application support.
+
+Adopted lifecycle decision: [Define dictation lifecycle, privacy, and recovery](https://github.com/Trillx/Kiminola/issues/47#issuecomment-5788875062).
+
+### Scope and processing
+
+- Target Windows x64 and ARM64, English first, for email, team chat, coding apps, and browser text fields. Exact app compatibility is not yet validated.
+- Recognize speech locally. Audio never leaves the machine; baseline transcription works without an AI provider.
+- Users may opt into text-only Dictation cleanup through a configured Provider, including OpenRouter. Investigate local cleanup as well; an app-managed local cleanup model is not yet a commitment. The meeting MVP's local-LLM scope exclusion does not settle this new decision.
+- Remember an explicit dictation-specific cloud-cleanup opt-in. A Provider configured for Meeting notes does not grant dictation upload permission. A new remote endpoint requires renewed consent.
+- Cleanup removes filler, handles spoken corrections, and adds punctuation, paragraphs, or lists while preserving intended meaning. It does not summarize, add content, or adapt the writing persona to the destination app. Plain transcription is the default. If requested cleanup fails, retain raw text for explicit review/copy rather than silently delivering it or switching providers.
+- Use the existing Nemotron/sherpa-onnx pack for this implementation. Alternative speech-engine comparisons and small cleanup-model optimization are deferred. Wispr Flow is a behavioral reference, not an engine requirement. Optional cleanup reuses the configured text Provider; no new app-managed cleanup model is included.
+
+### Delivery and implementation verification
+
+- Deliver finalized text only. Guard automatic paste to the original, unchanged, supported editor behind explicit clipboard-use consent. Changes to the target or uncertainty about its eligibility require review/copy instead. No automatic delivery to password fields, elevated apps, or terminals; never submit text or simulate Enter.
+- Generic Windows focus checking and input delivery are not atomic. Validate eligibility and target identity again immediately before delivery, invalidate stale/cancelled work, and test only in disposable editors before declaring a destination supported. A dispatched paste is not proof that a target accepted the text; do not automatically retry an uncertain delivery.
+- Cleanup failure retains the raw transcript for review rather than silently delivering it or changing provider. A configured Meeting-note provider alone grants no dictation consent.
+- Approved test seams are public dictation commands/events for capture ownership and cancellation, provider requests through local fake-server responses, browser-visible settings/pill/recovery behavior, and Windows shortcuts/delivery in disposable test-owned editors. Tests do not type into real user applications or make paid provider calls.
+- Run Blast Radius against shared Meeting, provider, resident and update paths. Every implementation push is followed by Greploop and CI verification; no merge or release is implied by authorization to push.
+
+### Capture lifecycle
+
+- Dictation sessions are separate from Meetings. One dictation owns recording, processing and delivery at a time. Another dictation or Meeting must wait until that active work finishes or is explicitly cancelled; a conflicting request explains the conflict and never silently stops existing work.
+- Block dictation until an existing Meeting session ends, including while the Meeting is starting, paused or finalizing. Retained dictation recovery text does not block a Meeting because it no longer owns capture or processing.
+- Offer hold-to-talk and press-to-start/stop modes. In hold mode, releasing any key in the configured chord ends capture. The Windows shortcut probe must verify this contract; main-key-only release polling is not sufficient evidence. Apply the existing shortcut conflict/replacement safety rules from §5. Exact default bindings remain for the interaction decision.
+- Capture microphone audio only. Use the Windows default unless the user selects another microphone, then keep that device for the whole session. Default-device or selection changes apply to the next dictation; never silently switch devices mid-session.
+- Limit each dictation to ten minutes. At the limit, stop capture and preserve available text for review without automatic insertion.
+- On Windows lock/sleep or microphone loss, stop capture, cancel pending cleanup, invalidate automatic delivery and retain available text in memory. Never automatically resume capture or insert after recovery; review remains hidden while Windows is locked.
+- Explicit cancellation discards the attempt, cancels its pending cleanup and invalidates future delivery instead of creating a recovery item. It cannot retract text already sent to a provider or undo an external insertion. Late results from cancelled work have no delivery authority.
+
+### Resident operation and Dictation pill
+
+- Require a one-time explicit Enable dictation action. Starting with Windows remains a separate opt-in. Dictation enablement is independent of Meeting detection; the Background companion remains an advisory no-capture service.
+- Use a small, thin screen-edge Dictation pill with a user-selectable side. Hotkey activation shows waves representing microphone activity. Idle microphone capture is forbidden. Exact idle presentation, focus and accessibility behavior remain for the interaction prototype.
+- Keep the pill and shortcuts available after the main window closes until the user explicitly quits or disables dictation. Closing that window does not cancel an active dictation.
+- Explicit Quit or Disable stops capture and cancels cleanup immediately. If unsent text remains, offer copy or discard before completing the action. Cancelling that exit leaves review available, not a resumed recording. App updates wait until active dictation work and recovery are resolved.
+
+### Text history and recovery
+
+- Optional local Dictation history is off by default. When enabled, it stores final text only for 30 days, with individual and clear-all deletion; audio, surrounding app content and cancelled attempts are excluded. A completed result qualifies after verified delivery, explicit Copy, or explicit confirmation of uncertain delivery. Failed or interrupted attempts remain memory-only even when copied. Disabling history stops new saves; existing entries remain subject to expiry and explicit deletion rather than being silently erased.
+- Keep failed or interrupted dictation text only in memory until explicitly dismissed or the app quits. Do not persist failed attempts for crash/restart recovery. Available raw text is retained if cleanup fails; an incomplete provider response is not a successful final result.
+- Resolve pending recovery by copying or explicitly dismissing it before starting another dictation. Never silently replace the recovery text. A Meeting may start while that inactive recovery remains available.
+
+### Remaining release qualification
+
+- Named application/version coverage, native hardware performance and final interaction acceptance remain release gates. Unsupported or unverified automatic-delivery targets retain review/copy fallback; compilation or a mock passing is not a compatibility result. Deferred model investigations do not block the approved existing-model implementation.
+- The initial implementation certifies no automatic-delivery targets. Its empty certification allowlist forces review/copy before any foreground-editor inspection, clipboard publication or automatic paste. Explicit Copy is separate from automatic delivery. Native fixture evidence and remaining qualification limits are recorded in `kiminola/src-tauri/tests/dictation-native/README.md`.
+- Cloud audio transcription, audio retention, multilingual launch support, always-listening activation, and general voice-command automation remain outside scope.
 
 ## 9. Packaging & distribution
 
@@ -171,12 +257,36 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - **Signing**: SignPath.io OSS Authenticode signing is separate from the Tauri
   updater signing key. The updater public key is committed; its private key and
   password exist only in GitHub Actions secrets and an offline maintainer
-  backup.
+  backup. Tag jobs submit the release executable and final installer to SignPath,
+  require a valid Authenticode chain, then generate the updater signature over the
+  final Authenticode-signed installer bytes. Final verification downloads the
+  exact assets and re-checks both signature systems.
 - **Auto-update**: Tauri built-in updater + GitHub Releases JSON manifest. Tag
-  pushes create a draft, build x64 and ARM64 assets in parallel, then generate
-  `latest.json` in a serialized validation job before manual publication.
+  pushes first validate the tag and synchronized application versions, then
+  use a GitHub-hosted gate to dispatch the physical x64 + ARM64 checks in a
+  separate workflow and verify success for the exact tag commit before creating a
+  draft. This keeps self-hosted jobs outside SignPath's trusted-build dependency
+  graph. Native release jobs bundle the already architecture-checked executable,
+  pass complete portable archives and SHA-256 provenance through short-lived
+  workflow artifacts, and keep repository-write access in minimal publishing
+  jobs. Signed installers use the canonical
+  `Kimi.Nola_<version>_<arch>-setup.exe` asset name. Read-only final verification
+  checks downloaded hashes, installer and extracted portable-executable
+  Authenticode, updater signatures, and the actual PE architecture of every
+  portable executable and native DLL. It generates `latest.json`; a publishing job uploads and
+  downloads it again for byte-for-byte and exact-asset verification before manual
+  publication.
 - **Channels**: GitHub Releases primary; winget secondary; Microsoft Store post-MVP.
-- **CI**: GitHub Actions — x64 native on `windows-latest`; ARM64 cross-compiled to `aarch64-pc-windows-msvc` from x64 runner. Fallback: manual/self-hosted ARM64 builds on Snapdragon X Elite.
+- **CI**: GitHub Actions uses explicit Windows runners: x64 on `windows-2025`
+  and native ARM64 on `windows-11-arm`. Every pull request and `main` push runs
+  frontend checks and browser regressions once, Rust formatting/clippy/full
+  tests on x64, security audits, and native x64 + ARM64 unsigned package/startup
+  validation. Version tags also run both unsigned package jobs. Unsigned
+  installers and complete portable archives (the executable
+  plus all four native runtime DLLs) are retained for seven days; updater signing
+  is available only to the tag release workflow. Production npm dependencies
+  are audited at moderate severity or higher in addition to Cargo and dependency
+  review gates.
 
 ## 10. Privacy & telemetry
 
@@ -187,10 +297,42 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 ## 11. Hardware targets & testing
 
 - **Targets**: Windows x64 (`x86_64-pc-windows-msvc`) and ARM64 (`aarch64-pc-windows-msvc`).
-- **Validation**: Snapdragon X Elite Copilot+ PC (32 GB) for ARM64; GitHub Actions for x64 CI.
+- **Validation**: GitHub-hosted x64 and ARM64 runners cover native compilation,
+  installer creation, PE-architecture checks, and executable startup on every
+  pull request and `main` push. Dedicated self-hosted x64 and Snapdragon X
+  Elite ARM64 runners, labeled `kiminola-hardware`, run nightly/manual physical
+  microphone capture of a known 440 Hz stimulus on an explicitly provisioned
+  non-virtual input device, requiring a material increase over a matched
+  stimulus-off baseline while the source remains live, WASAPI loopback, deterministic
+  installed-model speech transcription, installer, and
+  previous-version preservation checks, and the same workflow is a required
+  pre-draft tag-release gate. A missing runner configuration fails visibly rather
+  than producing a green no-op. The update baseline is the highest updater-signed
+  stable release strictly older than the candidate; explicit baselines must meet
+  the same rule. Routine and release-correlated hardware runs use distinct
+  concurrency keys so a scheduled run cannot replace a pending release gate;
+  dedicated single-job runner services serialize destructive work on each
+  physical machine. Hardware validation verifies native OS/process/LLVM
+  architecture, backs up the pre-existing application directory, complete
+  persistent user root, installer registry keys, and desktop and Start Menu
+  shortcuts under a same-volume persistent recovery root, and records each
+  destructive transition in an atomic journal, including registry export before
+  live-key removal. A later run recovers or halts on that journal immediately after
+  checkout and before tool setup or fixture access, and recovery data is deleted
+  only after complete restoration. The workflow also authenticates the previous
+  installer, verifies the installed executable and native-DLL architecture, and
+  waits for a semantically complete legacy migration history before seeding upgrade
+  data. The pre-publication gate upgrades by executing the
+  verified candidate installer directly because the app's stable feed excludes
+  drafts; in-app updater discovery and installation are smoke-tested on both
+  architectures immediately after publication.
 - **Spike results**: native ARM64 WASAPI loopback delivered non-silent packets; sherpa-onnx v1.13.5 Nemotron INT8 ran at 0.14 weighted RTF, 865 MiB peak working set, 2.6% normalized WER.
 - **Transcript regression matrix**: remote-only playback is `Others`; local-only mic speech is `You`; double-talk retains both lanes; speaker bleed does not create a duplicate `You` line; short acknowledgements are not over-suppressed; and stop waits for finalized text with monotonic audio-relative timing.
 - **Update regression**: on both x64 and ARM64, install a prior stable build,
-  preserve a meeting/database marker and the downloaded model, accept a signed
-  update, and verify the new app launches once with both data locations intact.
-  A green CI build is not runtime proof of updater safety.
+  insert a complete semantic fixture into its untouched database, preserve the
+  downloaded model, install and launch the candidate so it applies any pending
+  current migrations, and verify complete migration history plus the exact meeting,
+  notes, transcript, template, setting, recovery draft, library destination, and
+  model hashes remain intact. When no migration is pending, the same gate verifies
+  the unchanged history and data. After publication, also accept the signed update through the app
+  on both architectures. A green CI build is not runtime proof of updater safety.

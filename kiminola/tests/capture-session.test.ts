@@ -34,6 +34,7 @@ function harness({ last = null as LibraryLocation | null, draft = null as NoteDr
     quitBlocked(): void;
   };
   const failDraftWrites = new Set<number>();
+  const writes = { gate: Promise.resolve() };
   const notepadPort: NotepadPort = {
     updateNotes: async () => { throw new Error("unexpected meeting write"); },
     updateNoteDraft: async (id, text) => {
@@ -42,6 +43,7 @@ function harness({ last = null as LibraryLocation | null, draft = null as NoteDr
     },
     updateNoteDraftRecovery: async (id, text, seconds, transcript, location) => {
       calls.push(`checkpoint ${id} "${text}" ${seconds}s [${transcript.map((line) => line.text).join("|")}] ${where(location)}`);
+      await writes.gate;
       if (failDraftWrites.has(id)) throw new Error("disk is busy");
     },
   };
@@ -52,6 +54,9 @@ function harness({ last = null as LibraryLocation | null, draft = null as NoteDr
     pauseRecording: async () => {},
     resumeRecording: async (): Promise<RecordingStartStatus> => capturing,
     saveMeeting: async (): Promise<number> => 9,
+    createNoteDraft: async (): Promise<number> => 5,
+    deleteNoteDraft: async () => {},
+    navigate: async (_href: string) => {},
   };
   const port: CapturePort = {
     startRecording: () => { calls.push("start_recording"); return native.startRecording(); },
@@ -62,9 +67,9 @@ function harness({ last = null as LibraryLocation | null, draft = null as NoteDr
       calls.push(`save_meeting draft=${input.noteDraftId} ${where(input.location)} "${input.notepad}" ${input.durationSeconds}s [${input.segments.map((line) => line.text).join("|")}]`);
       return native.saveMeeting();
     },
-    createNoteDraft: async (location) => { calls.push(`create_note_draft ${where(location)}`); return 5; },
+    createNoteDraft: (location) => { calls.push(`create_note_draft ${where(location)}`); return native.createNoteDraft(); },
     getNoteDraft: async (id) => { calls.push(`get_note_draft ${id}`); return draft!; },
-    deleteNoteDraft: async (id) => { calls.push(`delete_note_draft ${id}`); },
+    deleteNoteDraft: (id) => { calls.push(`delete_note_draft ${id}`); return native.deleteNoteDraft(); },
     onTranscriptEvent: async (handler) => { emit.transcript = handler; return () => {}; },
     onAudioPressure: async (handler) => {
       emit.pressure = (mic, loopback) => handler({ mic_dropped_samples: mic, loopback_dropped_samples: loopback });
@@ -72,7 +77,7 @@ function harness({ last = null as LibraryLocation | null, draft = null as NoteDr
     },
     onShortcutTriggered: async (handler) => { emit.shortcut = handler; return () => {}; },
     onRecordingQuitBlocked: async (handler) => { emit.quitBlocked = handler; return () => {}; },
-    navigate: async (href) => { calls.push(`navigate ${href}`); },
+    navigate: (href) => { calls.push(`navigate ${href}`); return native.navigate(href); },
     now: () => clock,
     every: (_milliseconds, tick) => { ticker = tick; return () => { ticker = null; }; },
   };
@@ -85,6 +90,7 @@ function harness({ last = null as LibraryLocation | null, draft = null as NoteDr
     notepad,
     emit,
     failDraftWrites,
+    writes,
     open: (search = "") => session.open(new URLSearchParams(search)),
     /** Let time pass; the 1 s ticker may run late, so it fires once. */
     advance(milliseconds: number) { clock += milliseconds; ticker?.(); },
@@ -209,7 +215,7 @@ test("a startup failure is surfaced and Try again reuses the prepared Note draft
   assert.equal(h.state.phase, "failed");
   assert.equal(h.state.startError, "Microphone access is blocked");
   assert.equal(h.session.canStop, false);
-  assert.equal(h.session.guardsNavigation, false);
+  assert.equal(h.session.guardsNavigation, true, "its notepad may hold edits not checkpointed yet");
   assert.equal(h.session.active, true, "the failed view still owns a recovery copy");
 
   h.native.startRecording = async () => capturing;
@@ -393,4 +399,247 @@ test("unmounting keeps the recovery copy and stops capture; the update boundary 
     "stop_recording",
     'checkpoint 5 "kept" 0s [last words] root',
   ]);
+});
+
+const recoveredDraft = (): NoteDraftDetail => ({
+  id: 5,
+  title: "Draft",
+  created_at: "2026-10-01T09:00:00Z",
+  updated_at: "2026-10-01T09:00:00Z",
+  raw_markdown: "recovered notes",
+  meeting_id: null,
+  recovery_duration_seconds: 10,
+  recovery_transcript: [],
+  recovery_location: null,
+});
+
+test("a finished Meeting does not depend on its recovery checkpoints", async () => {
+  const h = harness();
+  await h.open();
+  h.failDraftWrites.add(5);
+  h.state.notes = "save these notes";
+  h.session.notesChanged();
+  await h.session.finish("save");
+  assert.ok(h.calls.includes('save_meeting draft=5 root "save these notes" 0s []'));
+  assert.equal(h.calls.at(-1), "navigate /meeting/9");
+});
+
+for (const exit of ["recovery-copy", "cancel"] as const) {
+  test(`${exit === "cancel" ? "cancel" : "opening the recovery copy"} from a resumed draft leaves only once the notes and final transcript are saved`, async () => {
+    const h = harness({ draft: recoveredDraft() });
+    h.native.stopRecording = async () => ({ transcript: [speech(1, "final words")], finalization_warning: null });
+    const leave = () => (exit === "cancel" ? h.session.cancel() : h.session.leave("recovery-copy"));
+    await h.open("?draft=5");
+    h.failDraftWrites.add(5);
+    h.state.notes = "changed recovered notes";
+    h.session.notesChanged();
+
+    await leave();
+    assert.equal(h.state.phase, "finish_failed");
+    assert.equal(h.state.finishError, "disk is busy");
+    assert.equal(h.state.notes, "changed recovered notes");
+    assert.equal(h.session.guardsNavigation, true);
+    assert.equal(h.calls.some((call) => call.startsWith("navigate")), false);
+
+    h.failDraftWrites.delete(5);
+    await leave();
+    assert.equal(h.calls.at(-2), 'checkpoint 5 "changed recovered notes" 10s [final words] root');
+    assert.equal(h.calls.at(-1), exit === "cancel" ? "navigate /" : "navigate /note/5");
+    assert.deepEqual(h.calls.filter((call) => call.startsWith("delete_note_draft")), []);
+    assert.deepEqual(h.state.lines.map((line) => line.start_ms), [10_000], "the final transcript is offset");
+  });
+}
+
+for (const waitingOn of ["draft", "capture"] as const) {
+  test(`a leave queued behind startup waits for the ${waitingOn}, then stays after a failed checkpoint`, async () => {
+    const h = harness();
+    const ready = deferred<unknown>();
+    if (waitingOn === "draft") h.native.createNoteDraft = () => ready.promise as Promise<number>;
+    else h.native.startRecording = () => ready.promise as Promise<RecordingStartStatus>;
+    h.failDraftWrites.add(5);
+    const opening = h.open();
+    await settle();
+    await h.session.leave("/settings");
+    assert.equal(h.session.blocksNavigation, true, "other navigation waits for the queued leave");
+
+    ready.resolve(waitingOn === "draft" ? 5 : capturing);
+    await opening;
+    assert.equal(h.state.phase, "finish_failed");
+    assert.equal(h.state.finishError, "disk is busy");
+    assert.equal(h.state.exitPending, false);
+    assert.equal(h.session.blocksNavigation, false, "the failure is shown, not a silent lock");
+    assert.equal(h.calls.some((call) => call.startsWith("navigate")), false);
+  });
+}
+
+test("no other navigation can bypass a recovery write still in flight", async () => {
+  const h = harness();
+  await h.open();
+  const stored = deferred();
+  h.writes.gate = stored.promise;
+  const blockedWhileNavigating: boolean[] = [];
+  h.native.navigate = async () => { blockedWhileNavigating.push(h.session.blocksNavigation); };
+
+  const leaving = h.session.leave("/settings");
+  await settle();
+  assert.equal(h.state.phase, "stopping");
+  assert.equal(h.session.blocksNavigation, true);
+  stored.resolve();
+  await leaving;
+  assert.equal(h.calls.at(-1), "navigate /settings");
+  assert.deepEqual(blockedWhileNavigating, [false], "the teardown's own navigation is allowed");
+  assert.equal(h.session.blocksNavigation, false);
+});
+
+test("Back to meetings after a startup failure keeps unsaved notes when the write fails", async () => {
+  const h = harness();
+  h.native.startRecording = async () => { throw new Error("microphone unavailable"); };
+  await h.open();
+  h.failDraftWrites.add(5);
+  h.state.notes = "notes without capture";
+  h.session.notesChanged();
+  assert.equal(h.session.guardsNavigation, true);
+
+  await h.session.cancel();
+  assert.equal(h.state.phase, "finish_failed");
+  assert.equal(h.state.notes, "notes without capture");
+  assert.equal(h.calls.some((call) => call.startsWith("navigate") || call.startsWith("delete_note_draft")), false);
+
+  h.failDraftWrites.delete(5);
+  await h.session.cancel();
+  assert.deepEqual(h.calls.slice(-2), ['checkpoint 5 "notes without capture" 0s [] root', "navigate /"]);
+});
+
+for (const resumed of [false, true]) {
+  test(`discarding after a failed leave drops unsaved edits${resumed ? " but keeps an existing draft" : " and the automatic draft"}`, async () => {
+    const h = harness({ draft: recoveredDraft() });
+    await h.open(resumed ? "?draft=5" : "");
+    h.failDraftWrites.add(5);
+    h.state.notes = "discard me";
+    h.session.notesChanged();
+    await h.session.leave("/settings");
+    assert.equal(h.state.failedLeave, "/settings");
+
+    await h.session.discard();
+    assert.equal(h.calls.at(-1), "navigate /settings");
+    assert.deepEqual(h.calls.filter((call) => call.startsWith("delete_note_draft")), resumed ? [] : ["delete_note_draft 5"]);
+    assert.equal(h.calls.some((call) => call.startsWith("save_meeting")), false);
+    const written = h.calls.length;
+    await h.notepad.flush();
+    assert.equal(h.calls.length, written, "discarded edits are never written");
+  });
+}
+
+test("Keep recovery copy after a failed stop keeps the automatic draft", async () => {
+  const h = harness();
+  await h.open();
+  h.native.stopRecording = async () => { throw new Error("capture could not stop"); };
+  h.state.notes = "keep me after failed stop";
+  h.session.notesChanged();
+  await h.session.finish("save");
+  assert.equal(h.state.phase, "finish_failed");
+  assert.equal(h.state.finishError, "capture could not stop");
+
+  h.native.stopRecording = async () => ({ transcript: [], finalization_warning: null });
+  await h.session.cancel();
+  assert.deepEqual(h.calls.filter((call) => call.startsWith("delete_note_draft")), []);
+  assert.deepEqual(h.calls.slice(-2), ['checkpoint 5 "keep me after failed stop" 0s [] root', "navigate /"]);
+});
+
+test("a cancel whose stop fails keeps the draft and its unsaved edits until a retry stops capture", async () => {
+  const h = harness();
+  await h.open();
+  h.state.notes = "typed while recording";
+  h.session.notesChanged();
+  h.native.stopRecording = async () => { throw new Error("capture could not stop"); };
+
+  await h.session.cancel();
+  assert.equal(h.state.phase, "finish_failed");
+  assert.equal(h.state.finishError, "capture could not stop");
+  assert.equal(h.state.failedLeave, "/");
+  assert.deepEqual(h.calls.filter((call) => call.startsWith("delete_note_draft") || call.startsWith("navigate")), []);
+  assert.equal(h.notepad.pending(draftNotepad(5))?.text, "typed while recording", "pending recovery writes survive");
+
+  // Retrying the discard deletes the draft only once capture has stopped.
+  h.native.stopRecording = async () => ({ transcript: [], finalization_warning: null });
+  await h.session.discard();
+  assert.deepEqual(h.calls.slice(-3), ["stop_recording", "delete_note_draft 5", "navigate /"]);
+  assert.equal(h.session.active, false);
+});
+
+test("a recovery copy that could not be created at startup is created when leaving", async () => {
+  const h = harness();
+  h.native.createNoteDraft = async () => { throw new Error("database unavailable"); };
+  await h.open();
+  assert.equal(h.state.phase, "recording");
+  assert.equal(h.state.recoveryStatus, "Recovery copy unavailable");
+  h.state.notes = "notes without an initial draft";
+  h.session.notesChanged();
+
+  await h.session.leave("/");
+  assert.equal(h.state.phase, "finish_failed");
+  assert.equal(h.state.finishError, "database unavailable");
+
+  h.native.createNoteDraft = async () => 5;
+  await h.session.retryFinish();
+  assert.deepEqual(h.calls.slice(-3), [
+    "create_note_draft root",
+    'checkpoint 5 "notes without an initial draft" 0s [] root',
+    "navigate /",
+  ]);
+});
+
+test("Save as meeting after a failed leave keeps that intent on retry", async () => {
+  const h = harness();
+  await h.open();
+  h.failDraftWrites.add(5);
+  await h.session.leave("/");
+  assert.equal(h.state.failedLeave, "/");
+
+  h.native.saveMeeting = async () => { throw new Error("meeting write failed"); };
+  await h.session.finish("save");
+  assert.equal(h.state.phase, "finish_failed");
+  assert.equal(h.state.failedLeave, null);
+
+  h.native.saveMeeting = async () => 9;
+  await h.session.retryFinish();
+  assert.equal(h.calls.at(-1), "navigate /meeting/9");
+});
+
+test("Retry saving resumes a failed recovery-only leave without creating a Meeting", async () => {
+  const h = harness();
+  await h.open();
+  h.failDraftWrites.add(5);
+  h.state.notes = "keep these notes";
+  await h.session.leave("/");
+
+  h.failDraftWrites.delete(5);
+  h.state.notes = "latest after recovery failure";
+  h.session.notesChanged();
+  await h.session.retryFinish();
+  assert.deepEqual(h.calls.slice(-2), ['checkpoint 5 "latest after recovery failure" 0s [] root', "navigate /"]);
+  assert.equal(h.calls.some((call) => call.startsWith("save_meeting")), false);
+});
+
+test("a lazy checkpoint written after its session closed still holds that session's transcript", async () => {
+  const h = harness();
+  h.native.startRecording = async () => { throw new Error("microphone unavailable"); };
+  await h.open();
+  // Startup failed, so closing stops nothing and saves nothing: the debounced
+  // checkpoint is still pending, built from session state when it is written.
+  h.emit.transcript(speech(1, "first session"));
+  h.state.notes = "first notes";
+  h.session.notesChanged();
+  h.session.release();
+  await h.idle();
+  assert.equal(h.session.active, false);
+  assert.equal(h.calls.some((call) => call.startsWith("checkpoint")), false);
+
+  h.native.startRecording = async () => capturing;
+  h.native.createNoteDraft = async () => 6;
+  await h.open();
+  h.emit.transcript(speech(1, "second session"));
+  await h.notepad.flush(draftNotepad(5));
+  assert.equal(h.calls.at(-1), 'checkpoint 5 "first notes" 0s [first session] root');
+  await h.session.cancel();
 });

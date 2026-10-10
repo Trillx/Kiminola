@@ -39,6 +39,13 @@ const DATA_WRITES = new Set([
   "delete_template",
   "update_segment_text",
   "delete_segment",
+  "update_enhanced_action_items",
+  "create_board",
+  "rename_board",
+  "create_board_column",
+  "rename_board_column",
+  "add_board_card",
+  "move_board_card",
   "save_notes_export",
   "save_transcript_export",
   "set_global_shortcut",
@@ -128,6 +135,10 @@ export function onRecordingQuitBlocked(handler: () => void): Promise<UnlistenFn>
   return listen<unknown>("recording:quit-blocked", () => handler());
 }
 
+export function onRecordingStarted(handler: () => void): Promise<UnlistenFn> {
+  return listen<unknown>("recording:started", () => handler());
+}
+
 /* ---------- persistence (SQLite via src-tauri db.rs) ---------- */
 
 export interface MeetingSummary {
@@ -183,6 +194,85 @@ export type LibraryNode =
       duration_seconds: number;
       children: LibraryNode[];
     };
+export interface BoardCard {
+  id: number;
+  title: string;
+  position: number;
+  meeting_id: number | null;
+  meeting_title: string | null;
+  source_action_index: number | null;
+}
+
+export interface BoardColumn {
+  id: number;
+  name: string;
+  position: number;
+  cards: BoardCard[];
+}
+
+export interface Board {
+  id: number;
+  name: string;
+  created_at: string;
+  columns: BoardColumn[];
+}
+
+export interface BoardsSnapshot {
+  boards: Board[];
+  created_default: boolean;
+}
+
+export async function listBoards(): Promise<BoardsSnapshot> {
+  return invoke("list_boards");
+}
+
+export async function createBoard(name: string): Promise<number> {
+  return invoke("create_board", { name });
+}
+
+export async function renameBoard(boardId: number, name: string): Promise<void> {
+  await invoke("rename_board", { boardId, name });
+}
+
+export async function createBoardColumn(boardId: number, name: string): Promise<number> {
+  return invoke("create_board_column", { boardId, name });
+}
+
+export async function renameBoardColumn(columnId: number, name: string): Promise<void> {
+  await invoke("rename_board_column", { columnId, name });
+}
+
+export async function addBoardCard(input: {
+  boardId: number;
+  columnId: number;
+  title: string;
+  meetingId?: number | null;
+  sourceActionIndex?: number | null;
+  sourceEnhancedMarkdown?: string | null;
+}): Promise<BoardCard> {
+  return invoke("add_board_card", {
+    boardId: input.boardId,
+    columnId: input.columnId,
+    title: input.title,
+    meetingId: input.meetingId ?? null,
+    sourceActionIndex: input.sourceActionIndex ?? null,
+    sourceEnhancedMarkdown: input.sourceEnhancedMarkdown ?? null,
+  });
+}
+
+export async function moveBoardCard(cardId: number, columnId: number): Promise<void> {
+  await invoke("move_board_card", { cardId, columnId });
+}
+
+export async function updateEnhancedActionItems(input: {
+  meetingId: number;
+  originalMarkdown: string;
+  enhancedMarkdown: string;
+  edits: Array<{ sourceIndex: number; originalTitle: string; title: string }>;
+}): Promise<void> {
+  await invoke("update_enhanced_action_items", input);
+}
+
 
 export async function saveMeeting(input: {
   title: string;
@@ -469,6 +559,11 @@ export interface MeetingPresenceAction {
   draft_id?: number;
 }
 
+export interface MeetingPresenceError {
+  prompt_id: string;
+  message: string;
+}
+
 const MEETING_PRESENCE_ACTION_EVENT = "meeting-presence:action";
 
 export async function sendMeetingPresenceActionToMain(
@@ -517,6 +612,14 @@ export function onMeetingPresenceState(
   handler: (state: MeetingPresenceState) => void,
 ): Promise<UnlistenFn> {
   return listen<MeetingPresenceState>("meeting-presence:state", (payload) => {
+    handler(payload.payload);
+  });
+}
+
+export function onMeetingPresenceError(
+  handler: (message: MeetingPresenceError) => void,
+): Promise<UnlistenFn> {
+  return listen<MeetingPresenceError>("meeting-presence:error", (payload) => {
     handler(payload.payload);
   });
 }

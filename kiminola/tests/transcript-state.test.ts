@@ -14,6 +14,27 @@ function event(overrides: Partial<TranscriptEvent> & Pick<TranscriptEvent, "utte
   };
 }
 
+test("recovered, persisted, and live rows keep disjoint stable renderer keys", async () => {
+  // @ts-expect-error Node imports TypeScript directly.
+  const { createTranscriptRowKey } = await import("../src/lib/transcript-state.ts");
+  const key = createTranscriptRowKey();
+  const recovered: TranscriptLine[] = [
+    { channel: "you", text: "first recovered", start_ms: 0, end_ms: 50 },
+    { channel: "others", text: "second recovered", start_ms: 100, end_ms: 150 },
+    { channel: "you", text: "third recovered", start_ms: 200, end_ms: 250 },
+  ];
+  const initialKeys = recovered.map(key);
+  const partial = event({ utterance_id: 1, channel: "you", text: "new speech", is_partial: true });
+  const live = applyTranscriptEvent(recovered, partial);
+  const persisted = { id: 1, channel: "you" as const, text: "saved speech" };
+  assert.equal(new Set([...live, persisted].map(key)).size, 5);
+  assert.deepEqual(recovered.map(key), initialKeys);
+  const liveKey = key(live.find((line) => line.utterance_id === 1)!);
+  const revised = applyTranscriptEvent(live, { ...partial, revision: 2, text: "new speech grows" });
+  assert.equal(key(revised.find((line) => line.utterance_id === 1)!), liveKey);
+  assert.deepEqual(recovered.map(key), initialKeys);
+});
+
 test("keeps simultaneous partials from You and Others independent", () => {
   let lines: TranscriptLine[] = [];
   lines = applyTranscriptEvent(lines, event({
