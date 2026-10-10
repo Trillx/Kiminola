@@ -12,6 +12,15 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Repository configuration selects the release trust gates. Without SignPath,
+# installers carry only the Tauri updater signature; without registered
+# hardware runners, the physical x64/ARM64 gate is skipped with a warning.
+# Preflight rejects a partial SignPath configuration so a missing value cannot
+# silently downgrade a release to unsigned.
+env:
+  RELEASE_AUTHENTICODE: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT != '' && 'signpath' || 'none' }}
+  RELEASE_HARDWARE_GATE: ${{ vars.KIMINOLA_HARDWARE_CI == 'true' && 'required' || 'skipped' }}
+
 jobs:
   preflight:
     name: Release preflight
@@ -56,7 +65,7 @@ jobs:
             throw "Release tag '$env:RELEASE_TAG' does not match app version '$($config.version)'."
           }
 
-      - name: Verify release signing secrets before draft creation
+      - name: Verify release signing configuration before draft creation
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -68,22 +77,42 @@ jobs:
           SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
           SIGNPATH_SIGNER_THUMBPRINT: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT }}
         run: |
-          foreach ($name in @(
-            'TAURI_SIGNING_PRIVATE_KEY',
-            'TAURI_SIGNING_PRIVATE_KEY_PASSWORD',
+          # Windows removes empty environment variables, so read them without Get-Item.
+          foreach ($name in @('TAURI_SIGNING_PRIVATE_KEY', 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "$name is not configured for this repository."
+            }
+          }
+          $signPathNames = @(
             'SIGNPATH_API_TOKEN',
             'SIGNPATH_ORGANIZATION_ID',
             'SIGNPATH_PROJECT_SLUG',
             'SIGNPATH_SIGNING_POLICY_SLUG',
             'SIGNPATH_ARTIFACT_CONFIGURATION_SLUG',
             'SIGNPATH_SIGNER_THUMBPRINT'
-          )) {
-            if ([string]::IsNullOrWhiteSpace((Get-Item "Env:$name").Value)) {
-              throw "$name is not configured for this repository."
+          )
+          $configured = @($signPathNames | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
+          })
+          if ($env:RELEASE_AUTHENTICODE -eq 'signpath') {
+            foreach ($name in $signPathNames) {
+              if ($configured -notcontains $name) {
+                throw "$name is not configured for this repository."
+              }
             }
+            if ($env:SIGNPATH_SIGNER_THUMBPRINT -notmatch '^[0-9A-Fa-f]{40}$') {
+              throw 'SIGNPATH_SIGNER_THUMBPRINT must be the 40-character SHA-1 thumbprint of the approved SignPath certificate.'
+            }
+          } elseif ($env:RELEASE_AUTHENTICODE -eq 'none') {
+            if ($configured.Count -gt 0) {
+              throw "SignPath is partially configured ($($configured -join ', ')). Configure every SignPath secret and variable, or none of them."
+            }
+            Write-Host '::warning title=Release without Authenticode::SignPath is not configured. Installers and portable executables will carry only the Tauri updater signature.'
+          } else {
+            throw "Unknown release Authenticode mode '$env:RELEASE_AUTHENTICODE'."
           }
-          if ($env:SIGNPATH_SIGNER_THUMBPRINT -notmatch '^[0-9A-Fa-f]{40}$') {
-            throw 'SIGNPATH_SIGNER_THUMBPRINT must be the 40-character SHA-1 thumbprint of the approved SignPath certificate.'
+          if ($env:RELEASE_HARDWARE_GATE -ne 'required') {
+            Write-Host '::warning title=Hardware gate skipped::KIMINOLA_HARDWARE_CI is not true. This release has no physical x64/ARM64 validation.'
           }
 
       - name: Test release support scripts
@@ -151,12 +180,16 @@ jobs:
           RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_HARDWARE_GATE -ne 'required') {
+            Write-Host '::warning title=Hardware gate skipped::KIMINOLA_HARDWARE_CI is not true, so no physical validation run was dispatched.'
+            exit 0
+          }
           $headers = @{
             Authorization = "Bearer $env:GH_TOKEN"
             Accept = 'application/vnd.github+json'
             'X-GitHub-Api-Version' = '2022-11-28'
           }
-          $marker = "release-$env:RELEASE_RUN_ID-$env:RELEASE_RUN_ATTEMPT"
+          $marker ="release-$env:RELEASE_RUN_ID-$env:RELEASE_RUN_ATTEMPT"
           $expectedTitle = "Hardware validation $marker"
           $dispatchUri = "https://api.github.com/repos/$env:RELEASE_REPOSITORY/actions/workflows/hardware-validation.yml/dispatches"
           $dispatchBody = @{
@@ -235,11 +268,18 @@ jobs:
           }
 
           if ($null -eq $release) {
+            $notes = @("Windows x64 and ARM64 installers for Kimi Nola $env:RELEASE_TAG.")
+            if ($env:RELEASE_AUTHENTICODE -ne 'signpath') {
+              $notes += 'These builds are not Authenticode-signed, so Windows SmartScreen may warn before the first run. Installers carry the Tauri updater signature.'
+            }
+            if ($env:RELEASE_HARDWARE_GATE -ne 'required') {
+              $notes += 'Physical x64/ARM64 hardware validation did not run for this release.'
+            }
             $body = @{
               tag_name = $env:RELEASE_TAG
               target_commitish = $env:RELEASE_COMMIT
               name = "Kimi Nola $env:RELEASE_TAG"
-              body = "Windows x64 and ARM64 installers for Kimi Nola $env:RELEASE_TAG."
+              body = $notes -join "`n`n"
               draft = $true
               prerelease = $false
             } | ConvertTo-Json
@@ -361,6 +401,7 @@ jobs:
           ./scripts/verify-pe-architecture.ps1 -Target '${{ matrix.target }}' -Paths $paths
 
       - name: Upload release executable for SignPath
+        if: env.RELEASE_AUTHENTICODE == 'signpath'
         id: upload-unsigned-executable
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -370,6 +411,7 @@ jobs:
           retention-days: 1
 
       - name: Authenticode-sign release executable with SignPath
+        if: env.RELEASE_AUTHENTICODE == 'signpath'
         uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -383,6 +425,7 @@ jobs:
           skip-decompress: false
 
       - name: Replace and verify the Authenticode-signed release executable
+        if: env.RELEASE_AUTHENTICODE == 'signpath'
         working-directory: kiminola
         shell: pwsh
         env:
@@ -424,6 +467,7 @@ jobs:
         run: npm.cmd run tauri bundle -- --target '${{ matrix.target }}'
 
       - name: Upload installer for SignPath
+        if: env.RELEASE_AUTHENTICODE == 'signpath'
         id: upload-unsigned-installer
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -433,6 +477,7 @@ jobs:
           retention-days: 1
 
       - name: Authenticode-sign installer with SignPath
+        if: env.RELEASE_AUTHENTICODE == 'signpath'
         uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -454,19 +499,22 @@ jobs:
           EXPECTED_SIGNER_THUMBPRINT: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT }}
         run: |
           $installers = @(Get-ChildItem -LiteralPath 'src-tauri/target/${{ matrix.target }}/release/bundle/nsis' -Filter '*-setup.exe' -File)
-          $signed = @(Get-ChildItem -LiteralPath '${{ runner.temp }}/signed-installer' -Filter '*-setup.exe' -File -Recurse)
-          if ($installers.Count -ne 1 -or $signed.Count -ne 1) {
-            throw "Expected one local and one SignPath-signed installer; found $($installers.Count) and $($signed.Count)."
-          }
+          if ($installers.Count -ne 1) { throw "Expected one local installer, found $($installers.Count)." }
           $installer = $installers[0]
-          Copy-Item -LiteralPath $signed[0].FullName -Destination $installer.FullName -Force
-          $authenticode = Get-AuthenticodeSignature -FilePath $installer.FullName
-          $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
-          if ($authenticode.Status -ne 'Valid' -or
-              $null -eq $authenticode.SignerCertificate -or
-              $null -eq $authenticode.TimeStamperCertificate -or
-              $authenticode.SignerCertificate.Thumbprint.Trim().ToUpperInvariant() -ne $expectedSignerThumbprint) {
-            throw "Authenticode verification failed for '$($installer.Name)': $($authenticode.StatusMessage)"
+          if ($env:RELEASE_AUTHENTICODE -eq 'signpath') {
+            $signed = @(Get-ChildItem -LiteralPath '${{ runner.temp }}/signed-installer' -Filter '*-setup.exe' -File -Recurse)
+            if ($signed.Count -ne 1) { throw "Expected one SignPath-signed installer, found $($signed.Count)." }
+            Copy-Item -LiteralPath $signed[0].FullName -Destination $installer.FullName -Force
+            $authenticode = Get-AuthenticodeSignature -FilePath $installer.FullName
+            $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
+            if ($authenticode.Status -ne 'Valid' -or
+                $null -eq $authenticode.SignerCertificate -or
+                $null -eq $authenticode.TimeStamperCertificate -or
+                $authenticode.SignerCertificate.Thumbprint.Trim().ToUpperInvariant() -ne $expectedSignerThumbprint) {
+              throw "Authenticode verification failed for '$($installer.Name)': $($authenticode.StatusMessage)"
+            }
+          } elseif ((Get-AuthenticodeSignature -FilePath $installer.FullName).Status -ne 'NotSigned') {
+            throw "Installer '$($installer.Name)' unexpectedly carries an Authenticode signature in an unsigned release."
           }
 
           $initialSignaturePath = "$($installer.FullName).sig"
@@ -515,34 +563,44 @@ jobs:
               -not [string]::Equals($signatures[0].FullName, $signaturePath, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Expected exactly one canonical updater signature '$signaturePath'; found $($signatures.Name -join ', ')."
           }
+          $signedRelease = $env:RELEASE_AUTHENTICODE -eq 'signpath'
           $authenticode = Get-AuthenticodeSignature -FilePath $installer.FullName
-          $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
-          if ($authenticode.Status -ne 'Valid' -or
-              $null -eq $authenticode.SignerCertificate -or
-              $null -eq $authenticode.TimeStamperCertificate -or
-              $authenticode.SignerCertificate.Thumbprint.Trim().ToUpperInvariant() -ne $expectedSignerThumbprint) {
-            throw "Authenticode verification failed for '$($installer.Name)': $($authenticode.StatusMessage)"
+          if ($signedRelease) {
+            $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
+            if ($authenticode.Status -ne 'Valid' -or
+                $null -eq $authenticode.SignerCertificate -or
+                $null -eq $authenticode.TimeStamperCertificate -or
+                $authenticode.SignerCertificate.Thumbprint.Trim().ToUpperInvariant() -ne $expectedSignerThumbprint) {
+              throw "Authenticode verification failed for '$($installer.Name)': $($authenticode.StatusMessage)"
+            }
+          } elseif ($authenticode.Status -ne 'NotSigned') {
+            throw "Installer '$($installer.Name)' unexpectedly carries an Authenticode signature in an unsigned release."
           }
           $portable = @(Get-ChildItem -LiteralPath 'portable' -Filter 'Kimi-Nola_*_${{ matrix.arch }}-portable.zip' -File)
           if ($portable.Count -ne 1) { throw "Expected one portable archive, found $($portable.Count)." }
           $portableExecutable = 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe'
           $portableAuthenticode = Get-AuthenticodeSignature -FilePath $portableExecutable
-          if ($portableAuthenticode.Status -ne 'Valid' -or
-              $null -eq $portableAuthenticode.SignerCertificate -or
-              $null -eq $portableAuthenticode.TimeStamperCertificate -or
-              $portableAuthenticode.SignerCertificate.Thumbprint.Trim().ToUpperInvariant() -ne $expectedSignerThumbprint) {
-            throw "Authenticode verification failed for portable executable '$portableExecutable': $($portableAuthenticode.StatusMessage)"
+          if ($signedRelease) {
+            if ($portableAuthenticode.Status -ne 'Valid' -or
+                $null -eq $portableAuthenticode.SignerCertificate -or
+                $null -eq $portableAuthenticode.TimeStamperCertificate -or
+                $portableAuthenticode.SignerCertificate.Thumbprint.Trim().ToUpperInvariant() -ne $expectedSignerThumbprint) {
+              throw "Authenticode verification failed for portable executable '$portableExecutable': $($portableAuthenticode.StatusMessage)"
+            }
+          } elseif ($portableAuthenticode.Status -ne 'NotSigned') {
+            throw "Portable executable '$portableExecutable' unexpectedly carries an Authenticode signature in an unsigned release."
           }
 
           $reportPath = Join-Path 'portable' 'release-verification-${{ matrix.arch }}.json'
           $report = [ordered]@{
             architecture = '${{ matrix.arch }}'.ToLowerInvariant()
             target = '${{ matrix.target }}'
+            authenticode = $env:RELEASE_AUTHENTICODE
             installer = [ordered]@{
               name = $installer.Name
               sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
               authenticode_status = $authenticode.Status.ToString()
-              signer_thumbprint = $authenticode.SignerCertificate.Thumbprint.ToLowerInvariant()
+              signer_thumbprint = if ($signedRelease) { $authenticode.SignerCertificate.Thumbprint.ToLowerInvariant() } else { $null }
             }
             signature = [ordered]@{
               name = [IO.Path]::GetFileName($signaturePath)
@@ -553,7 +611,7 @@ jobs:
               sha256 = (Get-FileHash -LiteralPath $portable[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
               executable_sha256 = (Get-FileHash -LiteralPath $portableExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
               authenticode_status = $portableAuthenticode.Status.ToString()
-              signer_thumbprint = $portableAuthenticode.SignerCertificate.Thumbprint.ToLowerInvariant()
+              signer_thumbprint = if ($signedRelease) { $portableAuthenticode.SignerCertificate.Thumbprint.ToLowerInvariant() } else { $null }
             }
           }
           [IO.File]::WriteAllText($reportPath, ($report | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
@@ -713,16 +771,24 @@ jobs:
               throw "Signature '$($report.signature.name)' does not match '$($report.installer.name)'."
             }
 
+            if ($report.authenticode -ne $env:RELEASE_AUTHENTICODE) {
+              throw "Release report '$architecture' was built in Authenticode mode '$($report.authenticode)', expected '$env:RELEASE_AUTHENTICODE'."
+            }
+            $signedRelease = $env:RELEASE_AUTHENTICODE -eq 'signpath'
             $installerPath = Join-Path $downloadDirectory $report.installer.name
             $authenticode = Get-AuthenticodeSignature -FilePath $installerPath
-            $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
-            if ($report.installer.authenticode_status -ne 'Valid' -or
-                $authenticode.Status -ne 'Valid' -or
-                $null -eq $authenticode.SignerCertificate -or
-                $null -eq $authenticode.TimeStamperCertificate -or
-                $report.installer.signer_thumbprint -ne $expectedSignerThumbprint.ToLowerInvariant() -or
-                $authenticode.SignerCertificate.Thumbprint.ToLowerInvariant() -ne $report.installer.signer_thumbprint) {
-              throw "Authenticode verification failed for downloaded installer '$($report.installer.name)'."
+            if ($signedRelease) {
+              $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
+              if ($report.installer.authenticode_status -ne 'Valid' -or
+                  $authenticode.Status -ne 'Valid' -or
+                  $null -eq $authenticode.SignerCertificate -or
+                  $null -eq $authenticode.TimeStamperCertificate -or
+                  $report.installer.signer_thumbprint -ne $expectedSignerThumbprint.ToLowerInvariant() -or
+                  $authenticode.SignerCertificate.Thumbprint.ToLowerInvariant() -ne $report.installer.signer_thumbprint) {
+                throw "Authenticode verification failed for downloaded installer '$($report.installer.name)'."
+              }
+            } elseif ($report.installer.authenticode_status -ne 'NotSigned' -or $authenticode.Status -ne 'NotSigned') {
+              throw "Downloaded installer '$($report.installer.name)' does not match its unsigned release report."
             }
             $signaturePath = Join-Path $downloadDirectory $report.signature.name
             $rawSignaturePath = "$signaturePath.raw"
@@ -761,14 +827,20 @@ jobs:
             $portableExecutablePath = Join-Path $portableExtract 'kiminola.exe'
             $portableExecutableHash = (Get-FileHash -LiteralPath $portableExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant()
             $portableAuthenticode = Get-AuthenticodeSignature -FilePath $portableExecutablePath
-            if ($portableExecutableHash -ne $report.portable.executable_sha256 -or
-                $report.portable.authenticode_status -ne 'Valid' -or
-                $portableAuthenticode.Status -ne 'Valid' -or
-                $null -eq $portableAuthenticode.SignerCertificate -or
-                $null -eq $portableAuthenticode.TimeStamperCertificate -or
-                $report.portable.signer_thumbprint -ne $expectedSignerThumbprint.ToLowerInvariant() -or
-                $portableAuthenticode.SignerCertificate.Thumbprint.ToLowerInvariant() -ne $report.portable.signer_thumbprint) {
-              throw "Authenticode verification failed for downloaded portable executable '$($report.portable.name)'."
+            if ($portableExecutableHash -ne $report.portable.executable_sha256) {
+              throw "Portable executable hash mismatch for '$($report.portable.name)'."
+            }
+            if ($signedRelease) {
+              if ($report.portable.authenticode_status -ne 'Valid' -or
+                  $portableAuthenticode.Status -ne 'Valid' -or
+                  $null -eq $portableAuthenticode.SignerCertificate -or
+                  $null -eq $portableAuthenticode.TimeStamperCertificate -or
+                  $report.portable.signer_thumbprint -ne $expectedSignerThumbprint.ToLowerInvariant() -or
+                  $portableAuthenticode.SignerCertificate.Thumbprint.ToLowerInvariant() -ne $report.portable.signer_thumbprint) {
+                throw "Authenticode verification failed for downloaded portable executable '$($report.portable.name)'."
+              }
+            } elseif ($report.portable.authenticode_status -ne 'NotSigned' -or $portableAuthenticode.Status -ne 'NotSigned') {
+              throw "Downloaded portable executable '$($report.portable.name)' does not match its unsigned release report."
             }
             $reports[$architecture] = $report
           }
