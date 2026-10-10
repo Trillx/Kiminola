@@ -3,489 +3,64 @@
   import { page } from "$app/state";
   import { beforeNavigate, goto } from "$app/navigation";
   import LiveTranscript from "$lib/components/LiveTranscript.svelte";
-  import {
-    applyTranscriptEvent,
-    finalizedTranscript,
-    offsetTranscriptEvent,
-    recoverableTranscript,
-  } from "$lib/transcript-state";
-  import { createDraftAutosave, type DraftAutosave } from "$lib/draft-autosave";
-  import {
-    activateElapsedClock,
-    canPauseRecording,
-    canHandleStopShortcut,
-    canResumeRecording,
-    canStopRecording,
-    canRetryFinish,
-    createElapsedClock,
-    elapsedClockSeconds,
-    freezeElapsedClock,
-    recordingPhaseLabel,
-    shouldAdvanceElapsed,
-    shouldDiscardAutoDraft,
-    shouldGuardRecordingNavigation,
-    type ElapsedClockState,
-    type RecordingPhase,
-  } from "$lib/recording-ui-state";
+  import { capturePhaseLabel } from "$lib/capture-session";
+  import { captureSession as session } from "$lib/capture-session.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Textarea } from "$lib/components/ui/textarea";
   import * as Dialog from "$lib/components/ui/dialog";
-  import {
-    startRecording,
-    stopRecording,
-    pauseRecording,
-    resumeRecording,
-    saveMeeting,
-    createNoteDraft,
-    getNoteDraft,
-    updateNoteDraftRecovery,
-    deleteNoteDraft,
-    openMicrophonePrivacySettings,
-    onTranscriptEvent,
-    onAudioPressure,
-    onRecordingQuitBlocked,
-    onShortcutTriggered,
-    type AudioPressureEvent,
-    type RecordingStopResult,
-    type TranscriptEvent,
-    type TranscriptLine,
-  } from "$lib/tauri";
-  import { libraryDestinationState } from "$lib/library-tree.svelte";
-  import { recordingLocationFromSearchParams } from "$lib/library-tree";
-  import type { LibraryLocation } from "$lib/tauri";
+  import { openMicrophonePrivacySettings } from "$lib/tauri";
 
-  // Title is fixed when the recording starts and saved with the meeting.
-  const startedAt = new Date();
-  const title = `Meeting · ${startedAt.toLocaleDateString("en-US", { month: "short", day: "numeric" })}, ${startedAt.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
+  // The Capture session owns the recording lifecycle. This view renders it and
+  // asks where to go when the user tries to leave mid-session.
+  const capture = session.state;
 
-  let notepad = $state("");
-  let elapsed = $state(0);
-  let elapsedClock: ElapsedClockState = createElapsedClock();
-  let lastRecoveryCheckpointSecond = 0;
-  let lines = $state<TranscriptLine[]>([]);
   let transcriptOpen = $state(false);
-  let phase = $state<RecordingPhase>("starting");
-  let startError = $state<string | null>(null);
-  let finishError = $state<string | null>(null);
-  let transcriptFinalizationWarning = $state<string | null>(null);
-  let controlBusy = $state(false);
-  let controlSettled: Promise<void> = Promise.resolve();
-  let resolveControlSettled: (() => void) | null = null;
-  let controlError = $state<{ action: "pause" | "resume"; message: string } | null>(null);
-  let audioPressure = $state<AudioPressureEvent | null>(null);
-  let meetingAudioAvailable = $state<boolean | null>(null);
-  let meetingAudioWarningDismissed = $state(false);
-  let transcriptionAvailable = $state<boolean | null>(null);
-  let transcriptionWarningDismissed = $state(false);
-  let nativeSessionActive = false;
-  let requestedDraftId = NaN;
-  let noteDraftId = $state<number | null>(null);
-  // Capture the destination once when this recording episode starts. Sidebar
-  // navigation can change the last-used destination while recording, but it
-  // must not move the meeting being finalized.
-  let recordingLocation = $state<LibraryLocation | null>(null);
-  let quitBlocked = $state(false);
-  let recoveryDraftCreated = $state(false);
-  let noteSaveStatus = $state("");
   let navigationDialogOpen = $state(false);
   let pendingNavigationTarget: string | null = null;
-  let startupRecoveryExitTarget: string | null = null;
-  let recoveryExitTarget = $state<string | null>(null);
-  let navigationAllowed = false;
-  let transcriptOffsetMs = 0;
 
-  type FinishMode = "save" | "generate" | "enhance";
-  let pendingFinishMode: FinishMode | null = null;
-
-  interface RecoverySnapshot {
-    rawMarkdown: string;
-    durationSeconds: number;
-    transcript: TranscriptLine[];
-  }
-
-  let noteAutosave: DraftAutosave<RecoverySnapshot> | undefined;
-
+  let phase = $derived(capture.phase);
   let timerText = $derived(
-    `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`,
+    `${Math.floor(capture.elapsedSeconds / 60)}:${String(capture.elapsedSeconds % 60).padStart(2, "0")}`,
   );
-  let statusLabel = $derived(recordingPhaseLabel(phase));
+  let statusLabel = $derived(capturePhaseLabel(phase));
   let stopping = $derived(phase === "stopping");
   let audioPressureSource = $derived(
-    !audioPressure
+    !capture.audioPressure
       ? "audio"
-      : audioPressure.mic_dropped_samples > 0 && audioPressure.loopback_dropped_samples > 0
+      : capture.audioPressure.mic_dropped_samples > 0 &&
+          capture.audioPressure.loopback_dropped_samples > 0
         ? "microphone and meeting audio"
-        : audioPressure.mic_dropped_samples > 0
+        : capture.audioPressure.mic_dropped_samples > 0
           ? "microphone audio"
           : "meeting audio",
   );
 
+  onMount(() => {
+    void session.open(page.url.searchParams);
+    return () => session.release();
+  });
+
   beforeNavigate(({ cancel, to }) => {
-    if (navigationAllowed || !to || to.url.href === page.url.href) return;
-    if (startupRecoveryExitTarget || phase === "stopping") {
+    if (!to || to.url.href === page.url.href) return;
+    // A teardown (or a leave queued behind startup) navigates itself once its
+    // writes are done; nothing may bypass a recovery write still pending.
+    if (session.blocksNavigation) {
       cancel();
       return;
     }
-    // Startup failure can still leave a notepad with uncheckpointed edits.
-    if (!shouldGuardRecordingNavigation(phase) && phase !== "failed") return;
+    if (!session.guardsNavigation) return;
+    cancel();
     pendingNavigationTarget = `${to.url.pathname}${to.url.search}${to.url.hash}`;
     navigationDialogOpen = true;
-    cancel();
   });
 
-  function errorMessage(error: unknown, fallback: string): string {
-    if (error instanceof Error) return error.message;
-    if (typeof error === "string") return error;
-    return fallback;
-  }
-
-  function restoreElapsedDuration(seconds: number) {
-    elapsed = Math.max(0, Math.floor(seconds));
-    elapsedClock = createElapsedClock(elapsed);
-    lastRecoveryCheckpointSecond = elapsed;
-  }
-
-  function syncElapsedTiming(nowMs = performance.now()) {
-    elapsed = elapsedClockSeconds(elapsedClock, nowMs);
-  }
-
-  function beginElapsedTiming(nowMs = performance.now()) {
-    elapsedClock = activateElapsedClock(elapsedClock, nowMs);
-    syncElapsedTiming(nowMs);
-  }
-
-  function freezeElapsedTiming(nowMs = performance.now()) {
-    elapsedClock = freezeElapsedClock(elapsedClock, nowMs);
-    syncElapsedTiming(nowMs);
-  }
-
-  function recoverySnapshot(): RecoverySnapshot {
-    return {
-      rawMarkdown: notepad,
-      durationSeconds: elapsed,
-      transcript: recoverableTranscript(lines),
-    };
-  }
-
-  function applyStopResult(result: RecordingStopResult) {
-    transcriptFinalizationWarning =
-      result.finalization_warning ?? transcriptFinalizationWarning;
-    for (const event of result.transcript) {
-      lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
-    }
-  }
-
-  function configureNoteAutosave(draftId: number) {
-    noteAutosave?.cancel();
-    noteAutosave = createDraftAutosave<RecoverySnapshot>(
-      async (snapshot) => {
-        try {
-          await updateNoteDraftRecovery(
-            draftId,
-            snapshot.rawMarkdown,
-            snapshot.durationSeconds,
-            snapshot.transcript,
-            recordingLocation,
-          );
-        } catch (error) {
-          console.error("Failed to checkpoint recording notes:", error);
-          throw error;
-        }
-      },
-      (status) => {
-        noteSaveStatus =
-          status === "saving"
-            ? "Saving for recovery..."
-            : status === "saved"
-              ? "Saved for recovery"
-              : "Could not save recovery copy";
-      },
-    );
-  }
-
-  async function prepareNoteDraft(requestedDraftId: number) {
-    if (Number.isFinite(requestedDraftId)) {
-      const draft = await getNoteDraft(requestedDraftId);
-      recordingLocation = recordingLocationFromSearchParams(
-        page.url.searchParams,
-        libraryDestinationState.last,
-        draft.recovery_location,
-      );
-      noteDraftId = draft.id;
-      notepad = draft.raw_markdown;
-      restoreElapsedDuration(draft.recovery_duration_seconds);
-      transcriptOffsetMs = elapsed * 1_000;
-      lines = draft.recovery_transcript;
-      configureNoteAutosave(draft.id);
-      return;
-    }
-
-    try {
-      recordingLocation = recordingLocationFromSearchParams(
-        page.url.searchParams,
-        libraryDestinationState.last,
-      );
-      const draftId = await createNoteDraft(recordingLocation);
-      noteDraftId = draftId;
-      recoveryDraftCreated = true;
-      configureNoteAutosave(draftId);
-      noteSaveStatus = "Recovery copy ready";
-    } catch (error) {
-      console.error("Failed to create a recovery draft:", error);
-      noteSaveStatus = "Recovery copy unavailable";
-    }
-  }
-
-  function checkpointRecovery() {
-    noteAutosave?.schedule(recoverySnapshot);
-  }
-
-  async function flushNoteCheckpoint() {
-    const autosave = noteAutosave;
-    if (!autosave) throw new Error("Recovery copy unavailable. Try again to create one.");
-    await autosave.flush(recoverySnapshot);
-  }
-
-  function closeNoteAutosave() {
-    noteAutosave?.cancel();
-    noteAutosave = undefined;
-  }
-
-  async function leavePage(destination: string) {
-    navigationAllowed = true;
-    try {
-      await goto(destination);
-    } finally {
-      navigationAllowed = false;
-    }
-  }
-
-  function beginControlOperation() {
-    controlBusy = true;
-    controlSettled = new Promise<void>((resolve) => {
-      resolveControlSettled = resolve;
-    });
-  }
-
-  function endControlOperation() {
-    controlBusy = false;
-    resolveControlSettled?.();
-    resolveControlSettled = null;
-  }
-
-  async function waitForControlToSettle() {
-    await controlSettled;
-  }
-
-  async function completeStartupRecoveryExit(): Promise<boolean> {
-    const destination = startupRecoveryExitTarget;
-    if (!destination) return false;
-    startupRecoveryExitTarget = null;
-    await leaveWithRecovery(destination);
-    return true;
-  }
-
-  async function prepareAndStart() {
-    phase = "starting";
-    startError = null;
-    transcriptFinalizationWarning = null;
-    audioPressure = null;
-    meetingAudioAvailable = null;
-    meetingAudioWarningDismissed = false;
-    transcriptionAvailable = null;
-    transcriptionWarningDismissed = false;
-    try {
-      if (noteDraftId === null) await prepareNoteDraft(requestedDraftId);
-      if (await completeStartupRecoveryExit()) return;
-      const status = await startRecording();
-      meetingAudioAvailable = status.meeting_audio_available;
-      transcriptionAvailable = status.transcription_available;
-      nativeSessionActive = true;
-      if (await completeStartupRecoveryExit()) return;
-      beginElapsedTiming();
-      phase = "recording";
-    } catch (error) {
-      nativeSessionActive = false;
-      if (await completeStartupRecoveryExit()) return;
+  // Startup failure or finishing ends the need for a leave decision.
+  $effect(() => {
+    if (!session.guardsNavigation) {
       navigationDialogOpen = false;
       pendingNavigationTarget = null;
-      phase = "failed";
-      startError = errorMessage(error, "Windows could not start the microphone.");
-      console.error("Failed to start recording:", error);
     }
-  }
-
-  onMount(() => {
-    const timer = setInterval(() => {
-      if (shouldAdvanceElapsed(phase)) {
-        syncElapsedTiming();
-        if (elapsed - lastRecoveryCheckpointSecond >= 5) {
-          lastRecoveryCheckpointSecond = elapsed;
-          checkpointRecovery();
-        }
-      }
-    }, 1000);
-    let unlisten: (() => void)[] = [];
-
-    const draftParam = page.url.searchParams.get("draft");
-    requestedDraftId = draftParam ? Number(draftParam) : NaN;
-    recordingLocation = recordingLocationFromSearchParams(
-      page.url.searchParams,
-      null,
-    );
-
-    const startPromise = Promise.all([
-      onTranscriptEvent((event: TranscriptEvent) => {
-        lines = applyTranscriptEvent(lines, offsetTranscriptEvent(event, transcriptOffsetMs));
-        checkpointRecovery();
-      }),
-      onAudioPressure((event: AudioPressureEvent) => {
-        audioPressure = event;
-      }),
-      onRecordingQuitBlocked(() => {
-        quitBlocked = true;
-      }),
-      onShortcutTriggered(() => {
-        if (!canHandleStopShortcut(phase, controlBusy)) return;
-        if (canRetryFinish(phase)) {
-          retryFinish();
-        } else {
-          void finishMeeting("save");
-        }
-      }),
-    ])
-      .then(async (listeners) => {
-        unlisten = listeners;
-        await prepareAndStart();
-      })
-      .catch((err) => {
-        phase = "failed";
-        startError = errorMessage(err, "The recording page could not initialize.");
-        console.error("Failed to initialize recording:", err);
-      });
-
-    return () => {
-      clearInterval(timer);
-      freezeElapsedTiming();
-      const autosave = noteAutosave;
-      if (autosave) {
-        void autosave.flush(recoverySnapshot()).catch(() => undefined);
-        autosave.cancel();
-        noteAutosave = undefined;
-      }
-      // Wait for the listener + start sequence to finish before stopping,
-      // so we don't try to stop a session that hasn't started yet.
-      startPromise.finally(() => {
-        for (const listener of unlisten) listener();
-        if (nativeSessionActive) {
-          nativeSessionActive = false;
-          stopRecording().catch(() => {
-            // Best-effort cleanup; the backend may already have stopped.
-          });
-        }
-      });
-    };
   });
-
-  async function pause() {
-    if (!canPauseRecording(phase, controlBusy)) return;
-    beginControlOperation();
-    controlError = null;
-    try {
-      await pauseRecording();
-      freezeElapsedTiming();
-      phase = "paused";
-      // Capture is already paused; checkpoint failure is shown by the save status.
-      await flushNoteCheckpoint().catch(() => undefined);
-    } catch (error) {
-      controlError = {
-        action: "pause",
-        message: errorMessage(error, "Windows could not pause audio capture."),
-      };
-      console.error("Failed to pause recording:", error);
-    } finally {
-      endControlOperation();
-    }
-  }
-
-  async function resume() {
-    if (!canResumeRecording(phase, controlBusy)) return;
-    beginControlOperation();
-    controlError = null;
-    try {
-      const status = await resumeRecording();
-      meetingAudioAvailable = status.meeting_audio_available;
-      meetingAudioWarningDismissed = false;
-      transcriptionAvailable = status.transcription_available;
-      transcriptionWarningDismissed = false;
-      beginElapsedTiming();
-      phase = "recording";
-    } catch (error) {
-      controlError = {
-        action: "resume",
-        message: errorMessage(error, "Windows could not restart audio capture."),
-      };
-      console.error("Failed to resume recording:", error);
-    } finally {
-      endControlOperation();
-    }
-  }
-
-  async function finishMeeting(mode: FinishMode) {
-    await waitForControlToSettle();
-    if (phase === "stopping") return;
-    freezeElapsedTiming();
-    phase = "stopping";
-    finishError = null;
-    recoveryExitTarget = null;
-    pendingFinishMode = mode;
-
-    let meetingId: number;
-    try {
-      if (nativeSessionActive) {
-        const stopResult = await stopRecording();
-        nativeSessionActive = false;
-        applyStopResult(stopResult);
-      }
-      // A successful meeting save is an independent durability boundary.
-      await flushNoteCheckpoint().catch(() => undefined);
-      meetingId = await saveMeeting({
-        title,
-        durationSeconds: elapsed,
-        notepad,
-        segments: finalizedTranscript(lines),
-        noteDraftId,
-        location: recordingLocation,
-      });
-    } catch (error) {
-      phase = "finish_failed";
-      finishError = errorMessage(error, "The meeting could not be finalized or saved.");
-      console.error("Failed to finish meeting:", error);
-      return;
-    }
-
-    closeNoteAutosave();
-    pendingFinishMode = null;
-    const params = new URLSearchParams();
-    if (mode !== "save") params.set("mode", mode);
-    if (transcriptFinalizationWarning) params.set("warning", "transcript-finalization");
-    const query = params.toString();
-    await leavePage(`/meeting/${meetingId}${query ? `?${query}` : ""}`);
-  }
-
-  async function retryFinish() {
-    if (!canRetryFinish(phase)) return;
-    if (recoveryExitTarget) {
-      await leaveWithRecovery(recoveryExitTarget);
-    } else if (pendingFinishMode) {
-      await finishMeeting(pendingFinishMode);
-    }
-  }
-
-  async function openRecoveryDraft() {
-    await waitForControlToSettle();
-    await leaveWithRecovery(noteDraftId === null ? "/" : `/note/${noteDraftId}`);
-  }
 
   function continueRecordingHere() {
     navigationDialogOpen = false;
@@ -495,56 +70,14 @@
   function finishBeforeLeaving() {
     navigationDialogOpen = false;
     pendingNavigationTarget = null;
-    if (canRetryFinish(phase)) {
-      retryFinish();
-    } else {
-      void finishMeeting("save");
-    }
+    session.stop();
   }
 
-  async function keepRecoveryAndLeave() {
+  function keepRecoveryAndLeave() {
     const destination = pendingNavigationTarget ?? "/";
     navigationDialogOpen = false;
-    await waitForControlToSettle();
-    if (phase === "starting") {
-      startupRecoveryExitTarget = destination;
-      pendingNavigationTarget = null;
-      noteSaveStatus = "Preparing recovery copy before leaving...";
-      return;
-    }
-    await leaveWithRecovery(destination);
-  }
-
-  async function leaveWithRecovery(destination: string) {
-    if (phase === "stopping") return;
-    freezeElapsedTiming();
-    phase = "stopping";
-    finishError = null;
-    recoveryExitTarget = destination;
-    try {
-      if (nativeSessionActive) {
-        const stopResult = await stopRecording();
-        nativeSessionActive = false;
-        applyStopResult(stopResult);
-      }
-      if (!noteAutosave) {
-        if (noteDraftId === null) {
-          noteDraftId = await createNoteDraft(recordingLocation);
-          recoveryDraftCreated = true;
-        }
-        configureNoteAutosave(noteDraftId);
-      }
-      await flushNoteCheckpoint();
-    } catch (error) {
-      phase = "finish_failed";
-      pendingFinishMode ??= "save";
-      finishError = errorMessage(error, "The recovery copy could not be saved.");
-      return;
-    }
-    closeNoteAutosave();
     pendingNavigationTarget = null;
-    recoveryExitTarget = null;
-    await leavePage(destination);
+    void session.leave(destination);
   }
 
   function onNavigationDialogOpenChange(open: boolean) {
@@ -552,49 +85,10 @@
     if (!open) pendingNavigationTarget = null;
   }
 
-  async function cancel() {
-    await waitForControlToSettle();
-    // In the failure state this button promises "Keep recovery copy", even if
-    // a rejected stop command left native capture active.
-    const discardAutoDraft = phase !== "finish_failed" &&
-      shouldDiscardAutoDraft(recoveryDraftCreated, nativeSessionActive);
-    if (!discardAutoDraft) {
-      await leaveWithRecovery("/");
-      return;
-    }
-    await discardAndLeave("/");
-  }
-
-  async function discardAndLeave(destination: string) {
-    await waitForControlToSettle();
-    if (phase === "stopping") return;
-    freezeElapsedTiming();
-    phase = "stopping";
-    try {
-      if (nativeSessionActive) {
-        await stopRecording();
-        nativeSessionActive = false;
-      }
-      const autosave = noteAutosave;
-      closeNoteAutosave();
-      // Cancellation drops pending edits, but an in-flight write must settle
-      // before deleting an automatically created draft.
-      await autosave?.flushPending();
-      if (recoveryDraftCreated && noteDraftId !== null) await deleteNoteDraft(noteDraftId);
-    } catch (error) {
-      phase = "finish_failed";
-      pendingFinishMode ??= "save";
-      recoveryExitTarget = destination;
-      finishError = errorMessage(error, "The recording could not be discarded.");
-      return;
-    }
-    await leavePage(destination);
-  }
-
   function onDialogOpenChange(open: boolean) {
     // Closing the pause dialog resumes recording.
-    if (!open && canResumeRecording(phase, controlBusy)) {
-      void resume();
+    if (!open && session.canResume) {
+      void session.resume();
     }
   }
 </script>
@@ -607,7 +101,7 @@
   <div class="recording-shell">
     <div class="recording-top">
       <div>
-        <div class="recording-title">{title}</div>
+        <div class="recording-title">{capture.title}</div>
         <div class="recording-meta">{statusLabel} · {timerText}</div>
       </div>
       <div
@@ -626,10 +120,10 @@
       <div class="recording-start-error" role="alert">
         <div>
           <strong>Recording couldn't start.</strong>
-          <span>{startError}</span>
+          <span>{capture.startError}</span>
         </div>
         <div class="recording-start-error-actions">
-          <Button size="sm" onclick={prepareAndStart}>Try again</Button>
+          <Button size="sm" onclick={() => void session.retryStart()}>Try again</Button>
           <Button
             size="sm"
             variant="outline"
@@ -643,19 +137,19 @@
       <div class="recording-finish-error" role="alert">
         <div>
           <strong>The meeting isn't saved yet.</strong>
-          <span>{finishError} Your latest work is still here. Retry before leaving.</span>
+          <span>{capture.finishError} Your latest work is still here. Retry before leaving.</span>
         </div>
         <div class="recording-start-error-actions">
-          <Button size="sm" onclick={retryFinish}>Retry saving</Button>
-          {#if recoveryExitTarget}
-            <Button size="sm" variant="outline" onclick={() => void finishMeeting("save")}>
+          <Button size="sm" onclick={() => void session.retryFinish()}>Retry saving</Button>
+          {#if capture.failedLeave !== null}
+            <Button size="sm" variant="outline" onclick={() => void session.finish("save")}>
               Save as meeting
             </Button>
-            <Button size="sm" variant="outline" onclick={() => void discardAndLeave(recoveryExitTarget!)}>
+            <Button size="sm" variant="outline" onclick={() => void session.discard()}>
               Discard unsaved changes and leave
             </Button>
           {:else}
-            <Button size="sm" variant="outline" onclick={openRecoveryDraft}>
+            <Button size="sm" variant="outline" onclick={() => void session.leave("recovery-copy")}>
               Open recovery copy
             </Button>
           {/if}
@@ -663,17 +157,17 @@
       </div>
     {/if}
 
-    {#if controlError?.action === "pause" && phase === "recording"}
+    {#if capture.controlError?.action === "pause" && phase === "recording"}
       <div class="recording-control-error" role="alert">
         <div>
           <strong>Recording is still active.</strong>
-          <span>The pause request failed: {controlError.message}</span>
+          <span>The pause request failed: {capture.controlError.message}</span>
         </div>
-        <Button size="sm" variant="ghost" onclick={() => (controlError = null)}>Dismiss</Button>
+        <Button size="sm" variant="ghost" onclick={() => session.dismiss("control")}>Dismiss</Button>
       </div>
     {/if}
 
-    {#if meetingAudioAvailable === false && !meetingAudioWarningDismissed}
+    {#if capture.meetingAudioMissing}
       <div class="recording-source-warning" role="alert">
         <div>
           <strong>Other participants aren't being captured.</strong>
@@ -685,12 +179,12 @@
         <Button
           size="sm"
           variant="ghost"
-          onclick={() => (meetingAudioWarningDismissed = true)}>Dismiss</Button
+          onclick={() => session.dismiss("meetingAudio")}>Dismiss</Button
         >
       </div>
     {/if}
 
-    {#if transcriptionAvailable === false && !transcriptionWarningDismissed}
+    {#if capture.transcriptionUnavailable}
       <div class="recording-transcription-warning" role="alert">
         <div>
           <strong>Live transcription isn't available.</strong>
@@ -707,13 +201,13 @@
           <Button
             size="sm"
             variant="ghost"
-            onclick={() => (transcriptionWarningDismissed = true)}>Dismiss</Button
+            onclick={() => session.dismiss("transcription")}>Dismiss</Button
           >
         </div>
       </div>
     {/if}
 
-    {#if audioPressure}
+    {#if capture.audioPressure}
       <div class="recording-audio-warning" role="alert">
         <div>
           <strong>Audio processing briefly fell behind.</strong>
@@ -722,7 +216,7 @@
             if this continues.
           </span>
         </div>
-        <Button size="sm" variant="ghost" onclick={() => (audioPressure = null)}>Dismiss</Button>
+        <Button size="sm" variant="ghost" onclick={() => session.dismiss("audioPressure")}>Dismiss</Button>
       </div>
     {/if}
 
@@ -730,13 +224,13 @@
       <div class="notepad-header">
         <span class="notepad-label">My notes</span>
         <span class="note-save-status" aria-live="polite">
-          {noteSaveStatus || "Sketch while you listen"}
+          {capture.recoveryStatus || "Sketch while you listen"}
         </span>
       </div>
       <Textarea
-        bind:value={notepad}
+        bind:value={capture.notes}
         disabled={stopping}
-        oninput={checkpointRecovery}
+        oninput={session.notesChanged}
         placeholder="Jot rough thoughts, action items, or quotes here…"
         class="notepad-textarea"
       />
@@ -745,8 +239,8 @@
     <div class="recording-actions">
       <Button
         variant="outline"
-        onclick={cancel}
-        disabled={phase === "starting" || stopping || controlBusy}
+        onclick={() => void session.cancel()}
+        disabled={phase === "starting" || stopping || capture.controlBusy}
       >
         {phase === "failed"
           ? "Back to meetings"
@@ -756,25 +250,25 @@
       </Button>
       <Button
         variant="secondary"
-        onclick={pause}
-        disabled={!canPauseRecording(phase, controlBusy)}
-      >{controlBusy && phase === "recording" ? "Pausing..." : "Pause"}</Button>
+        onclick={() => void session.pause()}
+        disabled={!session.canPause}
+      >{capture.controlBusy && phase === "recording" ? "Pausing..." : "Pause"}</Button>
       <Button
         variant="destructive"
-        onclick={() => void finishMeeting("save")}
-        disabled={!canStopRecording(phase) || stopping || controlBusy}
+        onclick={() => void session.finish("save")}
+        disabled={!session.canStop || stopping || capture.controlBusy}
       >
         Stop meeting
       </Button>
     </div>
 
-    {#if quitBlocked}
+    {#if capture.quitBlocked}
       <div class="recording-quit-warning" role="alert">
         <div>
           <strong>Finish this meeting before quitting.</strong>
           <span>Stop the meeting to save it, or cancel to discard it intentionally.</span>
         </div>
-        <Button variant="ghost" size="sm" onclick={() => (quitBlocked = false)}>Dismiss</Button>
+        <Button variant="ghost" size="sm" onclick={() => session.dismiss("quit")}>Dismiss</Button>
       </div>
     {/if}
   </div>
@@ -785,10 +279,10 @@
     <Dialog.Header>
       <Dialog.Title>Meeting paused</Dialog.Title>
     </Dialog.Header>
-    {#if controlError?.action === "resume"}
+    {#if capture.controlError?.action === "resume"}
       <div class="pause-resume-error" role="alert">
         <strong>Recording is still paused.</strong>
-        <span>{controlError.message}</span>
+        <span>{capture.controlError.message}</span>
         <Button
           size="sm"
           variant="outline"
@@ -798,17 +292,17 @@
     {/if}
     <div class="pause-timer">{timerText}</div>
     <div class="pause-actions">
-      <Button class="w-full" onclick={resume} disabled={!canResumeRecording(phase, controlBusy)}>
-        {controlBusy ? "Resuming..." : "Resume recording"}
+      <Button class="w-full" onclick={() => void session.resume()} disabled={!session.canResume}>
+        {capture.controlBusy ? "Resuming..." : "Resume recording"}
       </Button>
-      <Button class="w-full" variant="secondary" onclick={() => void finishMeeting('generate')} disabled={stopping || controlBusy}>
+      <Button class="w-full" variant="secondary" onclick={() => void session.finish('generate')} disabled={stopping || capture.controlBusy}>
         Generate meeting notes
       </Button>
-      <Button class="w-full" variant="secondary" onclick={() => void finishMeeting('enhance')} disabled={stopping || controlBusy}>
+      <Button class="w-full" variant="secondary" onclick={() => void session.finish('enhance')} disabled={stopping || capture.controlBusy}>
         Enhance meeting notes
       </Button>
     </div>
-    <Button variant="ghost" class="pause-stop-link w-full" onclick={() => void finishMeeting('save')} disabled={stopping || controlBusy}>
+    <Button variant="ghost" class="pause-stop-link w-full" onclick={() => void session.finish('save')} disabled={stopping || capture.controlBusy}>
       Stop meeting without generating notes
     </Button>
   </Dialog.Content>
@@ -828,11 +322,13 @@
         {#if phase === "starting"}
           Stay while Windows finishes startup, or prepare a recovery copy and leave without
             creating an empty meeting.
-        {:else if controlBusy}
+        {:else if capture.controlBusy}
           Windows is finishing the current pause or resume request. Leave actions wait for that
           transition before stopping capture.
         {:else if phase === "finish_failed"}
           Retry the save, keep the recovery copy and leave, or stay here without losing your work.
+        {:else if phase === "failed"}
+          Keep your notes as a recovery copy and leave, or stay here and try starting again.
         {:else}
           Finish and save the meeting, keep only its recovery copy, or continue recording here.
         {/if}
@@ -840,21 +336,19 @@
     </Dialog.Header>
     <div class="navigation-guard-actions">
       <Button variant="outline" onclick={continueRecordingHere}>
-        {phase === "starting"
+        {phase === "starting" || phase === "failed" || phase === "finish_failed"
           ? "Stay here"
-          : phase === "finish_failed"
-            ? "Stay here"
-            : "Continue recording"}
+          : "Continue recording"}
       </Button>
       <Button
         variant="secondary"
-        onclick={() => void keepRecoveryAndLeave()}
-        disabled={controlBusy}
+        onclick={keepRecoveryAndLeave}
+        disabled={capture.controlBusy}
       >
         Keep recovery copy and leave
       </Button>
-      {#if canHandleStopShortcut(phase, controlBusy)}
-        <Button onclick={finishBeforeLeaving} disabled={controlBusy}>
+      {#if session.canFinish}
+        <Button onclick={finishBeforeLeaving} disabled={capture.controlBusy}>
           {phase === "finish_failed" ? "Retry saving" : "Finish and save"}
         </Button>
       {/if}
@@ -862,7 +356,8 @@
   </Dialog.Content>
 </Dialog.Root>
 
-<LiveTranscript {lines} bind:open={transcriptOpen} />
+<LiveTranscript lines={capture.lines} bind:open={transcriptOpen} />
+
 
 <style>
   :global(.notepad-textarea) {

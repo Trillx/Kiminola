@@ -1,11 +1,15 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
-  import { loadMeetingAfterAutosave } from "$lib/meeting-notes";
-  import { meetingNotesAutosave as notesAutosave } from "$lib/meeting-notes-session";
-  import { exportMeeting, type MeetingExportAction } from "$lib/meeting-export";
+  import { onDestroy, untrack } from "svelte";
   import { page } from "$app/state";
   import { registerUpdateGuard } from "$lib/pending-work";
-  import { providerIsConfigured, settingsSectionHref } from "$lib/settings-ui";
+  import { notepad } from "$lib/notepad-store";
+  import { settingsSectionHref } from "$lib/settings-ui";
+  import {
+    createMeetingView,
+    initialMeetingViewState,
+    type MeetingExportAction,
+    type MeetingTab,
+  } from "$lib/meeting-view";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
     getMeeting,
@@ -13,16 +17,16 @@
     getLlmConfig,
     listTemplates,
     enhanceMeeting,
+    exportNotesMarkdown,
+    exportTranscriptText,
+    saveNotesExport,
+    saveTranscriptExport,
     updateEnhancedActionItems,
     updateSegmentText,
     deleteSegment,
     type MeetingDetail,
-    type ProviderConfig,
-    type Template,
-    type TranscriptLine,
   } from "$lib/tauri";
   import { renderMarkdown } from "$lib/markdown";
-  import { extractActionItemEntries, replaceActionItems } from "$lib/action-items";
   import BoardQuickAdd from "$lib/components/BoardQuickAdd.svelte";
   import ProviderConfigForm from "$lib/components/ProviderConfigForm.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -32,255 +36,47 @@
   import * as Select from "$lib/components/ui/select";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
 
-  type Tab = "mynotes" | "enhance" | "transcript";
+  // The Meeting view owns loading, Note enhancement, exports, and transcript and
+  // action-item edits; this page renders it.
+  const ui = $state(initialMeetingViewState());
+  const view = createMeetingView(
+    {
+      port: {
+        getMeeting,
+        getLlmConfig,
+        listTemplates,
+        enhanceMeeting,
+        exportNotesMarkdown,
+        exportTranscriptText,
+        saveNotesExport,
+        saveTranscriptExport,
+        updateSegmentText,
+        deleteSegment,
+        updateEnhancedActionItems,
+        writeClipboard: (text) => navigator.clipboard.writeText(text),
+        renderMarkdown,
+        delay(milliseconds, run) {
+          const timer = setTimeout(run, milliseconds);
+          return () => clearTimeout(timer);
+        },
+      },
+      notepad,
+    },
+    ui,
+  );
+  onDestroy(() => view.dispose());
 
-  let meeting = $state<MeetingDetail | null>(null);
-  let notFound = $state(false);
-  let tab = $state<Tab>("mynotes");
-  let notes = $state("");
-  let showTranscriptFinalizationWarning = $state(false);
-  let notesSaveError = $state(false);
-  const unsubscribeNotes = notesAutosave.subscribe((status) => {
-    notesSaveError = status === "error";
-  });
-  let enhancementVersion = 0;
-  onDestroy(() => {
-    enhancementVersion++;
-    actionItemEditVersion++;
-    segmentEditVersion++;
-    clearTimeout(renderTimer);
-    unsubscribeNotes();
-    void notesAutosave.flush().catch((error) => console.error("Failed to save notes:", error));
+  // (Re)load whenever the route changes.
+  $effect(() => {
+    const id = Number(page.params.id);
+    const searchParams = page.url.searchParams;
+    return untrack(() => view.open(id, searchParams));
   });
 
   // Inline title editing
   let editingTitle = $state(false);
   let editTitle = $state("");
   let titleInputRef = $state<HTMLInputElement | null>(null);
-
-  // Enhancement state
-  let templates = $state<Template[]>([]);
-  let selectedTemplateId = $state<number | undefined>(undefined);
-  let config = $state<ProviderConfig | null>(null);
-  let configLoaded = $state(false);
-  let enhancing = $state(false);
-  let enhanceError = $state<string | null>(null);
-  let enhancedMd = $state("");
-  let enhancedGenerated = $state(false);
-  let hasEverEnhanced = $state(false);
-  let editingActionItems = $state(false);
-  let actionItemDrafts = $state<string[]>([]);
-  let savingActionItems = $state(false);
-  let actionItemEditError = $state<string | null>(null);
-  let actionItemEditStatus = $state<string | null>(null);
-  let actionItemEditVersion = 0;
-  // Rendered HTML is updated on a throttle while streaming: re-parsing and
-  // sanitizing the whole document on every token chunk stalls the UI.
-  let enhancedHtml = $state("");
-  let renderTimer: ReturnType<typeof setTimeout> | undefined;
-
-  function renderEnhancedNow() {
-    clearTimeout(renderTimer);
-    renderTimer = undefined;
-    enhancedHtml = renderMarkdown(enhancedMd);
-  }
-
-  function scheduleEnhancedRender() {
-    if (renderTimer !== undefined) return;
-    renderTimer = setTimeout(() => {
-      renderTimer = undefined;
-      enhancedHtml = renderMarkdown(enhancedMd);
-    }, 100);
-  }
-
-  function startActionItemEdit() {
-    actionItemDrafts = extractActionItemEntries(enhancedMd).map((item) => item.title);
-    actionItemEditError = null;
-    actionItemEditStatus = null;
-    editingActionItems = true;
-  }
-
-  function cancelActionItemEdit() {
-    if (savingActionItems) return;
-    editingActionItems = false;
-    actionItemDrafts = [];
-    actionItemEditError = null;
-  }
-
-  async function saveActionItemEdits() {
-    if (!meeting || savingActionItems) return;
-    const entries = extractActionItemEntries(enhancedMd);
-    const titles = actionItemDrafts.map((item) => item.trim());
-    if (titles.some((item) => !item)) {
-      actionItemEditError = "Action items cannot be empty.";
-      return;
-    }
-
-    const edits = entries.flatMap(({ sourceIndex, title: originalTitle }, index) => {
-      const title = titles[index];
-      if (!title || title === originalTitle) return [];
-      return [{ sourceIndex, originalTitle, title }];
-    });
-    if (edits.length === 0) {
-      cancelActionItemEdit();
-      return;
-    }
-
-    const originalMarkdown = enhancedMd;
-    const nextMarkdown = replaceActionItems(originalMarkdown, edits);
-    const meetingId = meeting.id;
-    const version = ++actionItemEditVersion;
-    savingActionItems = true;
-    actionItemEditError = null;
-    try {
-      await updateEnhancedActionItems({
-        meetingId,
-        originalMarkdown,
-        enhancedMarkdown: nextMarkdown,
-        edits,
-      });
-      if (version !== actionItemEditVersion || meeting?.id !== meetingId) return;
-      enhancedMd = nextMarkdown;
-      renderEnhancedNow();
-      editingActionItems = false;
-      actionItemDrafts = [];
-      actionItemEditStatus = "Action items updated. Linked board cards were updated too.";
-    } catch (error) {
-      if (version !== actionItemEditVersion || meeting?.id !== meetingId) return;
-      actionItemEditError = `Could not update action items: ${String(error)}`;
-    } finally {
-      if (version === actionItemEditVersion && meeting?.id === meetingId) savingActionItems = false;
-    }
-  }
-
-  function isEnhanceMode(value: string | null): value is "generate" | "enhance" {
-    return value === "generate" || value === "enhance";
-  }
-
-  async function loadConfig(isCurrent: () => boolean) {
-    try {
-      const [nextConfig, nextTemplates] = await Promise.all([getLlmConfig(), listTemplates()]);
-      if (!isCurrent()) return;
-      config = nextConfig;
-      templates = nextTemplates;
-      selectedTemplateId = templates[0]?.id;
-    } catch (err) {
-      if (!isCurrent()) return;
-      console.error("Failed to load LLM config/templates:", err);
-      config = null;
-    } finally {
-      if (isCurrent()) configLoaded = true;
-    }
-  }
-
-  async function refreshConfig() {
-    try {
-      config = await getLlmConfig();
-    } catch (err) {
-      console.error("Failed to refresh LLM config:", err);
-    }
-  }
-
-  async function runEnhancement() {
-    if (!meeting || enhancing || editingActionItems || savingActionItems) return;
-    const id = meeting.id;
-    const templateId = selectedTemplateId;
-    const version = ++enhancementVersion;
-    enhancing = true;
-    enhanceError = null;
-    try {
-      await notesAutosave.flush(id);
-      if (version !== enhancementVersion) return;
-      enhancedMd = "";
-      enhancedHtml = "";
-      enhancedGenerated = false;
-      await enhanceMeeting(id, templateId, (event) => {
-        if (version !== enhancementVersion) return;
-        if (event.event === "chunk") {
-          enhancedMd += event.data;
-          scheduleEnhancedRender();
-        } else {
-          enhancing = false;
-          if (event.event === "done") {
-            enhancedGenerated = true;
-            hasEverEnhanced = true;
-          } else {
-            enhanceError = event.data;
-          }
-          renderEnhancedNow();
-        }
-      });
-    } catch (err) {
-      if (version !== enhancementVersion) return;
-      enhanceError = String(err);
-      enhancing = false;
-    }
-  }
-
-  // (Re)load whenever the route param changes.
-  $effect(() => {
-    let current = true;
-    const id = Number(page.params.id);
-    const mode = page.url.searchParams.get("mode");
-    const warning = page.url.searchParams.get("warning");
-    enhancementVersion++;
-    actionItemEditVersion++;
-    enhancing = false;
-    enhanceError = null;
-    clearTimeout(renderTimer);
-    renderTimer = undefined;
-    resetSegmentEdit();
-    meeting = null;
-    notFound = false;
-    tab = "mynotes";
-    notes = "";
-    showTranscriptFinalizationWarning = warning === "transcript-finalization";
-    enhancedMd = "";
-    enhancedHtml = "";
-    enhancedGenerated = false;
-    hasEverEnhanced = false;
-    editingActionItems = false;
-    actionItemDrafts = [];
-    savingActionItems = false;
-    actionItemEditError = null;
-    actionItemEditStatus = null;
-    configLoaded = false;
-    config = null;
-    templates = [];
-    selectedTemplateId = undefined;
-    if (!Number.isInteger(id)) {
-      notFound = true;
-      return;
-    }
-    const configReady = loadConfig(() => current);
-    loadMeetingAfterAutosave(
-      notesAutosave,
-      () => getMeeting(id),
-      (error) => console.error("Failed to save notes:", error),
-    )
-      .then(async (m) => {
-        if (!current) return;
-        meeting = m;
-        notes = notesAutosave.pendingNotes(id) ?? m.notepad;
-        if (m.enhanced_markdown) {
-          enhancedMd = m.enhanced_markdown;
-          renderEnhancedNow();
-          enhancedGenerated = true;
-          hasEverEnhanced = true;
-        }
-        if (isEnhanceMode(mode)) {
-          tab = "enhance";
-          await configReady;
-          if (current && config != null && providerIsConfigured(config)) {
-            await runEnhancement();
-          }
-        }
-      })
-      .catch(() => {
-        if (current) notFound = true;
-      });
-    return () => { current = false; };
-  });
 
   $effect(() => {
     if (editingTitle && titleInputRef) {
@@ -289,18 +85,18 @@
   });
 
   function startTitleEdit() {
-    if (!meeting) return;
-    editTitle = meeting.title;
+    if (!ui.meeting) return;
+    editTitle = ui.meeting.title;
     editingTitle = true;
   }
 
   async function saveTitle() {
-    if (!meeting) return;
+    if (!ui.meeting) return;
     const trimmed = editTitle.trim();
-    if (trimmed && trimmed !== meeting.title) {
+    if (trimmed && trimmed !== ui.meeting.title) {
       try {
-        await renameMeeting(meeting.id, trimmed);
-        meeting.title = trimmed;
+        await renameMeeting(ui.meeting.id, trimmed);
+        ui.meeting.title = trimmed;
       } catch (err) {
         console.error("Failed to rename meeting:", err);
         return;
@@ -338,10 +134,9 @@
   }
 
   async function runExport(action: MeetingExportAction) {
-    if (!meeting) return;
-    const id = meeting.id;
+    if (!ui.meeting) return;
     try {
-      const result = await exportMeeting(action, id);
+      const result = await view.export(action);
       flashExportStatus(result.message, result.path ?? null);
     } catch (err) {
       flashExportStatus(`Export failed: ${String(err)}`);
@@ -352,107 +147,21 @@
     if (exportSavedPath) await revealItemInDir(exportSavedPath);
   }
 
-  // Inline transcript editing.
-  let editingSegmentId = $state<number | undefined>(undefined);
-  let editSegmentText = $state("");
-  let segmentEditError = $state<{ action: "save" | "delete"; message: string } | null>(null);
-  let segmentOperation = $state<"save" | "delete" | null>(null);
-  // A route reload (even of the same meeting) or a new editor retires callbacks.
-  let segmentEditVersion = 0;
-
-  function startSegmentEdit(line: TranscriptLine) {
-    if (line.id === undefined || segmentOperation) return;
-    segmentEditVersion++;
-    editingSegmentId = line.id;
-    editSegmentText = line.text;
-    segmentEditError = null;
-  }
-
-  function cancelSegmentEdit() {
-    // An IPC write cannot be undone: do not imply Cancel aborts an active save.
-    if (segmentOperation) return;
-    resetSegmentEdit();
-  }
-
-  function resetSegmentEdit() {
-    segmentEditVersion++;
-    editingSegmentId = undefined;
-    editSegmentText = "";
-    segmentEditError = null;
-    segmentOperation = null;
-  }
-
-  async function saveSegmentEdit() {
-    if (editingSegmentId === undefined || !meeting || segmentOperation) return;
-    const text = editSegmentText.trim();
-    if (!text) {
-      cancelSegmentEdit();
-      return;
-    }
-    const destination = meeting;
-    const segmentId = editingSegmentId;
-    const version = segmentEditVersion;
-    const isCurrent = () => meeting === destination && segmentEditVersion === version;
-    segmentOperation = "save";
-    try {
-      await updateSegmentText(segmentId, text);
-      if (!isCurrent()) return;
-      const line = destination.transcript.find((l) => l.id === segmentId);
-      if (line) line.text = text;
-      resetSegmentEdit();
-    } catch (err) {
-      if (!isCurrent()) return;
-      console.error("Failed to update segment:", err);
-      segmentEditError = {
-        action: "save",
-        message: "Could not save this correction. Your edit is still here; retry saving or cancel.",
-      };
-    } finally {
-      if (isCurrent()) segmentOperation = null;
-    }
-  }
-
-  async function removeSegment(segmentId: number) {
-    if (!meeting || segmentOperation || editingSegmentId !== segmentId) return;
-    const destination = meeting;
-    const version = segmentEditVersion;
-    const isCurrent = () => meeting === destination && segmentEditVersion === version;
-    segmentOperation = "delete";
-    try {
-      await deleteSegment(segmentId);
-      if (!isCurrent()) return;
-      destination.transcript = destination.transcript.filter((l) => l.id !== segmentId);
-      if (editingSegmentId === segmentId) resetSegmentEdit();
-    } catch (err) {
-      if (!isCurrent()) return;
-      console.error("Failed to delete segment:", err);
-      segmentEditError = {
-        action: "delete",
-        message: "Could not delete this segment. Your edit is still here; retry deleting or cancel.",
-      };
-    } finally {
-      if (isCurrent()) segmentOperation = null;
-    }
-  }
-
+  // Inline transcript editing: Escape cancels, Ctrl/Cmd+Enter saves. Losing
+  // focus never saves, so clicking Cancel cannot persist the correction first.
   function onSegmentKeydown(event: KeyboardEvent) {
     if (event.key === "Escape") {
       event.preventDefault();
-      cancelSegmentEdit();
+      view.cancelSegmentEdit();
     } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
-      saveSegmentEdit();
+      void view.saveSegmentEdit();
     }
-  }
-
-  // Notes edits persist automatically, debounced.
-  function onNotesInput() {
-    if (meeting) notesAutosave.schedule(meeting.id, notes);
   }
 
   $effect(() => {
     return registerUpdateGuard(() => {
-      if (editingTitle || editingSegmentId !== undefined) {
+      if (editingTitle || ui.editingSegmentId !== undefined) {
         throw new Error("Finish or cancel the title or transcript edit before updating.");
       }
     });
@@ -467,28 +176,27 @@
     return `${date} · ${mins} min`;
   }
 
-  let configured = $derived(configLoaded && config != null && providerIsConfigured(config));
-  let actionItems = $derived(extractActionItemEntries(enhancedMd));
-
-  const templateOptions = $derived(templates.map((t) => ({ value: String(t.id), label: t.name })));
+  const actionItems = $derived(view.actionItems);
+  const templateOptions = $derived(ui.templates.map((t) => ({ value: String(t.id), label: t.name })));
   const selectedTemplateLabel = $derived(
-    templates.find((t) => t.id === selectedTemplateId)?.name ?? "Template",
+    ui.templates.find((t) => t.id === ui.selectedTemplateId)?.name ?? "Template",
   );
 </script>
 
+
 <svelte:head>
-  <title>{meeting?.title ?? "Meeting"} — Kimi Nola</title>
+  <title>{ui.meeting?.title ?? "Meeting"} — Kimi Nola</title>
 </svelte:head>
 
 <div class="main-content">
-  {#if notFound}
+  {#if ui.notFound}
     <div class="post-shell">
       <div class="post-back">
         <Button variant="ghost" size="sm" href="/">← Back to meetings</Button>
       </div>
       <div class="empty-state" style="margin-top:16px;">Meeting not found.</div>
     </div>
-  {:else if meeting}
+  {:else if ui.meeting}
     <div class="post-shell">
       <div class="post-header">
         <div class="post-back">
@@ -506,7 +214,7 @@
             />
           {:else}
             <button class="display editable-title" onclick={startTitleEdit}>
-              {meeting.title}
+              {ui.meeting.title}
             </button>
           {/if}
           <DropdownMenu.Root>
@@ -533,9 +241,9 @@
           </DropdownMenu.Root>
         </div>
         <div class="post-meta-row">
-          <span class="post-meta-pill">{formatMeta(meeting)}</span>
-          {#if meeting.location_path ?? meeting.space_name}
-            <span class="post-meta-pill">{meeting.location_path ?? meeting.space_name}</span>
+          <span class="post-meta-pill">{formatMeta(ui.meeting)}</span>
+          {#if ui.meeting.location_path ?? ui.meeting.space_name}
+            <span class="post-meta-pill">{ui.meeting.location_path ?? ui.meeting.space_name}</span>
           {/if}
         </div>
         {#if exportStatus}
@@ -548,7 +256,7 @@
         {/if}
       </div>
 
-      {#if showTranscriptFinalizationWarning}
+      {#if ui.showFinalizationWarning}
         <div class="finalization-warning" role="alert">
           <div>
             <strong>Meeting saved, but the transcript may end early.</strong>
@@ -562,20 +270,20 @@
               size="sm"
               variant="outline"
               onclick={() => {
-                tab = "transcript";
-                showTranscriptFinalizationWarning = false;
+                ui.tab = "transcript";
+                ui.showFinalizationWarning = false;
               }}>Review transcript</Button
             >
             <Button
               size="sm"
               variant="ghost"
-              onclick={() => (showTranscriptFinalizationWarning = false)}>Dismiss</Button
+              onclick={() => (ui.showFinalizationWarning = false)}>Dismiss</Button
             >
           </div>
         </div>
       {/if}
 
-      <Tabs.Root value={tab} onValueChange={(value) => (tab = value as Tab)} class="w-full">
+      <Tabs.Root value={ui.tab} onValueChange={(value) => (ui.tab = value as MeetingTab)} class="w-full">
         <Tabs.List class="pill-tabs-list">
           <Tabs.Trigger value="mynotes" class="pill-tab">My notes</Tabs.Trigger>
           <Tabs.Trigger value="enhance" class="pill-tab">Enhance Notes</Tabs.Trigger>
@@ -584,28 +292,28 @@
         <Tabs.Content value="mynotes" class="post-content">
           <div class="my-notes-card">
             <Textarea
-              bind:value={notes}
-              oninput={onNotesInput}
+              bind:value={ui.notes}
+              oninput={view.notesChanged}
               placeholder="No notes captured during this meeting."
               aria-label="My notes"
               class="notes-textarea"
             />
-            {#if notesSaveError}
+            {#if ui.notesSaveError}
               <p role="alert">Some edits could not be saved. Retry saving before quitting Kimi Nola.</p>
-              <Button variant="secondary" onclick={() => void notesAutosave.flush().catch((error) => console.error("Failed to save notes:", error))}>
+              <Button variant="secondary" onclick={() => void view.retrySave()}>
                 Retry saving
               </Button>
             {/if}
           </div>
         </Tabs.Content>
         <Tabs.Content value="enhance" class="post-content">
-          {#if !configLoaded}
+          {#if !ui.configLoaded}
             <div class="empty-state">Loading AI provider settings…</div>
-          {:else if !configured}
+          {:else if !view.configured}
             <div class="my-notes-card">
-              <ProviderConfigForm onSaved={refreshConfig} />
+              <ProviderConfigForm onSaved={view.refreshConfig} />
             </div>
-          {:else if !hasEverEnhanced && !enhancing}
+          {:else if !ui.hasEverEnhanced && !ui.enhancing}
             <div class="my-notes-card enhance-prompt">
               <div class="enhance-title">Enhance notes with AI</div>
               <div class="enhance-copy">
@@ -616,8 +324,8 @@
                 <span>Template</span>
                 <Select.Root
                   type="single"
-                  value={selectedTemplateId !== undefined ? String(selectedTemplateId) : ""}
-                  onValueChange={(value) => (selectedTemplateId = Number(value))}
+                  value={ui.selectedTemplateId !== undefined ? String(ui.selectedTemplateId) : ""}
+                  onValueChange={(value) => (ui.selectedTemplateId = Number(value))}
                 >
                   <Select.Trigger class="w-[200px]">
                     {selectedTemplateLabel}
@@ -631,8 +339,8 @@
                   </Select.Content>
                 </Select.Root>
               </div>
-              <Button onclick={runEnhancement} disabled={enhancing}>
-                {enhancing ? "Enhancing…" : "Enhance notes"}
+              <Button onclick={view.enhance} disabled={ui.enhancing}>
+                {ui.enhancing ? "Enhancing…" : "Enhance notes"}
               </Button>
             </div>
           {:else}
@@ -642,8 +350,8 @@
                   <span class="tool-label">Template</span>
                   <Select.Root
                     type="single"
-                    value={selectedTemplateId !== undefined ? String(selectedTemplateId) : ""}
-                    onValueChange={(value) => (selectedTemplateId = Number(value))}
+                    value={ui.selectedTemplateId !== undefined ? String(ui.selectedTemplateId) : ""}
+                    onValueChange={(value) => (ui.selectedTemplateId = Number(value))}
                   >
                     <Select.Trigger class="w-[200px]">
                       {selectedTemplateLabel}
@@ -659,96 +367,109 @@
                   <a class="manage-templates" href={settingsSectionHref("templates")}>Manage templates</a>
                 </div>
                 <div class="tool-actions">
-                  {#if !editingActionItems && !savingActionItems}
-                    <BoardQuickAdd meetingId={meeting.id} {actionItems} enhancedMarkdown={enhancedMd} />
+                  {#if !ui.editingActionItems && !ui.savingActionItems}
+                    <BoardQuickAdd meetingId={ui.meeting.id} {actionItems} enhancedMarkdown={ui.enhancedMd} />
                   {/if}
                   {#if actionItems.length > 0}
-                    <Button variant="outline" size="sm" onclick={startActionItemEdit} disabled={enhancing || editingActionItems || savingActionItems}>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onclick={view.startActionItemEdit}
+                      disabled={ui.enhancing || ui.editingActionItems || ui.savingActionItems}
+                    >
                       Edit action items
                     </Button>
                   {/if}
                   <Button
                     variant="outline"
                     size="sm"
-                    onclick={runEnhancement}
-                    disabled={enhancing || editingActionItems || savingActionItems}
+                    onclick={view.enhance}
+                    disabled={ui.enhancing || ui.editingActionItems || ui.savingActionItems}
                   >
-                    {enhancing ? "Regenerating…" : "Regenerate"}
+                    {ui.enhancing ? "Regenerating…" : "Regenerate"}
                   </Button>
                 </div>
               </div>
-              {#if enhancing}
+              {#if ui.enhancing}
                 <div class="streaming-hint">AI is rewriting your notes…</div>
               {/if}
-              {#if editingActionItems}
+              {#if ui.editingActionItems}
                 <section class="action-item-editor" aria-label="Edit enhanced action items">
                   <div class="action-item-editor-heading">
                     <strong>Action items</strong>
                     <span>Changes also update linked cards on Boards.</span>
                   </div>
                   <div class="action-item-fields">
-                    {#each actionItemDrafts as _, index}
+                    {#each ui.actionItemDrafts as _, index}
                       <label>
                         <span>Action item {index + 1}</span>
-                        <Input bind:value={actionItemDrafts[index]} disabled={savingActionItems} />
+                        <Input bind:value={ui.actionItemDrafts[index]} disabled={ui.savingActionItems} />
                       </label>
                     {/each}
                   </div>
-                  {#if actionItemEditError}<p class="action-item-edit-error" role="alert">{actionItemEditError}</p>{/if}
+                  {#if ui.actionItemError}<p class="action-item-edit-error" role="alert">{ui.actionItemError}</p>{/if}
                   <div class="action-item-edit-actions">
-                    <Button size="sm" onclick={saveActionItemEdits} disabled={savingActionItems}>
-                      {savingActionItems ? "Saving…" : "Save action items"}
+                    <Button size="sm" onclick={view.saveActionItemEdits} disabled={ui.savingActionItems}>
+                      {ui.savingActionItems ? "Saving…" : "Save action items"}
                     </Button>
-                    <Button variant="ghost" size="sm" onclick={cancelActionItemEdit} disabled={savingActionItems}>Cancel</Button>
+                    <Button variant="ghost" size="sm" onclick={view.cancelActionItemEdit} disabled={ui.savingActionItems}>Cancel</Button>
                   </div>
                 </section>
               {/if}
-              {#if actionItemEditStatus}<p class="action-item-edit-status" role="status">{actionItemEditStatus}</p>{/if}
-              {@html enhancedHtml}
+              {#if ui.actionItemStatus}<p class="action-item-edit-status" role="status">{ui.actionItemStatus}</p>{/if}
+              {@html ui.enhancedHtml}
             </div>
           {/if}
-          {#if enhanceError}
-            <div class="test-output error" style="margin-top: 12px;">{enhanceError}</div>
+          {#if ui.enhanceError}
+            <div class="test-output error" style="margin-top: 12px;">{ui.enhanceError}</div>
           {/if}
         </Tabs.Content>
         <Tabs.Content value="transcript" class="post-content">
-          {#if meeting.transcript.length > 0}
+          {#if ui.meeting.transcript.length > 0}
             <div class="raw-transcript">
-              {#each meeting.transcript as line (line.id ?? line.text)}
-                {#if editingSegmentId === line.id}
+              {#each ui.meeting.transcript as line (line.id ?? line.text)}
+                {#if ui.editingSegmentId === line.id}
                   <div class="raw-line editing">
                     <span class="tag {line.channel}">{line.channel === "you" ? "You" : "Others"}</span>
                     <div class="segment-edit-wrap">
                       <Textarea
-                        bind:value={editSegmentText}
+                        bind:value={ui.segmentText}
                         onkeydown={onSegmentKeydown}
-                        disabled={segmentOperation !== null}
+                        disabled={ui.segmentOperation !== null}
                         rows={2}
                         class="segment-edit-textarea"
                       />
-                      {#if segmentEditError}
-                        <p class="segment-edit-error" role="alert">{segmentEditError.message}</p>
+                      {#if ui.segmentError}
+                        <p class="segment-edit-error" role="alert">{ui.segmentError.message}</p>
                       {/if}
                       <div class="segment-edit-actions">
                         <button
                           class="segment-action save"
-                          disabled={segmentOperation !== null}
-                          onclick={saveSegmentEdit}
+                          disabled={ui.segmentOperation !== null}
+                          onclick={view.saveSegmentEdit}
                         >
-                          {segmentOperation === "save" ? "Saving…" : segmentEditError?.action === "save" ? "Retry save" : "Save"}
+                          {ui.segmentOperation === "save"
+                            ? "Saving…"
+                            : ui.segmentError?.action === "save"
+                              ? "Retry save"
+                              : "Save"}
                         </button>
                         <button
                           class="segment-action"
-                          disabled={segmentOperation !== null}
-                          onclick={cancelSegmentEdit}
+                          disabled={ui.segmentOperation !== null}
+                          onclick={view.cancelSegmentEdit}
                         >Cancel</button>
                         {#if line.id !== undefined}
                           <button
                             class="segment-action delete"
-                            disabled={segmentOperation !== null}
-                            onclick={() => line.id !== undefined && removeSegment(line.id)}
+                            disabled={ui.segmentOperation !== null}
+                            onclick={() => line.id !== undefined && view.deleteSegment(line.id)}
                           >
-                            {segmentOperation === "delete" ? "Deleting…" : segmentEditError?.action === "delete" ? "Retry delete" : "Delete"}
+                            {ui.segmentOperation === "delete"
+                              ? "Deleting…"
+                              : ui.segmentError?.action === "delete"
+                                ? "Retry delete"
+                                : "Delete"}
                           </button>
                         {/if}
                       </div>
@@ -758,8 +479,8 @@
                   <button
                     type="button"
                     class="raw-line"
-                    disabled={segmentOperation !== null}
-                    onclick={() => startSegmentEdit(line)}
+                    disabled={ui.segmentOperation !== null}
+                    onclick={() => view.startSegmentEdit(line)}
                     title="Click to edit"
                   >
                     <span class="tag {line.channel}">{line.channel === "you" ? "You" : "Others"}</span>

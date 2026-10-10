@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
 
+use crate::recording_session::{Recognition, Transcriber, TranscriberSession, TranscriptChannel};
+
 /// The expensive half of ASR: a preloaded sherpa-onnx recognizer holding the
 /// model weights. Built once (ideally in the background at app launch) and
 /// shared by every recording session via cheap per-lane streams.
@@ -117,6 +119,73 @@ impl AsrLane {
     }
 }
 
+/// The production adapter for the recording session's `Transcriber` seam: one
+/// pair of lanes per Capture session over the shared preloaded recognizer.
+pub struct SherpaTranscriber {
+    engine: Arc<AsrEngine>,
+}
+
+impl SherpaTranscriber {
+    pub fn new(engine: Arc<AsrEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+struct SherpaSession {
+    engine: Arc<AsrEngine>,
+    you: AsrLane,
+    others: AsrLane,
+}
+
+impl Transcriber for SherpaTranscriber {
+    fn start_session(&self) -> Box<dyn TranscriberSession> {
+        Box::new(SherpaSession {
+            engine: Arc::clone(&self.engine),
+            you: self.engine.lane(),
+            others: self.engine.lane(),
+        })
+    }
+}
+
+fn recognition(channel: TranscriptChannel, result: Option<(String, bool)>) -> Option<Recognition> {
+    result.map(|(text, is_final)| Recognition {
+        channel,
+        text,
+        is_final,
+    })
+}
+
+impl TranscriberSession for SherpaSession {
+    fn feed(&mut self, channel: TranscriptChannel, samples: &[f32]) {
+        match channel {
+            TranscriptChannel::You => self.you.feed(samples),
+            TranscriptChannel::Others => self.others.feed(samples),
+        }
+    }
+
+    fn poll(&mut self) -> Vec<Recognition> {
+        // One batched encoder pass for both lanes keeps dual-lane decoding
+        // ahead of real time.
+        self.engine
+            .decode_ready(&mut [&mut self.you, &mut self.others]);
+        recognition(TranscriptChannel::You, self.you.take_result())
+            .into_iter()
+            .chain(recognition(
+                TranscriptChannel::Others,
+                self.others.take_result(),
+            ))
+            .collect()
+    }
+
+    fn finish(&mut self, channel: TranscriptChannel) -> Option<Recognition> {
+        let lane = match channel {
+            TranscriptChannel::You => &mut self.you,
+            TranscriptChannel::Others => &mut self.others,
+        };
+        recognition(channel, lane.finish())
+    }
+}
+
 /// Known model layouts, most-preferred first: the production Nemotron export,
 /// then the small zipformer used during early bring-up.
 fn model_files(dir: &Path) -> Option<(PathBuf, PathBuf, PathBuf, PathBuf)> {
@@ -178,11 +247,9 @@ mod tests {
     /// Smoke test: the sherpa-onnx runtime loads, the model initializes, and a
     /// second of silence decodes without panicking.
     #[test]
-    fn session_decodes_silence() {
-        let Some(model_dir) = resolve_asr_model_dir() else {
-            eprintln!("ASR model dir not found; skipping");
-            return;
-        };
+    #[ignore = "needs the installed ASR Model pack; run with --ignored"]
+    fn model_pack_decodes_silence() {
+        let model_dir = resolve_asr_model_dir().expect("ASR Model pack must be installed");
 
         let engine = Arc::new(
             AsrEngine::new(&model_dir).expect("recognizer should build from the model dir"),
@@ -294,16 +361,15 @@ mod tests {
     /// Replay a live mic dump (raw f32le at 16 kHz, written by the recording
     /// diagnostics) through the recognizer to compare live vs offline behavior.
     #[test]
-    fn session_transcribes_mic_dump() {
+    #[ignore = "diagnostic: needs the ASR Model pack and a live mic dump in %TEMP%; run with --ignored"]
+    fn model_pack_replays_mic_dump() {
         let dump_path = std::env::temp_dir().join("kiminola-mic-dump.f32");
-        if !dump_path.exists() {
-            eprintln!("mic dump not found; skipping");
-            return;
-        }
-        let Some(model_dir) = resolve_asr_model_dir() else {
-            eprintln!("ASR model dir not found; skipping");
-            return;
-        };
+        assert!(
+            dump_path.exists(),
+            "mic dump not found at {}",
+            dump_path.display()
+        );
+        let model_dir = resolve_asr_model_dir().expect("ASR Model pack must be installed");
         let engine = Arc::new(
             AsrEngine::new(&model_dir).expect("recognizer should build from the model dir"),
         );
@@ -351,16 +417,15 @@ mod tests {
     /// fed alternately like the live consumer does. Combined RTF must stay
     /// well under 1.0 or the channel backlog grows without bound.
     #[test]
-    fn dual_lane_rtf() {
+    #[ignore = "benchmark: needs the ASR Model pack and a live mic dump in %TEMP%; run with --ignored"]
+    fn model_pack_dual_lane_rtf() {
         let dump_path = std::env::temp_dir().join("kiminola-mic-dump.f32");
-        if !dump_path.exists() {
-            eprintln!("mic dump not found; skipping");
-            return;
-        }
-        let Some(model_dir) = resolve_asr_model_dir() else {
-            eprintln!("ASR model dir not found; skipping");
-            return;
-        };
+        assert!(
+            dump_path.exists(),
+            "mic dump not found at {}",
+            dump_path.display()
+        );
+        let model_dir = resolve_asr_model_dir().expect("ASR Model pack must be installed");
         let engine = Arc::new(
             AsrEngine::new(&model_dir).expect("recognizer should build from the model dir"),
         );

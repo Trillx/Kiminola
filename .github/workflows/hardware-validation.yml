@@ -278,10 +278,10 @@ jobs:
             Start-Sleep -Seconds 2
             Push-Location 'src-tauri'
             try {
-              cargo test --locked --lib --target '${{ matrix.target }}' loopback::tests::classic_loopback_captures_non_silent_audio -- --ignored --exact
+              cargo test --locked --lib --target '${{ matrix.target }}' audio::loopback::tests::classic_loopback_captures_non_silent_audio -- --ignored --exact
               if ($LASTEXITCODE -ne 0) { throw 'Classic loopback hardware test failed.' }
               $env:KIMINOLA_TEST_LOOPBACK_PID = [string]$audioSource.Id
-              cargo test --locked --lib --target '${{ matrix.target }}' loopback::tests::process_loopback_captures_non_silent_audio -- --ignored --exact
+              cargo test --locked --lib --target '${{ matrix.target }}' audio::loopback::tests::process_loopback_captures_non_silent_audio -- --ignored --exact
               if ($LASTEXITCODE -ne 0) { throw 'Process loopback hardware test failed.' }
             } finally {
               Pop-Location

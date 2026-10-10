@@ -2,13 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // @ts-expect-error Node's strip-types test runner imports the TypeScript source directly.
-import { compactReleaseNotes, isRecordingPath, updateProgress } from "../src/lib/update-policy.ts";
-
-test("updates are blocked only on the active recording route", () => {
-  assert.equal(isRecordingPath("/record"), true);
-  assert.equal(isRecordingPath("/"), false);
-  assert.equal(isRecordingPath("/settings"), false);
-});
+import { compactReleaseNotes, updateProgress } from "../src/lib/update-policy.ts";
 
 test("download progress stays bounded and handles unknown lengths", () => {
   assert.equal(updateProgress(0, 100), 0);

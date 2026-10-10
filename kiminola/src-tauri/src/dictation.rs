@@ -211,7 +211,7 @@ impl DictationCommands {
         platform: Arc<dyn Platform>,
         gate: CaptureGate,
     ) -> Result<Arc<Self>, String> {
-        let pool = crate::db::ensure_pool(&database).await?;
+        let pool = database.pool().await?;
         let saved: SavedSettings = history::load_settings(&pool).await?;
         history::expire(&pool, chrono::Utc::now()).await?;
         let snapshot = DictationSnapshot {
@@ -784,7 +784,7 @@ impl DictationCommands {
     // database errors, which may contain sensitive paths or values.
     async fn save_optional_history(&self, text: &str) -> bool {
         let result = async {
-            let pool = crate::db::ensure_pool(&self.database).await?;
+            let pool = self.database.pool().await?;
             history::append(&pool, text, chrono::Utc::now()).await
         }
         .await;
@@ -794,15 +794,15 @@ impl DictationCommands {
         result.is_ok()
     }
     pub async fn list_dictation_history(&self) -> Result<Vec<HistoryEntry>, String> {
-        let pool = crate::db::ensure_pool(&self.database).await?;
+        let pool = self.database.pool().await?;
         history::list(&pool, chrono::Utc::now()).await
     }
     pub async fn delete_dictation_history(&self, id: Option<i64>) -> Result<(), String> {
-        let pool = crate::db::ensure_pool(&self.database).await?;
+        let pool = self.database.pool().await?;
         history::delete(&pool, id).await
     }
     async fn expire_history(&self) -> Result<(), String> {
-        let pool = crate::db::ensure_pool(&self.database).await?;
+        let pool = self.database.pool().await?;
         history::expire(&pool, chrono::Utc::now()).await
     }
 }
@@ -823,7 +823,7 @@ async fn replace_binding(
     new: &SavedSettings,
 ) -> Result<(), String> {
     let mut pending = changes.lock().await;
-    let pool = crate::db::ensure_pool(database).await?;
+    let pool = database.pool().await?;
     while let Some(value) = pending.last() {
         registry.unregister(value).map_err(|error| format!("{error} A previous dictation shortcut remains reserved but inactive. Retry to release it."))?;
         pending.pop();
@@ -898,11 +898,11 @@ struct ConfiguredProvider {
 }
 impl ConfiguredProvider {
     async fn identity(&self) -> Result<String, String> {
-        let pool = crate::db::ensure_pool(&self.database).await?;
+        let pool = self.database.pool().await?;
         crate::llm::dictation_provider_identity(&pool).await
     }
     async fn cleanup(&self, identity: &str, text: &str) -> Result<String, String> {
-        let pool = crate::db::ensure_pool(&self.database).await?;
+        let pool = self.database.pool().await?;
         crate::llm::cleanup_dictation(&pool, identity, text).await
     }
 }
@@ -1084,7 +1084,7 @@ impl Platform for NativePlatform {
         }
     }
     fn quit(&self, review_resolved: bool) -> Result<(), String> {
-        crate::meeting_presence::quit_when_idle(&self.app, review_resolved)
+        crate::app_lifecycle::quit_when_idle(&self.app, review_resolved)
     }
 }
 
@@ -1131,7 +1131,7 @@ pub async fn request_quit(app: AppHandle) {
             data.snapshot.error = Some(error);
         }
         state.commands.publish();
-    } else if let Err(error) = crate::meeting_presence::quit_when_idle(&app, false) {
+    } else if let Err(error) = crate::app_lifecycle::quit_when_idle(&app, false) {
         let _ = app.emit("dictation:quit_blocked", error);
     }
 }
@@ -1243,7 +1243,7 @@ pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: KeyState) ->
 pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     tauri::async_runtime::block_on(async {
-        let database = handle.state::<crate::db::DbState>().pool.clone();
+        let database = handle.state::<crate::db::DbState>().database.clone();
         let platform = Arc::new(NativePlatform {
             app: handle.clone(),
             database: database.clone(),

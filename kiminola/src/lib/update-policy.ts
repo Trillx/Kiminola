@@ -1,7 +1,3 @@
-export function isRecordingPath(pathname: string): boolean {
-  return pathname === "/record";
-}
-
 export function updateProgress(downloadedBytes: number, contentLength: number | null): number {
   if (!contentLength || contentLength <= 0) return 0;
   return Math.min(100, Math.max(0, Math.round((downloadedBytes / contentLength) * 100)));

@@ -5,15 +5,6 @@ use sqlx::migrate::{Migration, Migrator};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
-#[cfg(test)]
-pub(crate) async fn run(pool: &SqlitePool) -> Result<(), String> {
-    compatible(pool, &sqlx::migrate!("./migrations"))
-        .await?
-        .run(pool)
-        .await
-        .map_err(|e| e.to_string())
-}
-
 pub(crate) async fn compatible(pool: &SqlitePool, source: &Migrator) -> Result<Migrator, String> {
     let has_history: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",

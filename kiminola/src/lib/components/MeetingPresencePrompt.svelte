@@ -3,6 +3,8 @@
   import { goto } from "$app/navigation";
   import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { Button } from "$lib/components/ui/button";
+  import { captureSession } from "$lib/capture-session.svelte";
+  import { recordingHref } from "$lib/library-tree.svelte";
   import {
     dismissMeetingPrompt,
     getMeetingPresenceState,
@@ -74,7 +76,7 @@
       if (action.action === "notes" && action.draft_id !== undefined) {
         await goto(`/note/${action.draft_id}`);
       } else if (action.action === "start") {
-        await goto("/record");
+        await openRecorder();
       }
     }).then((fn) => (unlistenAction = fn));
 
@@ -97,6 +99,11 @@
       }
     };
   });
+
+  // A prompt never opens a second Capture session; an active one keeps its view.
+  async function openRecorder() {
+    if (!captureSession.active) await goto(recordingHref());
+  }
 
   async function hideOverlay() {
     if (overlay) {
@@ -132,7 +139,7 @@
         if (overlay) {
           await handoffToMain({ action: "start" });
         } else {
-          await goto("/record");
+          await openRecorder();
         }
       } else {
         await dismissMeetingPrompt(promptId);

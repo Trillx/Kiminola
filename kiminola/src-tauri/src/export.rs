@@ -8,7 +8,8 @@ use std::path::PathBuf;
 
 use tauri::State;
 
-use crate::db::{ensure_pool, DbState, MeetingDetail};
+use crate::db::meeting_store::{self, MeetingDetail};
+use crate::db::DbState;
 
 fn yaml_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
@@ -127,8 +128,8 @@ pub async fn export_notes_markdown(
     state: State<'_, DbState>,
     meeting_id: i64,
 ) -> Result<String, String> {
-    let pool = ensure_pool(&state.pool).await?;
-    let meeting = crate::db::get_meeting_impl(&pool, meeting_id).await?;
+    let pool = state.pool().await?;
+    let meeting = meeting_store::get_meeting(&pool, meeting_id).await?;
     Ok(notes_markdown(&meeting))
 }
 
@@ -137,8 +138,8 @@ pub async fn export_transcript_text(
     state: State<'_, DbState>,
     meeting_id: i64,
 ) -> Result<String, String> {
-    let pool = ensure_pool(&state.pool).await?;
-    let meeting = crate::db::get_meeting_impl(&pool, meeting_id).await?;
+    let pool = state.pool().await?;
+    let meeting = meeting_store::get_meeting(&pool, meeting_id).await?;
     Ok(transcript_text(&meeting))
 }
 
@@ -147,8 +148,8 @@ pub async fn save_notes_export(
     state: State<'_, DbState>,
     meeting_id: i64,
 ) -> Result<String, String> {
-    let pool = ensure_pool(&state.pool).await?;
-    let meeting = crate::db::get_meeting_impl(&pool, meeting_id).await?;
+    let pool = state.pool().await?;
+    let meeting = meeting_store::get_meeting(&pool, meeting_id).await?;
     let filename = export_filename(&meeting, "", "md");
     write_export(&filename, &notes_markdown(&meeting))
 }
@@ -158,8 +159,8 @@ pub async fn save_transcript_export(
     state: State<'_, DbState>,
     meeting_id: i64,
 ) -> Result<String, String> {
-    let pool = ensure_pool(&state.pool).await?;
-    let meeting = crate::db::get_meeting_impl(&pool, meeting_id).await?;
+    let pool = state.pool().await?;
+    let meeting = meeting_store::get_meeting(&pool, meeting_id).await?;
     let filename = export_filename(&meeting, "-transcript", "txt");
     write_export(&filename, &transcript_text(&meeting))
 }
@@ -167,7 +168,7 @@ pub async fn save_transcript_export(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::SegmentOut;
+    use crate::db::meeting_store::SegmentOut;
 
     fn meeting() -> MeetingDetail {
         MeetingDetail {

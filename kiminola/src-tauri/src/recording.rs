@@ -1,26 +1,30 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
-use crate::asr::{resolve_asr_model_dir, AsrEngine};
+use crate::asr::{resolve_asr_model_dir, AsrEngine, SherpaTranscriber};
+use crate::audio::DefaultAudioSource;
 use crate::capture_gate::{CaptureGate, CaptureLease, CaptureOwner};
 use crate::recording_session::{
-    AudioPressureEvent, AudioSource, DefaultAudioSource, RecordingSession, RecordingStartStatus,
+    AudioPressureEvent, AudioSource, RecordingSession, RecordingStartStatus, Transcriber,
     TranscriptEvent, TranscriptSink,
 };
 
-/// Shared Tauri state for recording.
+/// Shared Tauri state for recording. Whether a Capture session is active is
+/// published to `app_lifecycle`, the single owner of quit/update decisions.
 pub struct RecordingState {
     session: Mutex<Option<ActiveRecording>>,
     asr_engine: Arc<Mutex<Option<Arc<AsrEngine>>>>,
     pending_loopback_target: SyncMutex<Option<PendingLoopbackTarget>>,
-    active: AtomicBool,
-    updating: AtomicBool,
-    update_lease: SyncMutex<Option<CaptureLease>>,
+}
+
+/// Proof that no recording start or stop is in flight. Held by the App update
+/// barrier so a session cannot begin between its check and database suspension.
+pub(crate) struct RecordingQuiesced<'a> {
+    _session: tokio::sync::MutexGuard<'a, Option<ActiveRecording>>,
 }
 
 struct ActiveRecording {
@@ -92,23 +96,15 @@ impl RecordingState {
             session: Mutex::new(None),
             asr_engine: Arc::new(Mutex::new(None)),
             pending_loopback_target: SyncMutex::new(None),
-            active: AtomicBool::new(false),
-            updating: AtomicBool::new(false),
-            update_lease: SyncMutex::new(None),
         }
     }
 
-    fn set_active(&self, active: bool) {
-        self.active.store(active, Ordering::Release);
-    }
-
-    fn set_active_for_app(&self, app: &AppHandle, active: bool) {
-        self.set_active(active);
-        crate::meeting_presence::recording_activity_changed(app, active);
-    }
-
-    fn is_active(&self) -> bool {
-        self.active.load(Ordering::Acquire)
+    /// Wait for any in-flight recording start or stop and keep new ones out
+    /// while the returned guard lives.
+    pub(crate) async fn quiesce(&self) -> RecordingQuiesced<'_> {
+        RecordingQuiesced {
+            _session: self.session.lock().await,
+        }
     }
 
     fn take_loopback_target(
@@ -133,14 +129,6 @@ impl RecordingState {
     fn clear_pending_loopback_target(&self) {
         self.pending_loopback_target.lock().unwrap().take();
     }
-}
-
-/// Synchronous recording activity check for native lifecycle handlers such as
-/// the tray menu. `true` includes startup and transcript finalization so the
-/// process cannot exit while a session is becoming durable.
-pub fn is_recording_active(app: &AppHandle) -> bool {
-    app.try_state::<RecordingState>()
-        .is_some_and(|state| state.is_active())
 }
 
 /// Carries the detected meeting PID across the prompt-to-recording navigation.
@@ -241,23 +229,24 @@ pub async fn start_recording(
     state: State<'_, RecordingState>,
     database: State<'_, crate::db::DbState>,
 ) -> Result<RecordingStartStatus, String> {
-    crate::db::ensure_pool(&database.pool).await?;
+    database.pool().await?;
     let mut session = state.session.lock().await;
-    if state.updating.load(Ordering::Acquire) {
-        return Err(
-            "The app is preparing to update. Recording is paused until it restarts.".into(),
-        );
-    }
     if session.is_some() {
         return Err("recording already in progress".into());
     }
+    // Meeting capture ownership excludes Dictation, App updates and quit from
+    // startup through transcript finalization. A prepared update holds the
+    // Update lease, so this claim is what refuses recording during an update.
     let capture_lease = app.state::<CaptureGate>().claim(CaptureOwner::Meeting)?;
-    state.set_active_for_app(&app, true);
+    // Marks the session active before capture starts.
+    crate::app_lifecycle::begin_recording(&app)?;
 
     // Grab the preloaded ASR engine (warmed in the background at app launch);
     // lanes are cheap per-recording streams over the shared weights.
-    let engine = ensure_asr_engine(&state.asr_engine).await;
-    if engine.is_none() {
+    let transcriber = ensure_asr_engine(&state.asr_engine)
+        .await
+        .map(|engine| Arc::new(SherpaTranscriber::new(engine)) as Arc<dyn Transcriber>);
+    if transcriber.is_none() {
         eprintln!("ASR model not found; no transcript text will be produced");
     }
 
@@ -266,7 +255,7 @@ pub async fn start_recording(
             Ok(target) => target,
             Err(error) => {
                 drop(capture_lease);
-                state.set_active_for_app(&app, false);
+                crate::app_lifecycle::end_recording(&app);
                 return Err(error);
             }
         };
@@ -277,13 +266,15 @@ pub async fn start_recording(
         app: app.clone(),
         store: Arc::clone(&transcript_store),
     });
-    let new_session = RecordingSession::new(audio_source, engine, sink);
+    let new_session = RecordingSession::new(audio_source, transcriber, sink);
 
     let start_status = match new_session.start().await {
         Ok(status) => status,
         Err(error) => {
+            // Release ownership before publishing inactivity so presence sees
+            // the capture gate idle.
             drop(capture_lease);
-            state.set_active_for_app(&app, false);
+            crate::app_lifecycle::end_recording(&app);
             return Err(error);
         }
     };
@@ -298,44 +289,6 @@ pub async fn start_recording(
     Ok(start_status)
 }
 
-#[tauri::command]
-pub async fn prepare_app_update(
-    app: AppHandle,
-    state: State<'_, RecordingState>,
-    database: State<'_, crate::db::DbState>,
-) -> Result<(), String> {
-    let session = state.session.lock().await;
-    if session.is_some() || state.is_active() {
-        return Err("Finish and save the current recording before updating.".into());
-    }
-    if state.updating.load(Ordering::Acquire) {
-        return Err("The app is already preparing an update.".into());
-    }
-    let lease = app.state::<CaptureGate>().claim(CaptureOwner::Update)?;
-    state.updating.store(true, Ordering::Release);
-    // Publish before awaiting suspension so a disconnected IPC waiter cannot
-    // leave the update barrier without ownership.
-    *state.update_lease.lock().unwrap() = Some(lease);
-    if let Err(error) = database.pool.suspend().await {
-        state.update_lease.lock().unwrap().take();
-        state.updating.store(false, Ordering::Release);
-        return Err(error);
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn cancel_app_update(
-    state: State<'_, RecordingState>,
-    database: State<'_, crate::db::DbState>,
-) -> Result<(), String> {
-    let _session = state.session.lock().await;
-    database.pool.resume().await;
-    state.updating.store(false, Ordering::Release);
-    state.update_lease.lock().unwrap().take();
-    Ok(())
-}
-
 /// Stops the active recording session and returns the authoritative latest
 /// revision of every utterance. The response closes the event-delivery race at
 /// save time: the frontend can merge this snapshot before persisting. Repeated
@@ -348,7 +301,7 @@ pub async fn stop_recording(
 ) -> Result<RecordingStopResult, String> {
     let mut session = state.session.lock().await;
     let Some(active) = session.take() else {
-        state.set_active_for_app(&app, false);
+        crate::app_lifecycle::end_recording(&app);
         return Ok(RecordingStopResult {
             transcript: Vec::new(),
             finalization_warning: None,
@@ -356,8 +309,10 @@ pub async fn stop_recording(
     };
     let stop_result = active.session.stop().await;
     let result = result_after_finalization(stop_result, &active.transcript_store);
+    // Activity ends only after finalization so the app cannot quit or update
+    // while the transcript is becoming durable. The lease is released first.
     drop(active);
-    state.set_active_for_app(&app, false);
+    crate::app_lifecycle::end_recording(&app);
     Ok(result)
 }
 
@@ -402,7 +357,7 @@ pub fn setup(app: &mut tauri::App) {
 mod tests {
     use super::*;
     use crate::recording_session::TranscriptChannel;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn event(utterance_id: u64, revision: u32, text: &str) -> TranscriptEvent {
         TranscriptEvent {
@@ -723,17 +678,5 @@ mod tests {
             "a stale target must not fall back to system-wide audio"
         );
         assert!(state.pending_loopback_target.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn recording_activity_covers_the_full_native_lifecycle() {
-        let state = RecordingState::new();
-        assert!(!state.is_active());
-
-        state.set_active(true);
-        assert!(state.is_active());
-
-        state.set_active(false);
-        assert!(!state.is_active());
     }
 }

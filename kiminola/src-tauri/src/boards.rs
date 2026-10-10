@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tauri::State;
 
-use crate::db::{ensure_pool, DbState};
+use crate::db::DbState;
 
 const DEFAULT_BOARD_NAME: &str = "To-Do's";
 const DEFAULT_COLUMN_NAMES: [&str; 5] = ["Backlog", "To Do", "Working", "Update", "Done"];
@@ -559,13 +559,13 @@ pub(crate) async fn update_enhanced_action_items_impl(
 
 #[tauri::command]
 pub async fn list_boards(state: State<'_, DbState>) -> Result<BoardsSnapshot, String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     list_boards_impl(&pool).await
 }
 
 #[tauri::command]
 pub async fn create_board(state: State<'_, DbState>, name: String) -> Result<i64, String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     create_board_impl(&pool, &name).await
 }
 
@@ -575,7 +575,7 @@ pub async fn rename_board(
     board_id: i64,
     name: String,
 ) -> Result<(), String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     rename_board_impl(&pool, board_id, &name).await
 }
 
@@ -585,7 +585,7 @@ pub async fn create_board_column(
     board_id: i64,
     name: String,
 ) -> Result<i64, String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     create_column_impl(&pool, board_id, &name).await
 }
 
@@ -595,7 +595,7 @@ pub async fn rename_board_column(
     column_id: i64,
     name: String,
 ) -> Result<(), String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     rename_column_impl(&pool, column_id, &name).await
 }
 
@@ -609,7 +609,7 @@ pub async fn add_board_card(
     source_action_index: Option<i64>,
     source_enhanced_markdown: Option<String>,
 ) -> Result<BoardCard, String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     add_card_impl(
         &pool,
         board_id,
@@ -628,7 +628,7 @@ pub async fn move_board_card(
     card_id: i64,
     column_id: i64,
 ) -> Result<(), String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     move_card_impl(&pool, card_id, column_id).await
 }
 
@@ -640,7 +640,7 @@ pub async fn update_enhanced_action_items(
     enhanced_markdown: String,
     edits: Vec<ActionItemEdit>,
 ) -> Result<(), String> {
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     update_enhanced_action_items_impl(
         &pool,
         meeting_id,

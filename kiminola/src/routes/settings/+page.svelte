@@ -34,7 +34,8 @@
   import * as Select from "$lib/components/ui/select";
   import * as Dialog from "$lib/components/ui/dialog";
   import { Switch } from "$lib/components/ui/switch";
-  import { compactReleaseNotes, isRecordingPath } from "$lib/update-policy";
+  import { compactReleaseNotes } from "$lib/update-policy";
+  import { captureSession } from "$lib/capture-session.svelte";
   import { checkForUpdates, installUpdate, updateState } from "$lib/update.svelte";
   import {
     nextSettingsSection,
@@ -400,7 +401,7 @@
   }
 
   async function installAppUpdate() {
-    await installUpdate(() => !isRecordingPath(page.url.pathname));
+    await installUpdate(() => !captureSession.active);
   }
 </script>
 

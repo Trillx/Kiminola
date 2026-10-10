@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::db::{ensure_pool, DbState};
+use crate::db::{settings, DbState};
 
 #[path = "shortcut_change.rs"]
 mod change;
@@ -44,16 +44,12 @@ pub async fn get_global_shortcut(
 ) -> Result<Option<String>, String> {
     // Do not expose an intermediate saved value during replacement/rollback.
     let _change = shortcut_state.changes.lock().await;
-    let pool = ensure_pool(&state.pool).await?;
+    let pool = state.pool().await?;
     load_saved_shortcut(&pool).await
 }
 
 async fn load_saved_shortcut(pool: &sqlx::SqlitePool) -> Result<Option<String>, String> {
-    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
-        .bind(SHORTCUT_KEY)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())
+    settings::get(pool, SHORTCUT_KEY).await
 }
 
 #[tauri::command]
@@ -62,7 +58,7 @@ pub async fn set_global_shortcut(
     app: AppHandle,
     db: State<'_, DbState>,
 ) -> Result<(), String> {
-    let pool = ensure_pool(&db.pool).await?;
+    let pool = db.pool().await?;
     // Own the task so dropping the IPC waiter cannot cancel a change between OS
     // registration and its persistence/compensation. The task holds the gate.
     tauri::async_runtime::spawn(async move {
@@ -125,24 +121,10 @@ impl change::ShortcutBackend for NativeShortcutBackend<'_> {
     }
 
     async fn save(&self, shortcut: Option<&str>) -> Result<(), String> {
-        if let Some(shortcut) = shortcut {
-            sqlx::query(
-                "INSERT INTO settings (key, value) VALUES (?, ?)
-                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            )
-            .bind(SHORTCUT_KEY)
-            .bind(shortcut)
-            .execute(self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        } else {
-            sqlx::query("DELETE FROM settings WHERE key = ?")
-                .bind(SHORTCUT_KEY)
-                .execute(self.pool)
-                .await
-                .map_err(|e| e.to_string())?;
+        match shortcut {
+            Some(shortcut) => settings::set(self.pool, SHORTCUT_KEY, shortcut).await,
+            None => settings::remove(self.pool, SHORTCUT_KEY).await,
         }
-        Ok(())
     }
 }
 
@@ -197,7 +179,7 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let state = handle.state::<ShortcutState>();
         let _change = state.changes.lock().await;
         let db_state = handle.state::<DbState>();
-        let pool = ensure_pool(&db_state.pool).await?;
+        let pool = db_state.pool().await?;
         if let Some(saved) = load_saved_shortcut(&pool).await? {
             let parsed = parse_shortcut(&saved)?;
             register_shortcut(&handle, &parsed)?;

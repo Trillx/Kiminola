@@ -5,6 +5,8 @@ export interface DraftAutosave<T = string> {
   schedule(value: DraftValue<T>): void;
   flush(value: DraftValue<T>): Promise<void>;
   flushPending(): Promise<void>;
+  /** The latest value not yet confirmed saved (scheduled, in flight, or failed); a factory is evaluated. */
+  pendingValue(): T | undefined;
   cancel(): void;
 }
 
@@ -39,13 +41,15 @@ export function createDraftAutosave<T = string>(
     if (pending) void enqueue(pending).catch(() => undefined);
   }
 
+  function resolve(value: DraftValue<T>): T {
+    return typeof value === "function" ? (value as () => T)() : value;
+  }
+
   function enqueue(snapshot: { value: DraftValue<T> }): Promise<void> {
     const request = ++latestRequest;
     if (!cancelled) onStatus("saving");
 
-    const run = queue.catch(() => undefined).then(() => save(
-      typeof snapshot.value === "function" ? (snapshot.value as () => T)() : snapshot.value,
-    ));
+    const run = queue.catch(() => undefined).then(() => save(resolve(snapshot.value)));
     queue = run.catch(() => undefined);
 
     return run.then(
@@ -78,6 +82,10 @@ export function createDraftAutosave<T = string>(
     flushPending() {
       clearTimers();
       return pending ? enqueue(pending) : queue;
+    },
+
+    pendingValue() {
+      return pending ? resolve(pending.value) : undefined;
     },
 
     cancel() {

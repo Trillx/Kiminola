@@ -206,7 +206,7 @@ test('hardware update validation preserves persistent state and exercises migrat
     read('kiminola/scripts/hardware-recovery.ps1'),
     read('kiminola/scripts/hardware-runner-state.ps1'),
     read('kiminola/scripts/legacy-startup.test.ps1'),
-    read('kiminola/src-tauri/src/db.rs'),
+    read('kiminola/src-tauri/src/db/tests.rs'),
   ]);
 
   assert.match(script, /Get-FileHash/);

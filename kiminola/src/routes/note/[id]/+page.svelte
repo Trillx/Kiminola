@@ -1,13 +1,8 @@
 <script lang="ts">
   import { page } from "$app/state";
-  import { noteSaver } from "$lib/note-saves";
+  import { draftNotepad, notepad, type NotepadStatus } from "$lib/notepad-store";
   import { goto } from "$app/navigation";
-  import {
-    deleteNoteDraft,
-    getNoteDraft,
-    updateNoteDraft,
-    type NoteDraftDetail,
-  } from "$lib/tauri";
+  import { deleteNoteDraft, getNoteDraft, type NoteDraftDetail } from "$lib/tauri";
   import { Button } from "$lib/components/ui/button";
   import { Textarea } from "$lib/components/ui/textarea";
 
@@ -15,6 +10,13 @@
   let notes = $state("");
   let loaded = $state(false);
   let status = $state("");
+
+  const STATUS_LABELS: Record<NotepadStatus, string> = {
+    idle: "",
+    saving: "Saving…",
+    saved: "Saved",
+    error: "Could not save",
+  };
 
   function durationLabel(seconds: number): string {
     const minutes = Math.floor(seconds / 60);
@@ -25,39 +27,58 @@
   $effect(() => {
     const id = Number(page.params.id);
     if (!Number.isFinite(id)) return;
+    let current = true;
+    const key = draftNotepad(id);
     draft = null;
     notes = "";
     loaded = false;
-    getNoteDraft(id)
+    const unsubscribe = notepad.subscribe(key, (next) => (status = STATUS_LABELS[next]));
+    notepad
+      .read(() => getNoteDraft(id), (err) => console.error("Failed to save notes:", err))
       .then((next) => {
+        if (!current) return;
         draft = next;
-        notes = next.raw_markdown;
+        // Text that has not reached the database yet is newer than the row.
+        notes = notepad.pending(key)?.text ?? next.raw_markdown;
       })
       .catch((err) => console.error("Failed to load note draft:", err))
-      .finally(() => (loaded = true));
+      .finally(() => {
+        if (current) loaded = true;
+      });
+    return () => {
+      current = false;
+      unsubscribe();
+    };
   });
 
   function onNotesInput() {
     if (!draft || draft.meeting_id !== null) return;
-    const id = draft.id;
-    status = "Saving…";
-    noteSaver(`draft:${id}`, (text) => updateNoteDraft(id, text), (next) => {
-      status = next === "saved" ? "Saved" : next === "error" ? "Could not save" : "Saving…";
-    }).schedule(notes);
+    notepad.edit(draftNotepad(draft.id), notes);
   }
 
   async function startRecording() {
     if (!draft) return;
     const id = draft.id;
-    await noteSaver(`draft:${id}`, (text) => updateNoteDraft(id, text)).flush(notes);
-    await goto(`/record?draft=${draft.id}`);
+    try {
+      await notepad.flush(draftNotepad(id));
+    } catch (err) {
+      console.error("Failed to save notes before recording:", err);
+      return;
+    }
+    await goto(`/record?draft=${id}`);
   }
 
   async function removeDraft() {
     if (!draft || !window.confirm("Delete this note draft?")) return;
-    const id = draft.id;
-    await noteSaver(`draft:${id}`, (text) => updateNoteDraft(id, text)).flushPending();
-    await deleteNoteDraft(draft.id);
+    const key = draftNotepad(draft.id);
+    try {
+      await notepad.flush(key);
+      await deleteNoteDraft(draft.id);
+    } catch (err) {
+      console.error("Failed to delete note draft:", err);
+      return;
+    }
+    await notepad.discard(key);
     await goto("/");
   }
 </script>

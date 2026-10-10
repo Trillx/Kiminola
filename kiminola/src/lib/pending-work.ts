@@ -1,4 +1,11 @@
-/** Shared by editors and the update boundary, including saves from unmounted pages. */
+/**
+ * What an App update waits for before shutting the app down. Each kind of
+ * work is registered by its owner:
+ * - pending saves: owners of unsaved state (the Notepad store, the Capture
+ *   session) register a flush that resolves once their work is durable;
+ * - operations: in-flight data writes sent through tauri.ts (DATA_WRITES);
+ * - guards: views that hold an edit only they can commit (they throw to refuse).
+ */
 const savers = new Set<() => Promise<void>>();
 const operations = new Set<Promise<unknown>>();
 const guards = new Set<() => void>();

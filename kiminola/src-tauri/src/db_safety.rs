@@ -683,6 +683,49 @@ mod tests {
         restored.close().await;
     }
 
+    /// Earlier Windows builds recorded CRLF checksums; newer builds record LF.
+    /// Both histories must reopen without migrating again or rewriting history.
+    #[tokio::test]
+    async fn legacy_line_ending_histories_reopen_without_rewriting_checksums() {
+        use sha2::{Digest, Sha384};
+        for crlf in [false, true] {
+            let fixture = Fixture::new();
+            let pool = seed(&fixture.path, MIGRATIONS.migrations.len()).await;
+            for migration in MIGRATIONS.iter() {
+                let lf = migration.sql.replace("\r\n", "\n");
+                let sql = if crlf { lf.replace('\n', "\r\n") } else { lf };
+                sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+                    .bind(Sha384::digest(sql.as_bytes()).to_vec())
+                    .bind(migration.version)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            let before: Vec<(i64, Vec<u8>)> =
+                sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            pool.close().await;
+
+            let reopened = init_pool(&fixture.path)
+                .await
+                .expect("line endings must not block startup");
+            assert_eq!(marker(&reopened).await, "before upgrade");
+            let after: Vec<(i64, Vec<u8>)> =
+                sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                    .fetch_all(&reopened)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                before, after,
+                "legacy checksums must remain unchanged on disk"
+            );
+            reopened.close().await;
+            assert!(list_backups(&fixture.path).unwrap().is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn interrupted_restore_and_empty_file_never_create_an_empty_library() {
         let fixture = Fixture::new();
