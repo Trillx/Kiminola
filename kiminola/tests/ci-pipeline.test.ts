@@ -84,6 +84,22 @@ test('release validates before creating a draft and builds on native runners', a
   assert.match(workflow, /SIGNPATH_ARTIFACT_CONFIGURATION_SLUG/);
   assert.match(workflow, /SIGNPATH_SIGNER_THUMBPRINT/);
   assert.match(workflow, /\^\[0-9A-Fa-f\]\{40\}\$/);
+  assert.match(
+    workflow,
+    /RELEASE_AUTHENTICODE: \$\{\{ vars\.SIGNPATH_SIGNER_THUMBPRINT != '' && 'signpath' \|\| 'none' \}\}/
+  );
+  assert.match(workflow, /RELEASE_HARDWARE_GATE: \$\{\{ vars\.KIMINOLA_HARDWARE_CI == 'true' && 'required' \|\| 'skipped' \}\}/);
+  assert.match(workflow, /SignPath is partially configured/, 'a partial SignPath setup fails instead of silently releasing unsigned');
+  assert.match(workflow, /hardware-gate:[\s\S]*?RELEASE_HARDWARE_GATE -ne 'required'[\s\S]*?exit 0[\s\S]*?\/dispatches/);
+  assert.equal(
+    workflow.match(/if: env\.RELEASE_AUTHENTICODE == 'signpath'/g)?.length,
+    5,
+    'every SignPath upload, submission and executable swap is gated on the SignPath mode'
+  );
+  assert.ok(
+    (workflow.match(/Status -ne 'NotSigned'/g)?.length ?? 0) >= 5,
+    'unsigned releases still verify that no asset carries an unexpected Authenticode signature'
+  );
   const signingPreflight = workflow.indexOf('SIGNPATH_API_TOKEN');
   assert.ok(signingPreflight > preflight && signingPreflight < createRelease, 'signing credentials are checked before draft creation');
   assert.match(workflow, /signpath\/github-action-submit-signing-request@[0-9a-f]{40}/);

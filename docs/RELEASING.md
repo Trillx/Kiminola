@@ -54,6 +54,21 @@ Both signing requests leave `skip-decompress` disabled and verify the returned
 certificate against `SIGNPATH_SIGNER_THUMBPRINT`; a valid signature from any
 other certificate fails the release.
 
+### Releasing before SignPath and hardware runners exist
+
+`SIGNPATH_SIGNER_THUMBPRINT` selects the Authenticode mode. When it is unset and
+no other SignPath secret or variable is set, the release workflow skips the
+SignPath steps and requires every installer and portable executable to be
+`NotSigned`. The updater signature, hashes, PE architecture, portable contents
+and `latest.json` checks still run. Setting only some SignPath values fails
+preflight rather than quietly producing an unsigned release.
+
+Likewise, when `KIMINOLA_HARDWARE_CI` is not `true`, the hardware gate passes
+with a warning instead of dispatching physical validation. Draft notes for
+either mode state what was skipped. Windows SmartScreen may warn on first run of
+an unsigned build, so perform the manual installer checks in the release flow
+below before publishing.
+
 For a local `gh` installation, these commands send the files directly to
 GitHub without printing their contents:
 
@@ -96,9 +111,9 @@ candidate; a manual dispatch can request a specific baseline only when it equals
 that computed highest eligible release. Eligibility first requires the canonical
 installer and signature assets; the selected signature is then verified
 cryptographically before execution. An invalid signature blocks the gate rather than
-silently falling back to an older release. A stale override is rejected. A missing
-baseline or hardware configuration fails visibly and blocks tag releases instead
-of reporting a green no-op.
+silently falling back to an older release. A stale override is rejected. Once
+`KIMINOLA_HARDWARE_CI=true`, a missing baseline or hardware configuration fails
+visibly and blocks tag releases instead of reporting a green no-op.
 
 The runners must use dedicated test accounts. The workflow snapshots the existing
 Kimi Nola application directory, complete persistent user root, installer-managed

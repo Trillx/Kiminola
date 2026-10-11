@@ -288,7 +288,8 @@ try {
     assert.equal(new URL(page.url()).pathname, '/record');
     assert.equal(await page.locator('.notepad-textarea').inputValue(), 'Unsaved recovery notes.');
     await page.evaluate(() => window.audit.failRecovery = false);
-    await page.getByRole('button', { name: 'Retry saving', exact: true }).click();
+    await page.getByRole('alert').filter({ hasText: 'recovery write rejected' })
+      .getByRole('button', { name: 'Retry saving', exact: true }).click();
     await page.waitForURL(origin + '/');
     assert.equal(await page.evaluate(() => window.audit.recovery.rawMarkdown), 'Unsaved recovery notes.');
   });
@@ -332,7 +333,8 @@ try {
     assert.equal(await page.locator('.notepad-textarea').inputValue(), 'Recovered work plus unsaved edits.');
     assert.equal(await page.evaluate(() => window.audit.calls.filter(c => c.cmd === 'start_recording').length), 1);
     await page.evaluate(() => window.audit.failRecovery = false);
-    await page.getByRole('button', { name: 'Retry saving', exact: true }).click();
+    await page.getByRole('alert').filter({ hasText: 'recovery write rejected' })
+      .getByRole('button', { name: 'Retry saving', exact: true }).click();
     await page.waitForURL('**/record?spaceId=1');
     await eventually(() => page.locator('.recording-badge').textContent(), v => v === 'Recording', 'New episode after retry');
     assert.equal(await page.locator('.notepad-textarea').inputValue(), '');

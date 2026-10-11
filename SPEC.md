@@ -260,7 +260,12 @@ Adopted lifecycle decision: [Define dictation lifecycle, privacy, and recovery](
   backup. Tag jobs submit the release executable and final installer to SignPath,
   require a valid Authenticode chain, then generate the updater signature over the
   final Authenticode-signed installer bytes. Final verification downloads the
-  exact assets and re-checks both signature systems.
+  exact assets and re-checks both signature systems. Until the SignPath project
+  is configured, tag releases run in an explicit unsigned mode: assets carry only
+  the updater signature, verification requires them to be `NotSigned`, and the
+  draft notes say so. A partial SignPath configuration fails preflight. The
+  physical hardware gate likewise runs only once `KIMINOLA_HARDWARE_CI=true`;
+  otherwise the release warns and its notes record that it did not run.
 - **Auto-update**: Tauri built-in updater + GitHub Releases JSON manifest. Tag
   pushes first validate the tag and synchronized application versions, then
   use a GitHub-hosted gate to dispatch the physical x64 + ARM64 checks in a
