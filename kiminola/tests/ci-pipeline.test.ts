@@ -145,6 +145,10 @@ test('release validates before creating a draft and builds on native runners', a
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /windows-release:[\s\S]*?permissions:[\s\S]*?contents: read/);
   assert.match(workflow, /manifest:[\s\S]*?permissions:[\s\S]*?contents: read/);
+  const manifestJob = workflow.slice(workflow.indexOf('  manifest:'), workflow.indexOf('  publish-manifest:'));
+  assert.doesNotMatch(manifestJob, /gh release download|GH_TOKEN/, 'read-only tokens cannot see draft releases');
+  assert.match(workflow, /publish-assets:[\s\S]*?gh release download[\s\S]*?release-readback-/);
+  assert.match(manifestJob, /release-readback-[\s\S]*?-ReleaseFixturePath \$releaseDescriptionPath/);
   assert.match(workflow, /publish-assets:[\s\S]*?permissions:[\s\S]*?contents: write/);
   assert.match(workflow, /publish-manifest:[\s\S]*?permissions:[\s\S]*?contents: write/);
   assert.match(workflow, /uploadedManifestPath[\s\S]*?Get-FileHash/);
