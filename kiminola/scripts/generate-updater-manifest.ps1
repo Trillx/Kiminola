@@ -21,8 +21,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Offline fixture mode keeps the generator deterministic for tests; the
-# release workflow always uses the live GitHub API path.
+# Offline mode reads a saved release description whose signature assets carry
+# local_path. Tests use it for determinism; the release workflow uses it because
+# its read-only verification job cannot see draft releases through the API.
 $useFixture = -not [string]::IsNullOrWhiteSpace($ReleaseFixturePath)
 
 if ($useFixture) {
@@ -82,8 +83,10 @@ function Read-Signature {
         [object]$Asset
     )
 
-    if ($useFixture -and $Asset.PSObject.Properties['local_path']) {
-        # Fixture mode: signature content comes from a local file.
+    if ($useFixture) {
+        if (-not $Asset.PSObject.Properties['local_path']) {
+            throw "Offline release description has no local copy of '$($Asset.name)'."
+        }
         $signature = [System.IO.File]::ReadAllText($Asset.local_path)
     } else {
         $response = Invoke-RestMethod -Method Get -Uri $Asset.url -Headers (@{

@@ -651,6 +651,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
           $ErrorActionPreference = 'Stop'
           $assetDirectory = '${{ runner.temp }}/release-assets'
@@ -673,6 +674,30 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Uploading '$($asset.FullName)' failed." }
           }
 
+          # Draft releases are invisible to read-only tokens, so read the
+          # uploaded draft assets back here and hand those exact bytes to the
+          # read-only verification job.
+          $readbackDirectory = '${{ runner.temp }}/release-readback'
+          New-Item -ItemType Directory -Path $readbackDirectory -Force | Out-Null
+          gh release download $env:RELEASE_TAG `
+            --repo $env:RELEASE_REPOSITORY `
+            --dir $readbackDirectory `
+            --pattern '*-setup.exe' `
+            --pattern '*.exe.sig' `
+            --pattern '*-portable.zip' `
+            --pattern 'release-verification-*.json'
+          if ($LASTEXITCODE -ne 0) { throw 'Reading back the draft release assets failed.' }
+          gh api "repos/$env:RELEASE_REPOSITORY/releases/$env:RELEASE_ID" > "$readbackDirectory/release.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Reading back the draft release metadata failed.' }
+
+      - name: Hand the draft readback to the verification job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-readback-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-readback
+          if-no-files-found: error
+          retention-days: 1
+
   manifest:
     name: Verify assets and generate updater manifest
     needs:
@@ -688,10 +713,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Download the draft release readback
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-readback-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-assets
+
       - name: Verify exact assets, signatures, and latest.json
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
@@ -700,15 +730,6 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $config = Get-Content -Raw 'kiminola/src-tauri/tauri.conf.json' | ConvertFrom-Json
           $downloadDirectory = Join-Path $env:RUNNER_TEMP 'release-assets'
-          New-Item -ItemType Directory -Path $downloadDirectory -Force | Out-Null
-          gh release download $env:RELEASE_TAG `
-            --repo $env:RELEASE_REPOSITORY `
-            --dir $downloadDirectory `
-            --pattern '*-setup.exe' `
-            --pattern '*.exe.sig' `
-            --pattern '*-portable.zip' `
-            --pattern 'release-verification-*.json'
-          if ($LASTEXITCODE -ne 0) { throw 'Downloading release assets for final verification failed.' }
 
           $assetRules = [ordered]@{
             '*-setup.exe' = 2
@@ -846,12 +867,25 @@ jobs:
           }
 
           $outputPath = Join-Path $env:RUNNER_TEMP 'latest.json'
+          # This job's read-only token cannot see the draft, so describe the
+          # release from the publish job's readback, pointing each asset at
+          # its verified local copy.
+          $release = Get-Content -Raw (Join-Path $downloadDirectory 'release.json') | ConvertFrom-Json
+          foreach ($asset in $release.assets) {
+            $localPath = Join-Path $downloadDirectory $asset.name
+            if (Test-Path -LiteralPath $localPath -PathType Leaf) {
+              $asset | Add-Member -NotePropertyName local_path -NotePropertyValue $localPath
+            }
+          }
+          $releaseDescriptionPath = Join-Path $env:RUNNER_TEMP 'release-description.json'
+          [IO.File]::WriteAllText($releaseDescriptionPath, ($release | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
           & .\kiminola\scripts\generate-updater-manifest.ps1 `
             -Repository $env:RELEASE_REPOSITORY `
             -Tag $env:RELEASE_TAG `
             -ReleaseId ([long]$env:RELEASE_ID) `
             -Version $config.version `
-            -OutputPath $outputPath
+            -OutputPath $outputPath `
+            -ReleaseFixturePath $releaseDescriptionPath
 
           $manifest = Get-Content -Raw $outputPath | ConvertFrom-Json
           $expectedPrefix = "https://github.com/$env:RELEASE_REPOSITORY/releases/download/$env:RELEASE_TAG/"

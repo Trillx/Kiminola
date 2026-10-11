@@ -185,7 +185,9 @@ seven days. Each archive contains
    complete portable archive, and SHA-256/Authenticode verification report to a
    minimal publishing job; repository-write access is not exposed to build hooks
    or signing actions.
-5. A read-only verification job downloads the exact release assets, checks every
+5. The publishing job reads the draft's assets and metadata back. Draft releases
+   are invisible to read-only tokens, so it hands that readback to a read-only
+   verification job as a workflow artifact. That job checks every
    report hash, installer and extracted portable-executable Authenticode signer
    thumbprints, portable-archive member, and the PE architecture of every extracted
    executable and native DLL, then
