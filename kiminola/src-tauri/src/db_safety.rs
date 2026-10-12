@@ -71,7 +71,7 @@ fn acquire_owner(path: &Path) -> Result<File, String> {
         options.share_mode(0);
     }
     options.open(path.with_extension("owner-lock"))
-        .map_err(|e| format!("Cannot exclusively open the data folder. Close other Kimi Nola instances and retry: {e}"))
+        .map_err(|e| format!("Cannot exclusively open the data folder. Close other OatWave instances and retry: {e}"))
 }
 
 async fn connect(path: &Path, read_only: bool) -> Result<SqlitePool, String> {
@@ -150,7 +150,7 @@ async fn check_history(pool: &SqlitePool, migrations: &Migrator) -> Result<bool,
             .map_err(io_error)?;
     for (version, checksum, success) in &applied {
         let migration = migrations.iter().find(|m| m.version == *version)
-            .ok_or_else(|| format!("This database requires a newer Kimi Nola version (migration {version}). Install the newer app; do not downgrade."))?;
+            .ok_or_else(|| format!("This database requires a newer OatWave version (migration {version}). Install the newer app; do not downgrade."))?;
         if !success || migration.checksum.as_ref() != checksum.as_slice() {
             return Err(format!("Migration {version} history does not match this app. The database has been preserved."));
         }
@@ -602,7 +602,7 @@ mod tests {
         assert!(open_migrated(&fixture.path, &prefix(8), true)
             .await
             .unwrap_err()
-            .contains("newer Kimi Nola"));
+            .contains("newer OatWave"));
         let pool = connect(&fixture.path, false).await.unwrap();
         sqlx::query("UPDATE _sqlx_migrations SET checksum=x'00' WHERE version=1")
             .execute(&pool)
@@ -867,7 +867,7 @@ mod tests {
             .pool()
             .await
             .unwrap_err()
-            .contains("Close other Kimi Nola"));
+            .contains("Close other OatWave"));
         pool.close().await;
         first.prepare_restart().await.unwrap();
         assert!(first.pool().await.is_err());
@@ -909,7 +909,7 @@ async fn restore_backup(path: &Path, name: &str) -> Result<(), String> {
         let applied: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
             .fetch_one(&backup)
             .await
-            .map_err(|_| "This file is not a Kimi Nola migration backup.".to_string())?;
+            .map_err(|_| "This file is not a OatWave migration backup.".to_string())?;
         if applied == 0 {
             return Err(
                 "This backup has no completed migrations; it cannot replace your data.".into(),

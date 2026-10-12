@@ -181,7 +181,7 @@ async fn download_file(
         let client = reqwest::Client::new();
         let mut req = client.get(&url).header(
             reqwest::header::USER_AGENT,
-            HeaderValue::from_static("KimiNola/0.1.1"),
+            HeaderValue::from_static(concat!("OatWave/", env!("CARGO_PKG_VERSION"))),
         );
         if existing_len > 0 && existing_len < file.bytes {
             req = req.header(

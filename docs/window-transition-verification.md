@@ -2,7 +2,7 @@
 
 Implemented September 6, 2026. Companion placement uses a 200 ms cubic ease-out transition on a dedicated worker. Each frame changes position and size together, with one elapsed-time sample for both windows. Temporary WinEvent hooks cancel on user move/resize, minimization, or destruction; visibility and window validity are also checked before writes. New requests supersede the current generation. There are no layout watchers after completion.
 
-Hidden or minimized Kimi Nola uses its destination as its normal placement before revealing. Maximized windows restore before their start rectangles are measured. Fullscreen/presentation meeting windows remain untouched. Reduced motion uses immediate placement. Viewport resizing uses CSS geometry with no transition; an explicit sidebar-button click enables a 200 ms shell transition until it completes or a resize interrupts it.
+Hidden or minimized OatWave uses its destination as its normal placement before revealing. Maximized windows restore before their start rectangles are measured. Fullscreen/presentation meeting windows remain untouched. Reduced motion uses immediate placement. Viewport resizing uses CSS geometry with no transition; an explicit sidebar-button click enables a 200 ms shell transition until it completes or a resize interrupts it.
 
 ## Verified automatically
 
@@ -26,7 +26,7 @@ From `kiminola/src-tauri/`, set `SHERPA_ONNX_LIB_DIR` and `ORT_LIB_PATH` to the 
 No before/after desktop recording was captured. The app was not running at the start of this task. Automated fixtures and browser checks do not prove compositor smoothness or live audio behavior.
 
 - In a real Teams or Zoom call, start recording from the meeting prompt with both windows visible. Confirm a short coordinated glide, no flashes or overshoot, and uninterrupted audio/transcription.
-- Repeat with Kimi Nola hidden, minimized, and maximized, and with the meeting window maximized or minimized. Hidden/minimized notes should appear at the destination; visible windows should finish at the intended work-area split.
+- Repeat with OatWave hidden, minimized, and maximized, and with the meeting window maximized or minimized. Hidden/minimized notes should appear at the destination; visible windows should finish at the intended work-area split.
 - Check fullscreen/presentation protection and the missing-meeting-window fallback. Confirm no automatic rearrangement after the initial transition or after recording stops.
 - During the glide, drag either window, close/hide either window, and issue a replacement layout request. Confirm the user's action wins without a later snap or refocus.
 - Repeat with Windows animations disabled, on actual x64 hardware, and across monitors at 100%, 150%, and 200% scaling, including a display left of the primary display and taskbars on another edge.

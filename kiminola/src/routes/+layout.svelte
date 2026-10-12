@@ -123,7 +123,7 @@
 </div>
 {#if updateBusy}
   <div class="update-shutdown" role="status" aria-live="polite">
-    {updateState.status === "preparing" ? "Saving your changes before updating…" : "Installing the update. Kimi Nola will restart…"}
+    {updateState.status === "preparing" ? "Saving your changes before updating…" : "Installing the update. OatWave will restart…"}
   </div>
 {/if}
 </DatabaseGate>

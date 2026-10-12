@@ -406,7 +406,7 @@
 </script>
 
 <svelte:head>
-  <title>Settings — Kimi Nola</title>
+  <title>Settings — OatWave</title>
 </svelte:head>
 
 <div class="main-content settings-page">
@@ -451,7 +451,7 @@
             <div class="settings-row">
               <div class="settings-row-copy">
                 <strong>Theme</strong>
-                <span>Choose the appearance used throughout Kimi Nola.</span>
+                <span>Choose the appearance used throughout OatWave.</span>
               </div>
               <div class="theme-options" role="group" aria-label="Theme">
                 <button
@@ -519,7 +519,7 @@
         <div class="settings-card provider-config">
           <div class="enhance-title">On-device speech model</div>
           <div class="enhance-copy">
-            Kimi Nola uses this local model for live transcription. Model files stay on this
+            OatWave uses this local model for live transcription. Model files stay on this
             machine, and meeting audio is never uploaded.
           </div>
 
@@ -593,7 +593,7 @@
         </div>
       {:else if active === "about"}
         <div class="settings-card provider-config">
-          <div class="enhance-title">About Kimi Nola</div>
+          <div class="enhance-title">About OatWave</div>
           <div class="enhance-copy">
             Local-first meeting transcription and AI-enhanced notes for Windows.
           </div>
@@ -609,7 +609,7 @@
         <div class="settings-card provider-config update-settings-card">
           <div class="enhance-title">Updates</div>
           <div class="enhance-copy">
-            Kimi Nola checks the published stable GitHub release after launch. It never installs an
+            OatWave checks the published stable GitHub release after launch. It never installs an
             update while a meeting is active, and installation always requires your confirmation.
           </div>
 
@@ -633,13 +633,13 @@
           {:else if updateState.status === "ready"}
             <div class="model-status ready" role="status">
               <strong>Update ready to install.</strong>
-              <span>Kimi Nola will close and restart after installation.</span>
+              <span>OatWave will close and restart after installation.</span>
             </div>
           {:else if updateState.status === "preparing"}
             <div class="model-status" aria-live="polite">Saving your changes before updating…</div>
           {:else if updateState.status === "installing"}
             <div class="model-status" aria-live="polite">
-              Installing the update. Kimi Nola will restart automatically.
+              Installing the update. OatWave will restart automatically.
             </div>
           {:else if updateState.status === "up_to_date"}
             <div class="model-status ready" role="status">
@@ -686,7 +686,7 @@
           <div class="template-requirements">
             <div class="template-requirements-copy">
               <span class="template-requirements-label">Required placeholders</span>
-              <span>Keep both tokens in custom prompts so Kimi Nola can read the meeting.</span>
+              <span>Keep both tokens in custom prompts so OatWave can read the meeting.</span>
             </div>
             <div class="template-placeholder-actions">
               <Button
@@ -774,7 +774,7 @@
                   <div class="template-editor-scroll">
                     <div class="field">
                       <Label for="template-prompt">Prompt</Label>
-                      <p class="enhance-copy">Tell Kimi Nola which sections to write and what details to capture. Keep both placeholders so it can read the transcript and your notes.</p>
+                      <p class="enhance-copy">Tell OatWave which sections to write and what details to capture. Keep both placeholders so it can read the transcript and your notes.</p>
                       <Textarea
                         id="template-prompt"
                         class="template-prompt-editor"

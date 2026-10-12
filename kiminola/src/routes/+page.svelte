@@ -66,7 +66,7 @@
 </script>
 
 <svelte:head>
-  <title>Kimi Nola</title>
+  <title>OatWave</title>
 </svelte:head>
 
 <div class="main-content">

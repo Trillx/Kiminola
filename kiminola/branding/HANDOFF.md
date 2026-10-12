@@ -1,10 +1,10 @@
-# Kimi Nola — Handoff Spec (Rev A)
+# OatWave — Handoff Spec (Rev A)
 
-**To the implementing agent.** This spec + the identity sheet (`app/index.html`, the tie-breaker — when in doubt, match it exactly) are sufficient to build the Kimi Nola brand surface in any stack without follow-up questions. All assets live in `branding/`.
+**To the implementing agent.** This spec defines the current OatWave identity. All current assets live in `branding/`; use the outlined OatWave SVGs for the name. `Logo Design/app/index.html` at the repository root records the original visual direction before the rename.
 
 ## 1. Concept
 
-**Oatwave.** An oat grain — the *granola* namesake — whose natural striations are a live audio waveform. One mark carries both halves of the product: meeting notes (the grain) and voice dictation (the wave). The husk path is the clip mask for the bars, so longer bars end flush at the shell like real grain texture. Warm earth palette, editorial serif voice, mono for metadata. The identity is light-first (paper cream) with a charcoal dark mode; the app tile is always charcoal.
+**OatWave.** An oat grain — the *granola* namesake — whose natural striations are a live audio waveform. One mark carries both halves of the product: meeting notes (the grain) and voice dictation (the wave). The husk path is the clip mask for the bars, so longer bars end flush at the shell like real grain texture. Warm earth palette, editorial serif voice, mono for metadata. The identity is light-first (paper cream) with a charcoal dark mode; the app tile is always charcoal.
 
 ## 2. Design tokens
 
@@ -13,7 +13,7 @@
 | `--paper` | `#F2EFE9` | Default light background; wordmark ink on dark panels |
 | `--beige` | `#DFD7C8` | Cards, sidebar surfaces, inactive states on light |
 | `--gold` | `#CCC0A8` | Muted gold — **dark surfaces only**: recording state, the gold bar, emphasis |
-| `--deepgold` | `#A88B4F` | Gold on **light surfaces only**: links, accents, the "nola" in the wordmark |
+| `--deepgold` | `#A88B4F` | Gold on **light surfaces only**: links, accents, the "Wave" in the wordmark |
 | `--ink` | `#242424` | Text, app tile, dark-mode window chrome |
 | `--ink2` | `#2E2E2E` | Derived surface: title bar on dark chrome |
 | `--grey` | `#474747` | Secondary text, metadata, captions |
@@ -26,7 +26,7 @@
 - No gradients, no new hues. Semantic states derive from the ladder above (same temperature, darker/lighter steps), never fresh colors.
 - Hairlines never heavier than the token values. No borders + radius + accent-strip combos.
 - The mark is never recolored outside the shipped colorways (light-bg, dark-bg, mono-black, mono-white, tile).
-- "nola" always carries the gold; "kimi" always ink/cream. Never swap, never gold on gold.
+- "Wave" always carries the gold; "Oat" always ink/cream. The wordmark reads "OatWave" with no space. Never swap, never gold on gold.
 
 ## 3. Fonts
 
@@ -42,8 +42,8 @@ Type scale: display `clamp(28px, 4vw, 44px)` line-height 1.15–1.2; note titles
 
 The identity applies to these surfaces, in priority order:
 
-1. **App icon / tile** — charcoal rounded square (`rx = 22%` of size), cream grain, one gold bar (bar index 4, the tallest). Source: `svg/kimi-nola-icon.svg`.
-2. **Title bar** — `ink2` chrome, 16px icon + "Kimi Nola" in Archivo 400 12px at 75% cream; Windows caption glyphs right.
+1. **App icon / tile** — charcoal rounded square (`rx = 22%` of size), cream grain, one gold bar (bar index 4, the tallest). Source: `svg/oatwave-icon.svg`.
+2. **Title bar** — `ink2` chrome, 16px icon + "OatWave" in Archivo 400 12px at 75% cream; Windows caption glyphs right.
 3. **System tray** — mono variants only (`mark-mono-white` on dark tray, `mark-mono-black` on light). Never the gold bar in the tray.
 4. **Sidebar** — meeting list: Gentium 14.5px titles, mono 9px metadata (`TODAY · 09:30 · REC`), active row = `rgba(204,192,168,.14)` wash + 2px gold left edge.
 5. **Note pane** — Gentium 27px title; mono meta line with recording dot; live waveform; Archivo summary; action-items table (hairline rows, mono owner column right-aligned).
@@ -92,7 +92,7 @@ Ships: `favicon.svg` (master, opaque charcoal tile — transparency reads broken
 
 ## 10. Definition of done
 
-- [ ] App icon, tray icon, and taskbar all render the Oatwave mark; tray uses mono variant matching OS theme
+- [ ] App icon, tray icon, and taskbar all render the OatWave mark; tray uses mono variant matching OS theme
 - [ ] .ico contains the hand-placed 16px entry (verify by extracting, not by eye)
 - [ ] Wordmark renders identically on a machine without Gentium installed (it is outlines)
 - [ ] Exactly one gold element visible in any app view

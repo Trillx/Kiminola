@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Kimi Nola",
+  "productName": "OatWave",
   "version": "0.2.0",
   "identifier": "com.kiminola.app",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Kimi Nola",
+        "title": "OatWave",
         "width": 1200,
         "height": 800,
         "resizable": true,
@@ -59,12 +59,14 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "OatWave",
     "targets": ["nsis"],
     "createUpdaterArtifacts": true,
     "windows": {
       "allowDowngrades": false,
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "installer-hooks.nsh"
       }
     },
     "resources": {

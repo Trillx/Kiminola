@@ -11,7 +11,7 @@ const buttons = { notes: 'Jot notes', start: 'Start recording', dismiss: 'Not no
 const makePrompt = (id = 'presence-1', app = 'Synthetic call app') => ({
   id, app_label: app,
   message: 'You may be in a meeting. Want to jot notes?',
-  not_recording_message: 'Kimi Nola is not recording.',
+  not_recording_message: 'OatWave is not recording.',
   confidence: 'likely', evidence: ['app_or_visible_window', 'active_core_audio'],
 });
 const card = page => page.getByRole('complementary', { name: 'Meeting prompt', exact: true });
@@ -119,7 +119,7 @@ export async function runMeetingPresenceTests({ check, open, eventually, origin 
       await openSurface(page);
       await publish(page);
       assert.equal(await card(page).locator('.prompt-title').innerText(), makePrompt().message);
-      assert.equal(await card(page).locator('.prompt-copy').innerText(), 'Kimi Nola is not recording.');
+      assert.equal(await card(page).locator('.prompt-copy').innerText(), 'OatWave is not recording.');
       for (const name of Object.values(buttons)) {
         assert.equal(await card(page).getByRole('button', { name, exact: true }).isEnabled(), true);
       }

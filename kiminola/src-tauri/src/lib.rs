@@ -325,11 +325,11 @@ mod startup_wiring_tests {
     #[test]
     fn activation_intent_is_derived_from_relaunch_arguments() {
         assert_eq!(
-            ActivationIntent::from_args(&["kiminola.exe".to_string()]),
+            ActivationIntent::from_args(&["oatwave.exe".to_string()]),
             ActivationIntent::Ordinary
         );
         assert_eq!(
-            ActivationIntent::from_args(&["kiminola.exe".to_string(), "--background".to_string(),]),
+            ActivationIntent::from_args(&["oatwave.exe".to_string(), "--background".to_string(),]),
             ActivationIntent::Background
         );
     }

@@ -185,7 +185,7 @@
 
 
 <svelte:head>
-  <title>{ui.meeting?.title ?? "Meeting"} — Kimi Nola</title>
+  <title>{ui.meeting?.title ?? "Meeting"} — OatWave</title>
 </svelte:head>
 
 <div class="main-content">
@@ -299,7 +299,7 @@
               class="notes-textarea"
             />
             {#if ui.notesSaveError}
-              <p role="alert">Some edits could not be saved. Retry saving before quitting Kimi Nola.</p>
+              <p role="alert">Some edits could not be saved. Retry saving before quitting OatWave.</p>
               <Button variant="secondary" onclick={() => void view.retrySave()}>
                 Retry saving
               </Button>

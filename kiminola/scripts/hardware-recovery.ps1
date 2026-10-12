@@ -6,18 +6,22 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'hardware-runner-state.ps1')
 
 if ($env:KIMINOLA_HARDWARE_RUNNER -ne '1') {
-    throw 'Refusing hardware-runner recovery outside a dedicated Kimi Nola hardware runner.'
+    throw 'Refusing hardware-runner recovery outside a dedicated OatWave hardware runner.'
 }
 
 function New-KiminolaHardwareStateSet {
-    param([Parameter(Mandatory = $true)][string]$TransactionRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$TransactionRoot,
+        [switch]$LegacyOnly
+    )
 
-    $appRoot = Join-Path $env:LOCALAPPDATA 'Kimi Nola'
+    $productName = if ($LegacyOnly) { 'Kimi Nola' } else { 'OatWave' }
+    $appRoot = Join-Path $env:LOCALAPPDATA $productName
     $userRoot = Join-Path $env:LOCALAPPDATA 'Kiminola'
-    $startMenuShortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Kimi Nola.lnk'
-    $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Kimi Nola.lnk'
-    $uninstallRegistryPath = 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Kimi Nola'
-    $installRegistryPath = 'Registry::HKEY_CURRENT_USER\Software\kiminola'
+    $startMenuShortcut = Join-Path ([Environment]::GetFolderPath('Programs')) "$productName.lnk"
+    $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) "$productName.lnk"
+    $uninstallRegistryPath = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\$productName"
+    $installRegistryPath = if ($LegacyOnly) { 'Registry::HKEY_CURRENT_USER\Software\kiminola' } else { 'Registry::HKEY_CURRENT_USER\Software\OatWave' }
 
     $app = New-HardwarePathState `
         -Root $appRoot `
@@ -42,6 +46,23 @@ function New-KiminolaHardwareStateSet {
         -RegistryPath $installRegistryPath `
         -BackupFile (Join-Path $TransactionRoot 'install-registry.reg')
 
+    # The rename test may install either brand as its previous release. Preserve
+    # both installations and their registrations before replacing either one.
+    $legacyPaths = @()
+    $legacyRegistry = @()
+    if (-not $LegacyOnly) {
+      $legacyPaths = @(
+        (New-HardwarePathState -Root (Join-Path $env:LOCALAPPDATA 'Kimi Nola') -Backup (Join-Path $TransactionRoot 'legacy-app') -PathType Container),
+        (New-HardwarePathState -Root (Join-Path ([Environment]::GetFolderPath('Programs')) 'Kimi Nola.lnk') -Backup (Join-Path $TransactionRoot 'legacy-start-menu.lnk') -PathType Leaf),
+        (New-HardwarePathState -Root (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Kimi Nola.lnk') -Backup (Join-Path $TransactionRoot 'legacy-desktop.lnk') -PathType Leaf)
+    )
+      $legacyRegistry = @(
+        (New-HardwareRegistryState -RegistryPath 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Kimi Nola' -BackupFile (Join-Path $TransactionRoot 'legacy-uninstall.reg')),
+        (New-HardwareRegistryState -RegistryPath 'Registry::HKEY_CURRENT_USER\Software\kiminola' -BackupFile (Join-Path $TransactionRoot 'legacy-install.reg')),
+        (New-HardwareRegistryState -RegistryPath 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run' -BackupFile (Join-Path $TransactionRoot 'startup.reg'))
+    )
+    }
+
     [pscustomobject]@{
         App = $app
         User = $user
@@ -49,8 +70,8 @@ function New-KiminolaHardwareStateSet {
         Desktop = $desktop
         UninstallRegistry = $uninstallRegistry
         InstallRegistry = $installRegistry
-        PathStates = @($app, $user, $startMenu, $desktop)
-        RegistryStates = @($uninstallRegistry, $installRegistry)
+        PathStates = @($app, $user, $startMenu, $desktop) + $legacyPaths
+        RegistryStates = @($uninstallRegistry, $installRegistry) + $legacyRegistry
     }
 }
 
@@ -58,7 +79,7 @@ function Restore-KiminolaHardwareStateSet {
     param([Parameter(Mandatory = $true)]$StateSet)
 
     $restoreErrors = @()
-    foreach ($process in @(Get-Process -Name 'kiminola' -ErrorAction SilentlyContinue)) {
+    foreach ($process in @(Get-Process -Name 'kiminola', 'oatwave' -ErrorAction SilentlyContinue)) {
         try {
             Stop-Process -Id $process.Id -Force -ErrorAction Stop
             if (-not $process.WaitForExit(10000)) {
@@ -70,7 +91,7 @@ function Restore-KiminolaHardwareStateSet {
             $process.Dispose()
         }
     }
-    foreach ($state in @($StateSet.User, $StateSet.App, $StateSet.StartMenu, $StateSet.Desktop)) {
+    foreach ($state in $StateSet.PathStates) {
         try {
             Restore-HardwarePath -State $state
         } catch {
@@ -122,10 +143,13 @@ function Invoke-KiminolaInterruptedHardwareRecovery {
         }
         Remove-Item -LiteralPath $recoveryJournal -Force -ErrorAction Stop
         Remove-Item -LiteralPath "$recoveryJournal.previous" -Force -ErrorAction SilentlyContinue
-        Write-Host "PASS: completed cleanup for restored Kimi Nola hardware-runner transaction '$($journal.transaction_id)'."
+        Write-Host "PASS: completed cleanup for restored OatWave hardware-runner transaction '$($journal.transaction_id)'."
         return
     }
-    $stateSet = New-KiminolaHardwareStateSet -TransactionRoot $transactionRoot
+    # A transaction started before the rename has the original four paths and
+    # two registry keys. Recover that exact plan rather than expanding it.
+    $legacyJournal = @($journal.path_states).Count -eq 4 -and @($journal.registry_states).Count -eq 2
+    $stateSet = New-KiminolaHardwareStateSet -TransactionRoot $transactionRoot -LegacyOnly:$legacyJournal
     Apply-HardwareRecoveryJournal `
         -Journal $journal `
         -PathStates $stateSet.PathStates `
@@ -140,7 +164,7 @@ function Invoke-KiminolaInterruptedHardwareRecovery {
     Remove-Item -LiteralPath $transactionRoot -Recurse -Force -ErrorAction Stop
     Remove-Item -LiteralPath $recoveryJournal -Force -ErrorAction Stop
     Remove-Item -LiteralPath "$recoveryJournal.previous" -Force -ErrorAction SilentlyContinue
-    Write-Host "PASS: recovered interrupted Kimi Nola hardware-runner transaction '$($journal.transaction_id)'."
+    Write-Host "PASS: recovered interrupted OatWave hardware-runner transaction '$($journal.transaction_id)'."
 }
 
 Invoke-KiminolaInterruptedHardwareRecovery

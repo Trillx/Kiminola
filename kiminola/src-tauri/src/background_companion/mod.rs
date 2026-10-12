@@ -1,4 +1,4 @@
-//! The Background companion: Kimi Nola's resident shell after the main window
+//! The Background companion: OatWave's resident shell after the main window
 //! closes. It never captures audio.
 //!
 //! Owns:

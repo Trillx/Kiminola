@@ -119,7 +119,7 @@ pub(crate) fn classify_windows(
         let lineage = process_lineage(pid, &processes);
         let own_audio = lineage
             .iter()
-            .any(|id| *id == current_pid || is_kiminola_process(&processes[id].name));
+            .any(|id| *id == current_pid || is_our_process(&processes[id].name));
         let detection = resolve_app(pid, &processes, &windows, current_pid);
         if let Some(detection) = detection {
             let attributed_lineage = lineage
@@ -283,7 +283,7 @@ fn resolve_app(
     }
     if lineage
         .iter()
-        .any(|id| *id == current_pid || is_kiminola_process(&processes[id].name))
+        .any(|id| *id == current_pid || is_our_process(&processes[id].name))
     {
         return None;
     }
@@ -362,8 +362,9 @@ fn is_browser_process(process_name: &str) -> bool {
     )
 }
 
-fn is_kiminola_process(process_name: &str) -> bool {
-    normalized_process_name(process_name).contains("kiminola")
+fn is_our_process(process_name: &str) -> bool {
+    let name = normalized_process_name(process_name);
+    name.contains("oatwave") || name.contains("kiminola")
 }
 
 pub(crate) fn is_known_meeting_process(process_name: &str) -> bool {
@@ -692,12 +693,25 @@ mod tests {
     #[test]
     fn our_webview_audio_and_stale_audio_pids_are_ignored() {
         let result = detect_fixture(
-            &[(999, 0, "kiminola.exe"), (11, 999, "msedgewebview2.exe")],
-            &[(999, "Kimi Nola"), (11, "Prompt")],
+            &[(999, 0, "oatwave.exe"), (11, 999, "msedgewebview2.exe")],
+            &[(999, "OatWave"), (11, "Prompt")],
             &[999, 11, 404],
         );
         assert!(result.detections.is_empty());
         assert!(result.possible_hints.is_empty());
+    }
+
+    #[test]
+    fn renamed_and_previous_app_processes_never_create_meeting_hints() {
+        for executable in ["oatwave.exe", "OatWave.EXE", "kiminola.exe"] {
+            let result = detect_fixture(
+                &[(888, 0, executable), (11, 888, "msedgewebview2.exe")],
+                &[(888, "OatWave"), (11, "Meeting prompt")],
+                &[888, 11],
+            );
+            assert!(result.detections.is_empty(), "{executable}");
+            assert!(result.possible_hints.is_empty(), "{executable}");
+        }
     }
 
     #[test]

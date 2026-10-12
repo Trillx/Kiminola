@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./kiminola/branding/svg/kimi-nola-logo-primary-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="./kiminola/branding/svg/kimi-nola-logo-primary-light.svg">
-    <img src="./kiminola/branding/svg/kimi-nola-logo-primary-light.svg" alt="Kimi Nola" width="560">
+    <source media="(prefers-color-scheme: dark)" srcset="./kiminola/branding/svg/oatwave-logo-primary-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./kiminola/branding/svg/oatwave-logo-primary-light.svg">
+    <img src="./kiminola/branding/svg/oatwave-logo-primary-light.svg" alt="OatWave" width="560">
   </picture>
 </p>
 
@@ -20,13 +20,15 @@
 </p>
 
 > [!IMPORTANT]
-> Kimi Nola is in active development. Windows x64 and ARM64 installers are available on GitHub Releases. `v0.1.2` is the first updater-enabled release; older installations require one manual upgrade to `v0.1.2` or later before future stable updates can arrive through the app.
+> OatWave is in active development. Windows x64 and ARM64 installers are available on GitHub Releases. `v0.1.2` is the first updater-enabled release; older installations require one manual upgrade to `v0.1.2` or later before future stable updates can arrive through the app.
 
-## What is Kimi Nola?
+## What is OatWave?
 
-Kimi Nola is an open-source, Windows-first alternative to cloud meeting-note tools. It records microphone and system audio as separate lanes, transcribes both locally, and gives you a notes-first workspace during and after the meeting.
+OatWave was previously named Kimi Nola. Upgrades keep the existing local data and model folders, saved API keys, and preferences. The repository and source directory retain their existing names.
 
-When you want a polished summary, Kimi Nola can send transcript **text** and your notes to an OpenAI-compatible provider that you configure. The recording itself never leaves your computer.
+OatWave is an open-source, Windows-first alternative to cloud meeting-note tools. It records microphone and system audio as separate lanes, transcribes both locally, and gives you a notes-first workspace during and after the meeting.
+
+When you want a polished summary, OatWave can send transcript **text** and your notes to an OpenAI-compatible provider that you configure. The recording itself never leaves your computer.
 
 | Local by default | Notes first | Bring your own AI |
 |---|---|---|
@@ -49,7 +51,7 @@ When you want a polished summary, Kimi Nola can send transcript **text** and you
 
 ## Privacy boundary
 
-Kimi Nola is designed around a simple line: **audio never leaves the machine**.
+OatWave is designed around a simple line: **audio never leaves the machine**.
 
 | Data | Default behavior |
 |---|---|
@@ -164,13 +166,13 @@ Kiminola/
 ├── SPEC.md                 Product decisions and MVP boundary
 ├── CONTEXT.md              Domain language and terminology
 ├── kiminola/               Tauri + SvelteKit application
-│   ├── branding/           Approved Oatwave identity and SVG sources
+│   ├── branding/           Approved OatWave identity and SVG sources
 │   ├── src/                Svelte frontend
 │   └── src-tauri/          Rust backend, migrations, and model manifest
 └── .scratch/kiminola/      Historical research, prototypes, and decisions
 ```
 
-[`SPEC.md`](./SPEC.md) is the source of truth for product behavior and scope. [`kiminola/branding/HANDOFF.md`](./kiminola/branding/HANDOFF.md) defines the Oatwave visual system used by the app and this repository.
+[`SPEC.md`](./SPEC.md) is the source of truth for product behavior and scope. [`kiminola/branding/HANDOFF.md`](./kiminola/branding/HANDOFF.md) defines the OatWave visual system used by the app and this repository.
 
 ## Release status
 
@@ -211,12 +213,12 @@ The visual identity is intentionally constrained. New product surfaces should fo
 
 ## License
 
-Kimi Nola is available under the [MIT License](./LICENSE).
+OatWave is available under the [MIT License](./LICENSE).
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./kiminola/branding/svg/kimi-nola-stamp-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="./kiminola/branding/svg/kimi-nola-stamp-light.svg">
-    <img src="./kiminola/branding/svg/kimi-nola-stamp-light.svg" alt="Kimi Nola — local notes, open source, MIT" width="220">
+    <source media="(prefers-color-scheme: dark)" srcset="./kiminola/branding/svg/oatwave-stamp-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./kiminola/branding/svg/oatwave-stamp-light.svg">
+    <img src="./kiminola/branding/svg/oatwave-stamp-light.svg" alt="OatWave — local notes, open source, MIT" width="220">
   </picture>
 </p>

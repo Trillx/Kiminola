@@ -37,13 +37,13 @@
   <aside class="update-banner" aria-live="polite">
     <div class="update-copy">
       <div class="update-kicker">Stable update</div>
-      <strong>Kimi Nola {updateState.version} is available</strong>
+      <strong>OatWave {updateState.version} is available</strong>
       {#if updateState.status === "downloading"}
         <span>Downloading the signed update…</span>
       {:else if updateState.status === "preparing"}
         <span>Saving your changes before updating…</span>
       {:else if updateState.status === "installing"}
-        <span>Installing now. Kimi Nola will restart when the update is complete.</span>
+        <span>Installing now. OatWave will restart when the update is complete.</span>
       {:else if isRecording}
         <span>Finish and save this meeting before installing the update.</span>
       {:else if updateState.status === "ready"}

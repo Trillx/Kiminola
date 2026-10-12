@@ -1,12 +1,14 @@
-# Kiminola — Build-Ready Spec
+# OatWave — Build-Ready Spec
 
 **Status:** The original meeting-product wayfinder is resolved (see `.scratch/kiminola/map.md` and `issues/`). The library hierarchy decision is also adopted: Spaces and Meetings form a recursive organizational tree with validated reparenting. System-wide dictation implementation is authorized under §8.2; native compatibility and release qualification remain unverified.
 
 ## 1. Product definition
 
-Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + ARM64) Granola alternative for **local meeting transcription** and **AI-enhanced notes**. It captures microphone and system audio as separate channels, transcribes on-device with a streaming ASR model, and lets the user optionally enhance their handwritten notes with a cloud LLM.
+**OatWave** is an open-source, Windows-first (x64 + ARM64) Granola alternative for **local meeting transcription** and **AI-enhanced notes**. It captures microphone and system audio as separate channels, transcribes on-device with a streaming ASR model, and lets the user optionally enhance their handwritten notes with a cloud LLM.
 
-**Brand identity:** Oatwave — see `kiminola/branding/HANDOFF.md` (Rev A). Paper-cream light-first palette with charcoal dark mode; Gentium Book Plus / Archivo / IBM Plex Mono; one gold element per view.
+**Brand identity:** OatWave — see `kiminola/branding/HANDOFF.md` (Rev A). Paper-cream light-first palette with charcoal dark mode; Gentium Book Plus / Archivo / IBM Plex Mono; one gold element per view.
+
+**Naming decision:** The app name is **OatWave**, with that capitalization and no space. UI copy, window titles, tray menus, notifications, wordmarks, installers, and release archives use it. The application package and executable are `oatwave` and `oatwave.exe`. Existing storage paths, database filenames, Credential Manager service, browser preference keys, application identifier `com.kiminola.app`, and startup mutex remain stable so upgrades reuse the user's data and settings. Existing SQL migrations remain byte-for-byte unchanged. The source directory stays `kiminola/`, historical planning stays read-only, and the GitHub repository and updater endpoint remain `Trillx/Kiminola`. The installer replaces the former Kimi Nola installation and transfers its Windows startup registration.
 
 **Privacy line:** audio never leaves the machine. Transcript text leaves only when the user explicitly chooses a cloud LLM for enhancement.
 
@@ -41,7 +43,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Post-meeting view: pill tabs **My notes** / **Enhance Notes** / **Transcript**. Default tab: **My notes**.
 - Boards view: user-created Boards with customizable ordered columns and movable action-item cards.
   - The board uses the available workspace width, with a horizontal board switcher above the columns. Board and column creation forms expand on demand. Narrow windows scroll columns inside the board rather than overflowing the page.
-- Updates: after the main app launches, Kimi Nola performs one non-blocking
+- Updates: after the main app launches, OatWave performs one non-blocking
   check against the published stable GitHub Release feed. A visible update
   notice offers release details, but download and installation always require
   explicit user approval. Installation is disabled and re-checked while the
@@ -77,7 +79,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 - Onboarding: minimal first-run wizard — mic permission → model download with progress → optional BYOK key (skippable). The microphone step checks permission only and does not display simulated audio levels. Provider saves/tests lock conflicting edits and actions until IPC settles; results apply only to the submitted configuration in the current wizard instance, and any provider/model/key edit clears the previous test result.
 - AI credentials are scoped to provider kind and normalized full Base URL, excluding model. Provider/endpoint edits clear replacement credentials and stale saved-key status; returning to the unchanged saved identity restores only its previously confirmed presence. Other destinations can be saved without a connection test to read back their own credential status. Legacy unscoped credentials are not reused or migrated because their destination cannot be proven; users re-enter their key. Requests do not follow redirects outside the configured endpoint.
 - AI provider settings: when OpenRouter is selected, an explicit catalog refresh fetches the current model list from OpenRouter and exposes a searchable model selector. A failed refresh leaves manual model-ID entry available.
-- Companion layout: when the user chooses **Start recording** from a Meeting prompt, Kimi Nola arranges the detected meeting window on the left at roughly two-thirds of the active display and its own Notepad window on the right at roughly one-third. Visible windows move and resize together in a 200 ms ease-out transition; reduced motion uses immediate placement. Hidden or minimized notes open at the destination. Starting a user move/resize, closing either window, or requesting another layout cancels the transition. The arrangement is a starting point: normal windows may be resized, true full-screen/presentation windows are not forced to change, and user movement/resizing is never overridden. During manual resizing, content follows the viewport immediately; only an explicit sidebar toggle animates the shell geometry.
+- Companion layout: when the user chooses **Start recording** from a Meeting prompt, OatWave arranges the detected meeting window on the left at roughly two-thirds of the active display and its own Notepad window on the right at roughly one-third. Visible windows move and resize together in a 200 ms ease-out transition; reduced motion uses immediate placement. Hidden or minimized notes open at the destination. Starting a user move/resize, closing either window, or requesting another layout cancels the transition. The arrangement is a starting point: normal windows may be resized, true full-screen/presentation windows are not forced to change, and user movement/resizing is never overridden. During manual resizing, content follows the viewport immediately; only an explicit sidebar toggle animates the shell geometry.
 - Meeting-prompt recording also uses the detected meeting process tree as the preferred loopback target. Manual recording and unsupported/failed process activation use classic default-output loopback.
 - Active recordings checkpoint notes, elapsed duration, and the latest transcript revisions into a SQLite note draft. An interrupted session remains visible in the library and can be continued into a normal saved meeting; intentional cancellation removes only drafts created automatically for that recording.
 - Continuous edits cannot postpone the checkpoint attempt beyond five seconds; recovery snapshots are constructed when the serialized write executes. Recovery-only exits wait for successful persistence and retain the editor on failure, with retry or explicit discard. A separate successful meeting save may provide durability when checkpointing fails.
@@ -100,7 +102,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   - `boards` — id, name, created_at
   - `board_columns` — id, board_id, name, position
   - `board_cards` — id, column_id, nullable meeting_id, title, position, created_at
-- **Export**: Markdown rendered from DB with YAML frontmatter (title, date, space, duration).
+- **Export**: Markdown rendered from DB with YAML frontmatter (title, date, space, duration). New file exports go to `%USERPROFILE%\Documents\OatWave\Exports`; previous exports remain in their existing folder.
 
 ## 7. Model management
 
@@ -164,7 +166,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
   Webex, and a generic “another app” fallback. Raw executable names, window
   titles, URLs, calendar metadata, and detector history are not persisted or
   shown to the user.
-- A prompt says “You may be in a meeting. Want to jot notes?” and “Kimi Nola
+- A prompt says “You may be in a meeting. Want to jot notes?” and “OatWave
   is not recording.” Actions are Jot notes, Start recording, and Not now.
   Start recording is always an explicit user action.
 - Jot notes creates a standalone Note draft in the same library. Drafts
@@ -201,7 +203,7 @@ Kiminola (display name: **Kimi Nola**) is an open-source, Windows-first (x64 + A
 
 ## 8.2 System-wide dictation
 
-Planning map: [Plan system-wide dictation for Kimi Nola](https://github.com/Trillx/Kiminola/issues/43). The maintainer has authorized implementation of the lifecycle and processing/delivery contract below. Historical research and unresolved qualification tickets do not establish measured runtime behavior or certified application support.
+Planning map: [Plan system-wide dictation for OatWave](https://github.com/Trillx/Kiminola/issues/43). The maintainer has authorized implementation of the lifecycle and processing/delivery contract below. Historical research and unresolved qualification tickets do not establish measured runtime behavior or certified application support.
 
 Adopted lifecycle decision: [Define dictation lifecycle, privacy, and recovery](https://github.com/Trillx/Kiminola/issues/47#issuecomment-5788875062).
 
@@ -275,7 +277,7 @@ Adopted lifecycle decision: [Define dictation lifecycle, privacy, and recovery](
   pass complete portable archives and SHA-256 provenance through short-lived
   workflow artifacts, and keep repository-write access in minimal publishing
   jobs. Signed installers use the canonical
-  `Kimi.Nola_<version>_<arch>-setup.exe` asset name. Read-only final verification
+  `OatWave_<version>_<arch>-setup.exe` asset name. Read-only final verification
   checks downloaded hashes, installer and extracted portable-executable
   Authenticode, updater signatures, and the actual PE architecture of every
   portable executable and native DLL. It generates `latest.json`; a publishing job uploads and

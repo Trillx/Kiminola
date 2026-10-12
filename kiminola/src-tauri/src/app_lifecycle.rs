@@ -47,7 +47,7 @@ pub(crate) enum QuitDecision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CloseDecision {
-    /// Closing a window keeps Kimi Nola resident as the Background companion.
+    /// Closing a window keeps OatWave resident as the Background companion.
     HideToBackground,
     /// The user quit explicitly; let the window close.
     Close,

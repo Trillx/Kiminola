@@ -100,7 +100,7 @@
           </div>
         {/if}
         <label class="check-row"><input type="checkbox" bind:checked={draft.clipboard_consent} />Allow guarded paste using the clipboard</label>
-        <p>Automatic paste is disabled in this build because no application/version is qualified yet. Final text stays in review; choose Copy when ready. Copy replaces your clipboard without restoring its previous contents. Windows history/cloud exclusion is requested, but other clipboard tools may still read it. Password fields, elevated apps, terminals, and uncertain targets never receive automatic paste. Kimi Nola never presses Enter.</p>
+        <p>Automatic paste is disabled in this build because no application/version is qualified yet. Final text stays in review; choose Copy when ready. Copy replaces your clipboard without restoring its previous contents. Windows history/cloud exclusion is requested, but other clipboard tools may still read it. Password fields, elevated apps, terminals, and uncertain targets never receive automatic paste. OatWave never presses Enter.</p>
         <label class="check-row"><input type="checkbox" bind:checked={draft.history_enabled} />Save completed dictation history for 30 days</label>
         <p>Off by default. Final text only, never audio or failed attempts. Turning this off stops new saves; existing entries remain until expiry or deletion.</p>
         <div class="actions"><Button type="submit" disabled={!dirty || busy || (!disabling && draft.cleanup === "provider" && !snapshot?.provider_authorized && !consentProvider)}>{busy ? "Saving…" : "Save dictation settings"}</Button>{#if dirty}<span>Unsaved changes</span>{/if}</div>

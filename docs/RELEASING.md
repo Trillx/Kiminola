@@ -1,10 +1,18 @@
-# Releasing Kimi Nola for Windows
+# Releasing OatWave for Windows
 
-Kimi Nola ships NSIS installers and complete portable archives for Windows x64
+OatWave ships NSIS installers and complete portable archives for Windows x64
 and ARM64. Tag builds carry Tauri updater signatures and SignPath Authenticode;
 those are separate identities. The in-app updater checks
 the published stable GitHub Release feed and installs only a higher updater-
 signed version. Drafts and prereleases are never offered in the app.
+
+The app is now named OatWave. New artifacts use `OatWave_<version>_<arch>-setup.exe`,
+`OatWave_<version>_<arch>-portable.zip`, and `oatwave.exe`. The GitHub repository,
+updater feed, signing key, application identifier, and persistent data namespaces
+keep their original values. `src-tauri/installer-hooks.nsh` upgrades the former
+Kimi Nola installation through its own updater-mode uninstaller and transfers
+its Windows startup registration. Hardware validation accepts either brand as
+the previous release and restores both brands' installation state afterward.
 
 ## One-time repository setup
 
@@ -33,7 +41,7 @@ Configure these GitHub repository variables from the SignPath project:
 - `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG` - an artifact configuration for the
   GitHub Actions ZIP wrapper shown below.
 - `SIGNPATH_SIGNER_THUMBPRINT` - the 40-character SHA-1 thumbprint of the one
-  SignPath certificate approved for Kimi Nola releases. Update it only as part
+  SignPath certificate approved for OatWave releases. Update it only as part
   of a documented certificate rotation.
 
 `actions/upload-artifact` submits a ZIP even when it contains one executable,
@@ -116,7 +124,7 @@ silently falling back to an older release. A stale override is rejected. Once
 visibly and blocks tag releases instead of reporting a green no-op.
 
 The runners must use dedicated test accounts. The workflow snapshots the existing
-Kimi Nola application directory, complete persistent user root, installer-managed
+OatWave application directory, complete persistent user root, installer-managed
 registry keys, and Start Menu/Desktop shortcuts into the stable, same-volume
 `%LOCALAPPDATA%\KiminolaHardwareRecovery` root before replacing them. An atomic
 write-through transaction journal is written before the first mutation, after
@@ -153,7 +161,7 @@ Ordinary pull requests do not use physical devices. Pull requests, `main` pushes
 and version tags build and start native unsigned x64 and ARM64 packages on
 GitHub-hosted runners and retain the installer and complete portable archives for
 seven days. Each archive contains
-`kiminola.exe` and all required ONNX Runtime/sherpa DLLs.
+`oatwave.exe` and all required ONNX Runtime/sherpa DLLs.
 
 ## Release flow
 
@@ -179,7 +187,7 @@ seven days. Each archive contains
    and four bundled DLL PE architectures, submit the executable and NSIS installer
    to SignPath, and require `Get-AuthenticodeSignature` to report `Valid`. The
    installer is renamed to the canonical
-   `Kimi.Nola_<version>_<arch>-setup.exe` form, and the updater signature is
+   `OatWave_<version>_<arch>-setup.exe` form, and the updater signature is
    regenerated only after the installer receives its final Authenticode bytes.
    Read-only build jobs pass the installer, updater `.sig`,
    complete portable archive, and SHA-256/Authenticode verification report to a

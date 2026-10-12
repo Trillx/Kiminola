@@ -66,7 +66,7 @@
 {:else}
   <main class="database-recovery" aria-busy={busy}>
     <section>
-      <p class="eyebrow">Kimi Nola</p>
+      <p class="eyebrow">OatWave</p>
       <h1>{busy ? "Opening your notes…" : "Your notes need recovery"}</h1>
       {#if !busy || status?.error || error}
         <p>The app could not safely open your database. Your existing files have been kept. Recording and editing are paused.</p>
@@ -85,7 +85,7 @@
           </select>
           <p>Restoring returns your notes to this backup. Later changes will not appear in the restored library. The current database and its recovery files are kept in a separate folder.</p>
           {#if confirming}
-            <p>Restore the selected backup and restart Kimi Nola?</p>
+            <p>Restore the selected backup and restart OatWave?</p>
             <div class="actions">
               <Button onclick={restore} disabled={busy}>Restore and restart</Button>
               <Button variant="ghost" onclick={() => { confirming = false; }} disabled={busy}>Cancel</Button>

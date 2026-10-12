@@ -40,7 +40,7 @@ foreach ($name in $requiredDlls) {
 
 try {
     New-Item -ItemType Directory -Path $stagingDirectory -Force | Out-Null
-    Copy-Item -LiteralPath $executablePath -Destination (Join-Path $stagingDirectory 'kiminola.exe')
+    Copy-Item -LiteralPath $executablePath -Destination (Join-Path $stagingDirectory 'oatwave.exe')
     foreach ($name in $requiredDlls) {
         Copy-Item -LiteralPath (Join-Path $nativeRoot $name) -Destination (Join-Path $stagingDirectory $name)
     }
@@ -55,7 +55,7 @@ try {
     } finally {
         $archive.Dispose()
     }
-    $expected = @('kiminola.exe') + $requiredDlls | Sort-Object
+    $expected = @('oatwave.exe') + $requiredDlls | Sort-Object
     if (Compare-Object -ReferenceObject $expected -DifferenceObject $actual) {
         throw "Portable archive contents were incomplete: $($actual -join ', ')."
     }

@@ -239,7 +239,7 @@ jobs:
         shell: pwsh
         run: |
           $paths = @(
-            'src-tauri/target/${{ matrix.target }}/release/kiminola.exe',
+            'src-tauri/target/${{ matrix.target }}/release/oatwave.exe',
             'src-tauri/target/release/onnxruntime.dll',
             'src-tauri/target/release/onnxruntime_providers_shared.dll',
             'src-tauri/target/release/sherpa-onnx-c-api.dll',
@@ -250,16 +250,16 @@ jobs:
       - name: Test startup PID and window behavior
         working-directory: kiminola
         shell: pwsh
-        run: ./scripts/startup-behavior.test.ps1 -Executable 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe' -TimeoutSeconds 30
+        run: ./scripts/startup-behavior.test.ps1 -Executable 'src-tauri/target/${{ matrix.target }}/release/oatwave.exe' -TimeoutSeconds 30
 
       - name: Stage complete portable package
         working-directory: kiminola
         shell: pwsh
         run: |
           ./scripts/stage-portable-package.ps1 `
-            -Executable 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe' `
+            -Executable 'src-tauri/target/${{ matrix.target }}/release/oatwave.exe' `
             -NativeDirectory 'src-tauri/target/release' `
-            -OutputPath 'portable/Kimi-Nola-${{ matrix.arch }}-portable.zip'
+            -OutputPath 'portable/OatWave-${{ matrix.arch }}-portable.zip'
 
       - name: Bundle the verified unsigned CI executable
         working-directory: kiminola
@@ -275,6 +275,6 @@ jobs:
           name: ${{ matrix.artifact }}
           path: |
             kiminola/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
-            kiminola/portable/Kimi-Nola-${{ matrix.arch }}-portable.zip
+            kiminola/portable/OatWave-${{ matrix.arch }}-portable.zip
           if-no-files-found: error
           retention-days: 7

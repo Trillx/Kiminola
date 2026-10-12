@@ -67,7 +67,7 @@ function Find-ReleaseAsset {
     )
 
     $escapedArchitecture = [regex]::Escape($Architecture)
-    $pattern = "^Kimi(?:\.| )Nola_${escapedVersion}_${escapedArchitecture}-setup\.exe"
+    $pattern = "^(?:OatWave|Kimi(?:\.| )Nola)_${escapedVersion}_${escapedArchitecture}-setup\.exe"
     $pattern += if ($Signature) { '\.sig$' } else { '$' }
     $matches = @($release.assets | Where-Object { $_.name -match $pattern })
     if ($matches.Count -ne 1) {
@@ -125,7 +125,7 @@ foreach ($architecture in @('x64', 'arm64')) {
 }
 
 if ([string]::IsNullOrWhiteSpace($release.body)) {
-    $notes = "Kimi Nola $Version"
+    $notes = "OatWave $Version"
 } else {
     $notes = $release.body.Trim()
 }

@@ -246,7 +246,7 @@
         <section class="step">
           <h1 class="display">Microphone access</h1>
           <p class="subtitle">
-            Kimi Nola needs permission to listen while you record. Audio stays on your machine; nothing is uploaded.
+            OatWave needs permission to listen while you record. Audio stays on your machine; nothing is uploaded.
           </p>
 
           {#if micState === "idle" || micState === "requesting"}

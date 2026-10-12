@@ -72,7 +72,7 @@ try {
         throw 'Cleanup failure did not leave the candidate and backup unnested for recovery.'
     }
 
-    $shortcut = Join-Path $fixtureRoot 'Kimi Nola.lnk'
+    $shortcut = Join-Path $fixtureRoot 'OatWave.lnk'
     $shortcutBackup = Join-Path $fixtureRoot 'shortcut.backup'
     [IO.File]::WriteAllText($shortcut, 'original-shortcut')
     $shortcutState = New-HardwarePathState -Root $shortcut -Backup $shortcutBackup -PathType Leaf

@@ -1,4 +1,4 @@
-/* Kimi Nola — Oatwave identity tokens + app shell styles
+/* OatWave — OatWave identity tokens + app shell styles
    Palette, type, and motion per branding/HANDOFF.md (Rev A).
    Hard rules: one gold element per view, no gradients, no off-palette hues,
    hairlines never heavier than the token values. */
@@ -75,7 +75,7 @@
   --sidebar-width: 240px;
   --shell-motion: 0ms;
 
-  /* shadcn-svelte theme mapping — source of truth stays with Oatwave tokens above */
+  /* shadcn-svelte theme mapping — source of truth stays with OatWave tokens above */
   --background: var(--canvas);
   --foreground: var(--ink);
   --card: var(--surface);

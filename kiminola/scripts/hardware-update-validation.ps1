@@ -29,14 +29,14 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'hardware-recovery.ps1')
 
 if ($env:KIMINOLA_HARDWARE_RUNNER -ne '1') {
-    throw 'Refusing destructive installer validation outside a dedicated Kimi Nola hardware runner.'
+    throw 'Refusing destructive installer validation outside a dedicated OatWave hardware runner.'
 }
 
-$appRoot = Join-Path $env:LOCALAPPDATA 'Kimi Nola'
+$appRoot = Join-Path $env:LOCALAPPDATA 'OatWave'
 $userRoot = Join-Path $env:LOCALAPPDATA 'Kiminola'
 $dataRoot = Join-Path $userRoot 'data'
 $modelRoot = Join-Path $userRoot 'models\nemotron'
-$installedExecutable = Join-Path $appRoot 'kiminola.exe'
+$installedExecutable = Join-Path $appRoot 'oatwave.exe'
 $databasePath = Join-Path $dataRoot 'kiminola.db'
 $provisionedSpeechFixture = Join-Path $userRoot 'hardware\speech-test.wav'
 $provisionedExpectedTranscript = Join-Path $userRoot 'hardware\speech-test.txt'
@@ -70,29 +70,26 @@ foreach ($fixture in @($provisionedSpeechFixture, $provisionedExpectedTranscript
     }
 }
 
-$active = @(Get-Process -Name 'kiminola' -ErrorAction SilentlyContinue)
+$active = @(Get-Process -Name 'kiminola', 'oatwave' -ErrorAction SilentlyContinue)
 if ($active.Count -gt 0) {
-    throw "Refusing to replace an active Kimi Nola process on the hardware runner: $($active.Id -join ', ')."
+    throw "Refusing to replace an active OatWave process on the hardware runner: $($active.Id -join ', ')."
 }
 
 $transactionId = [guid]::NewGuid().ToString('N')
 $transactionRoot = Join-Path $recoveryRoot $transactionId
 $stateSet = New-KiminolaHardwareStateSet -TransactionRoot $transactionRoot
-$appState = $stateSet.App
 $userState = $stateSet.User
-$startMenuState = $stateSet.StartMenu
-$desktopState = $stateSet.Desktop
-$uninstallRegistryState = $stateSet.UninstallRegistry
-$installRegistryState = $stateSet.InstallRegistry
 Test-HardwareStatePlan -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
 
 function Assert-InstalledArchitecture {
+    param([string]$Executable = $installedExecutable)
+    $installedRoot = Split-Path -Parent $Executable
     $paths = @(
-        $installedExecutable,
-        (Join-Path $appRoot 'onnxruntime.dll'),
-        (Join-Path $appRoot 'onnxruntime_providers_shared.dll'),
-        (Join-Path $appRoot 'sherpa-onnx-c-api.dll'),
-        (Join-Path $appRoot 'sherpa-onnx-cxx-api.dll')
+        $Executable,
+        (Join-Path $installedRoot 'onnxruntime.dll'),
+        (Join-Path $installedRoot 'onnxruntime_providers_shared.dll'),
+        (Join-Path $installedRoot 'sherpa-onnx-c-api.dll'),
+        (Join-Path $installedRoot 'sherpa-onnx-cxx-api.dll')
     )
     & (Join-Path $PSScriptRoot 'verify-pe-architecture.ps1') -Target $Target -Paths $paths
 }
@@ -173,6 +170,11 @@ try {
     if ($installerAssets.Count -ne 1) {
         throw "Expected one previous $Arch installer, found $($installerAssets.Count)."
     }
+    $previousExecutable = if ($installerAssets[0].name -match '^Kimi[. ]Nola_') {
+        Join-Path (Join-Path $env:LOCALAPPDATA 'Kimi Nola') 'kiminola.exe'
+    } else {
+        $installedExecutable
+    }
     $signatureAssets = @($release.assets | Where-Object { $_.name -eq "$($installerAssets[0].name).sig" })
     if ($signatureAssets.Count -ne 1) {
         throw "Expected one updater signature for '$($installerAssets[0].name)', found $($signatureAssets.Count)."
@@ -223,37 +225,28 @@ Write-HardwareRecoveryJournal `
     -PathStates $stateSet.PathStates `
     -RegistryStates $stateSet.RegistryStates
 try {
-    Export-HardwareRegistryKey -State $uninstallRegistryState
-    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
-        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
-    Export-HardwareRegistryKey -State $installRegistryState
-    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
-        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
-
-    Backup-HardwarePath -State $appState
-    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
-        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
-    Backup-HardwarePath -State $userState
-    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
-        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
-    Backup-HardwarePath -State $startMenuState
-    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
-        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
-    Backup-HardwarePath -State $desktopState
-    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
-        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
-    Start-HardwareRegistryRemoval -State $uninstallRegistryState
-    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
-        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
-    Remove-ExportedHardwareRegistryKey -State $uninstallRegistryState
-    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
-        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
-    Start-HardwareRegistryRemoval -State $installRegistryState
-    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
-        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
-    Remove-ExportedHardwareRegistryKey -State $installRegistryState
-    Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
-        -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    foreach ($state in $stateSet.RegistryStates) {
+        Export-HardwareRegistryKey -State $state
+        Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+            -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    }
+    foreach ($state in $stateSet.PathStates) {
+        Backup-HardwarePath -State $state
+        Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+            -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    }
+    # Startup values need to be restored after validation, but unrelated entries
+    # must stay present while the test runs.
+    foreach ($state in $stateSet.RegistryStates) {
+        Start-HardwareRegistryRemoval -State $state
+        Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+            -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+        if ($state.RegistryPath -notlike '*\Run') {
+            Remove-ExportedHardwareRegistryKey -State $state
+        }
+        Write-HardwareRecoveryJournal -JournalPath $recoveryJournal -TransactionId $transactionId `
+            -PathStates $stateSet.PathStates -RegistryStates $stateSet.RegistryStates
+    }
 
     if ($userState.SnapshotComplete) {
         $backedUpModelRoot = Join-Path $userState.Backup 'models\nemotron'
@@ -265,13 +258,13 @@ try {
 
     $previousInstall = Start-Process -FilePath $previousInstallerPath -ArgumentList '/S' -PassThru -Wait
     if ($previousInstall.ExitCode -ne 0) { throw "Previous installer exited with $($previousInstall.ExitCode)." }
-    if (-not (Test-Path -LiteralPath $installedExecutable -PathType Leaf)) {
-        throw "Previous installer did not create $installedExecutable."
+    if (-not (Test-Path -LiteralPath $previousExecutable -PathType Leaf)) {
+        throw "Previous installer did not create $previousExecutable."
     }
-    Assert-InstalledArchitecture
+    Assert-InstalledArchitecture -Executable $previousExecutable
 
     & (Join-Path $PSScriptRoot 'legacy-startup.test.ps1') `
-        -Executable $installedExecutable `
+        -Executable $previousExecutable `
         -DatabasePath $databasePath `
         -Target $Target `
         -CargoManifestPath $cargoManifestFullPath `

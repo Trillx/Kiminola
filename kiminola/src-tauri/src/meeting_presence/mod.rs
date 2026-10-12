@@ -46,7 +46,7 @@ const EVENT_PROMPT: &str = "meeting-presence:prompt";
 const EVENT_ACTION: &str = "meeting-presence:action";
 const EVENT_ERROR: &str = "meeting-presence:error";
 pub(crate) const PROMPT_MESSAGE: &str = "You may be in a meeting. Want to jot notes?";
-pub(crate) const PROMPT_NOT_RECORDING_MESSAGE: &str = "Kimi Nola is not recording.";
+pub(crate) const PROMPT_NOT_RECORDING_MESSAGE: &str = "OatWave is not recording.";
 const INACTIVE_POLLS_BEFORE_SESSION_RESET: u8 = 2;
 /// Generic (non-targeted) apps must qualify on consecutive complete polls.
 const GENERIC_POLLS_BEFORE_PROMPT: u8 = 2;
@@ -776,6 +776,12 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     .await
                     .unwrap_or(false);
                 load_state.inner.enabled.store(enabled, Ordering::Relaxed);
+                // Refresh the executable path after an installed or portable upgrade.
+                if let Err(error) =
+                    background_companion::autostart::set_start_with_windows(start_with_windows)
+                {
+                    eprintln!("[meeting-presence] startup registration failed: {error}");
+                }
                 load_state.set_start_with_windows_runtime(start_with_windows);
                 publish(&handle, &load_state);
             }

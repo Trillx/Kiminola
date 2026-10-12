@@ -1,6 +1,6 @@
-# Kimi Nola UI components
+# OatWave UI components
 
-These are **shadcn-svelte** components ("nova" style, Tailwind CSS v4). They live in the repo so we can customize them and keep the Oatwave brand locked in.
+These are **shadcn-svelte** components ("nova" style, Tailwind CSS v4). They live in the repo so we can customize them and keep the OatWave brand locked in.
 
 ## Adding a component
 
@@ -10,7 +10,7 @@ npx shadcn-svelte@latest add -y <component-name>
 
 ## Theming
 
-`src/app.css` is the source of truth. The shadcn CSS variables (`--background`, `--primary`, `--ring`, etc.) are mapped to the Oatwave tokens (`--canvas`, `--ink`, `--brand`, etc.) in both `:root` and `[data-theme="dark"]`. Components should continue to look on-brand in light and dark mode without extra work.
+`src/app.css` is the source of truth. The shadcn CSS variables (`--background`, `--primary`, `--ring`, etc.) are mapped to the OatWave tokens (`--canvas`, `--ink`, `--brand`, etc.) in both `:root` and `[data-theme="dark"]`. Components should continue to look on-brand in light and dark mode without extra work.
 
 ## Brand rules
 

@@ -1,6 +1,6 @@
-# Contributing to Kimi Nola
+# Contributing to OatWave
 
-Thanks for helping build a private, local-first meeting-notes tool. Kimi Nola is Windows-first and currently targets Windows x64 and ARM64.
+Thanks for helping build a private, local-first meeting-notes tool. OatWave is Windows-first and currently targets Windows x64 and ARM64.
 
 ## Before you start
 
@@ -67,4 +67,4 @@ Include the Windows version, x64 or ARM64 architecture, commit or release versio
 
 ## Scope and design constraints
 
-Do not add features outside the MVP without a decision recorded in `SPEC.md`. Do not add telemetry, audio retention, or plaintext credential storage. New visual surfaces should follow the Oatwave brand handoff: no gradients, no off-palette hues, and one gold emphasis per view.
+Do not add features outside the MVP without a decision recorded in `SPEC.md`. Do not add telemetry, audio retention, or plaintext credential storage. New visual surfaces should follow the OatWave brand handoff: no gradients, no off-palette hues, and one gold emphasis per view.

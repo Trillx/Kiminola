@@ -1,4 +1,4 @@
-# Kimi Nola review rules
+# OatWave review rules
 
 Treat `SPEC.md` as the source of truth for product behavior and MVP scope, `AGENTS.md` as the engineering guide, and `kiminola/branding/HANDOFF.md` as the visual-system contract.
 
@@ -19,7 +19,7 @@ Treat `SPEC.md` as the source of truth for product behavior and MVP scope, `AGEN
 - Prefer existing modules and abstractions over parallel implementations. Flag duplicated business logic or native lifecycle behavior.
 - Require regression tests for bug fixes when the affected behavior can be exercised deterministically.
 - Distinguish blocking defects from optional cleanup or subjective style preferences. Avoid comments that merely restate the diff.
-- For frontend changes, enforce the Oatwave constraints: no gradients, no off-palette colors, and one gold emphasis per view.
+- For frontend changes, enforce the OatWave constraints: no gradients, no off-palette colors, and one gold emphasis per view.
 
 ## Expected validation
 

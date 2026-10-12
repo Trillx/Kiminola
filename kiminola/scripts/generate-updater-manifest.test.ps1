@@ -45,10 +45,10 @@ try {
         # always carry untagged-* browser_download_url values.
         $untagged = "https://github.com/$repository/releases/download/untagged-deadbeef"
         $assets = @(
-            [ordered]@{ name = "Kimi.Nola_$($version)_x64-setup.exe"; url = 'https://api.github.com/assets/1'; browser_download_url = "$untagged/Kimi.Nola_$($version)_x64-setup.exe" }
-            [ordered]@{ name = "Kimi.Nola_$($version)_x64-setup.exe.sig"; url = 'https://api.github.com/assets/2'; browser_download_url = "$untagged/Kimi.Nola_$($version)_x64-setup.exe.sig"; local_path = $signatureX64Path }
-            [ordered]@{ name = "Kimi.Nola_$($version)_arm64-setup.exe"; url = 'https://api.github.com/assets/3'; browser_download_url = "$untagged/Kimi.Nola_$($version)_arm64-setup.exe" }
-            [ordered]@{ name = "Kimi.Nola_$($version)_arm64-setup.exe.sig"; url = 'https://api.github.com/assets/4'; browser_download_url = "$untagged/Kimi.Nola_$($version)_arm64-setup.exe.sig"; local_path = $signatureArm64Path }
+            [ordered]@{ name = "OatWave_$($version)_x64-setup.exe"; url = 'https://api.github.com/assets/1'; browser_download_url = "$untagged/OatWave_$($version)_x64-setup.exe" }
+            [ordered]@{ name = "OatWave_$($version)_x64-setup.exe.sig"; url = 'https://api.github.com/assets/2'; browser_download_url = "$untagged/OatWave_$($version)_x64-setup.exe.sig"; local_path = $signatureX64Path }
+            [ordered]@{ name = "OatWave_$($version)_arm64-setup.exe"; url = 'https://api.github.com/assets/3'; browser_download_url = "$untagged/OatWave_$($version)_arm64-setup.exe" }
+            [ordered]@{ name = "OatWave_$($version)_arm64-setup.exe.sig"; url = 'https://api.github.com/assets/4'; browser_download_url = "$untagged/OatWave_$($version)_arm64-setup.exe.sig"; local_path = $signatureArm64Path }
         )
         $fixture = [ordered]@{
             id = $releaseId
@@ -65,7 +65,7 @@ try {
     # --- Scenario 1: a well-formed draft release produces a publish-safe manifest ---
 
     $fixturePath = Join-Path $fixtureRoot 'release.json'
-    New-DraftReleaseFixture -Body "Windows x64 and ARM64 installers for Kimi Nola $tag." -Path $fixturePath
+    New-DraftReleaseFixture -Body "Windows x64 and ARM64 installers for OatWave $tag." -Path $fixturePath
     $outputPath = Join-Path $fixtureRoot 'latest.json'
 
     $runError = $null
@@ -89,19 +89,29 @@ try {
             }
         }
 
-        Check 'x64 URL names the x64 installer' ($manifest.platforms.'windows-x86_64'.url -eq "$($expectedPrefix)Kimi.Nola_$($version)_x64-setup.exe")
-        Check 'arm64 URL names the arm64 installer' ($manifest.platforms.'windows-aarch64'.url -eq "$($expectedPrefix)Kimi.Nola_$($version)_arm64-setup.exe")
+        Check 'x64 URL names the x64 installer' ($manifest.platforms.'windows-x86_64'.url -eq "$($expectedPrefix)OatWave_$($version)_x64-setup.exe")
+        Check 'arm64 URL names the arm64 installer' ($manifest.platforms.'windows-aarch64'.url -eq "$($expectedPrefix)OatWave_$($version)_arm64-setup.exe")
         Check 'x64 signature is the literal signature content' ($manifest.platforms.'windows-x86_64'.signature -eq $signatureX64)
         Check 'arm64 signature is the literal signature content' ($manifest.platforms.'windows-aarch64'.signature -eq $signatureArm64)
         Check 'manifest contains no untagged URL anywhere' ((Get-Content -Raw $outputPath) -notmatch 'untagged')
         Check 'version round-trips' ($manifest.version -eq $version)
-        Check 'notes come from the release body' ($manifest.notes -eq "Windows x64 and ARM64 installers for Kimi Nola $tag.")
+        Check 'notes come from the release body' ($manifest.notes -eq "Windows x64 and ARM64 installers for OatWave $tag.")
     }
+
+    # Earlier releases retain the previous filenames; the manifest generator
+    # must still support an old updater-enabled baseline.
+    $legacyFixturePath = Join-Path $fixtureRoot 'release-legacy.json'
+    $legacyFixture = (Get-Content -Raw -LiteralPath $fixturePath) -replace 'OatWave_', 'Kimi.Nola_'
+    [IO.File]::WriteAllText($legacyFixturePath, $legacyFixture)
+    $legacyOutputPath = Join-Path $fixtureRoot 'latest-legacy.json'
+    & $generator -Repository $repository -Tag $tag -ReleaseId $releaseId -Version $version -OutputPath $legacyOutputPath -ReleaseFixturePath $legacyFixturePath
+    $legacyManifest = Get-Content -Raw -LiteralPath $legacyOutputPath | ConvertFrom-Json
+    Check 'earlier branded installers remain supported' ($legacyManifest.platforms.'windows-x86_64'.url -eq "$($expectedPrefix)Kimi.Nola_$($version)_x64-setup.exe")
 
     # --- Scenario 2: notes claiming the release remains a draft are rejected ---
 
     $staleFixturePath = Join-Path $fixtureRoot 'release-stale-notes.json'
-    New-DraftReleaseFixture -Body "Installers for Kimi Nola $tag. This release remains a draft until the update path has been tested." -Path $staleFixturePath
+    New-DraftReleaseFixture -Body "Installers for OatWave $tag. This release remains a draft until the update path has been tested." -Path $staleFixturePath
     $staleOutputPath = Join-Path $fixtureRoot 'latest-stale.json'
 
     $staleError = $null

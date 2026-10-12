@@ -89,7 +89,7 @@ namespace KiminolaStartupHarness
             const uint CloseMessage = 0x0010;
             if (!PostMessageW(window, CloseMessage, UIntPtr.Zero, IntPtr.Zero))
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not post WM_CLOSE to the Kimi Nola main window.");
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not post WM_CLOSE to the OatWave main window.");
             }
         }
 
@@ -128,7 +128,7 @@ function Get-MainWindow {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
 
     return @([KiminolaStartupHarness.NativeWindows]::ForProcess([uint32]$ProcessId)) |
-        Where-Object { $_.Title -eq 'Kimi Nola' } |
+        Where-Object { $_.Title -eq 'OatWave' } |
         Select-Object -First 1
 }
 
@@ -191,7 +191,7 @@ function Assert-SinglePrimary {
     $processes = @(Get-KiminolaProcesses)
     if ($processes.Count -ne 1 -or $processes[0].Id -ne $Primary.Id) {
         $ids = ($processes | ForEach-Object Id) -join ', '
-        throw "Expected only primary PID $($Primary.Id), found Kimi Nola PIDs: $ids"
+        throw "Expected only primary PID $($Primary.Id), found OatWave PIDs: $ids"
     }
 }
 
@@ -204,7 +204,7 @@ function Stop-OwnedPrimary {
             throw "Primary process $($Primary.Id) did not stop during scenario cleanup."
         }
     }
-    Wait-Until -Description 'all Kimi Nola processes to stop' -Condition {
+    Wait-Until -Description 'all OatWave processes to stop' -Condition {
         @(Get-KiminolaProcesses).Count -eq 0
     } | Out-Null
 }
@@ -281,7 +281,7 @@ try {
     Write-Host 'PASS: background relaunch stayed hidden; later ordinary relaunch showed the same process.'
     Stop-OwnedPrimary -Primary $backgroundPrimary
 
-    Write-Host 'PASS: Kimi Nola startup PID/HWND behavior verified.'
+    Write-Host 'PASS: OatWave startup PID/HWND behavior verified.'
 }
 finally {
     foreach ($ownedProcessId in $script:OwnedProcessIds) {

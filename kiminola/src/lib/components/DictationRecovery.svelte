@@ -28,7 +28,7 @@
 <section class="recovery" aria-label="Dictation recovery" aria-busy={busy}>
   <header><h3>{snapshot.exit_intent === "quit" ? "Review before quitting" : snapshot.exit_intent === "disable" ? "Review before disabling dictation" : "Review dictation"}</h3><p>Capture has stopped. Resolve this text before starting another dictation. Meetings can still run.</p></header>
   {#if snapshot.error}<p role="alert">{snapshot.error}</p>{/if}
-  {#if snapshot.delivery === "uncertain"}<p>Insertion was not verified. Check the destination before copying to avoid a duplicate. Kimi Nola will not retry insertion.</p>{/if}
+  {#if snapshot.delivery === "uncertain"}<p>Insertion was not verified. Check the destination before copying to avoid a duplicate. OatWave will not retry insertion.</p>{/if}
   {#if text}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (Scrollable text must be reachable by keyboard.) -->
     <pre class="recovery-text ui-scrollbar" role="region" tabindex="0" aria-label="Retained dictation text">{text}</pre>

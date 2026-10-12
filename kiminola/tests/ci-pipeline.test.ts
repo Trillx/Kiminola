@@ -36,7 +36,7 @@ test('CI runs distinct quality, security, and native packaging gates', async () 
   assert.match(workflow, /npm\.cmd run tauri bundle --/);
   assert.match(workflow, /stage-portable-package\.ps1/);
   assert.match(workflow, /hardware-runner-state\.test\.ps1/);
-  assert.match(workflow, /portable[\\/]Kimi-Nola-\$\{\{ matrix\.arch \}\}-portable\.zip/);
+  assert.match(workflow, /portable[\\/]OatWave-\$\{\{ matrix\.arch \}\}-portable\.zip/);
   assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/);
   assert.match(workflow, /cargo-audit:[\s\S]*?checks: write/);
   assert.match(workflow, /cargo-audit:[\s\S]*?ignore: RUSTSEC-2023-0071/);
@@ -119,7 +119,7 @@ test('release validates before creating a draft and builds on native runners', a
   );
   assert.match(workflow, /github-artifact-id:[\s\S]*?wait-for-completion: true[\s\S]*?Get-AuthenticodeSignature/);
   assert.match(workflow, /Get-AuthenticodeSignature[\s\S]*?npm\.cmd run tauri -- signer sign/);
-  assert.match(workflow, /\$canonicalInstallerName = "Kimi\.Nola_\$\{version\}_\$\{arch\}-setup\.exe"/);
+  assert.match(workflow, /\$canonicalInstallerName = "OatWave_\$\{version\}_\$\{arch\}-setup\.exe"/);
   assert.match(workflow, /Move-Item -LiteralPath \$installer\.FullName -Destination \$canonicalInstallerPath/);
   const staleSignatureRemoval = workflow.indexOf('Remove-Item -LiteralPath $initialSignaturePath');
   const canonicalInstallerMove = workflow.indexOf('Move-Item -LiteralPath $installer.FullName -Destination $canonicalInstallerPath');
@@ -128,12 +128,12 @@ test('release validates before creating a draft and builds on native runners', a
     'the pre-Authenticode updater signature is removed before the installer is renamed'
   );
   assert.match(workflow, /Expected exactly one canonical updater signature/);
-  const canonicalRename = workflow.indexOf('$canonicalInstallerName = "Kimi.Nola_${version}_');
+  const canonicalRename = workflow.indexOf('$canonicalInstallerName = "OatWave_${version}_');
   const updaterSigning = workflow.indexOf('npm.cmd run tauri -- signer sign $installer.FullName');
   assert.ok(canonicalRename >= 0 && updaterSigning > canonicalRename, 'canonical release naming precedes updater signing');
   assert.match(workflow, /downloadDirectory[\s\S]*?Get-AuthenticodeSignature/);
   assert.match(workflow, /Expand-Archive[\s\S]*?verify-pe-architecture\.ps1/);
-  assert.match(workflow, /\$portableExecutablePath = Join-Path \$portableExtract 'kiminola\.exe'/);
+  assert.match(workflow, /\$portableExecutablePath = Join-Path \$portableExtract 'oatwave\.exe'/);
   assert.match(workflow, /Get-AuthenticodeSignature -FilePath \$portableExecutablePath/);
   assert.match(workflow, /portable\.signer_thumbprint/);
   assert.match(workflow, /stage-portable-package\.ps1/);
@@ -238,12 +238,12 @@ test('hardware update validation preserves persistent state and exercises migrat
   assert.match(script, /Remove-Item Env:GH_TOKEN[\s\S]*?Start-Process -FilePath \$previousInstallerPath/);
   assert.match(script, /Get-Process -Name 'kiminola'[\s\S]*?New-Item -ItemType Directory -Path \$fixtureRoot/);
   const verifiedPreviousInstaller = script.indexOf('& $minisign -V -q');
-  const firstDestructiveBackup = script.indexOf('Backup-HardwarePath -State $appState');
+  const firstDestructiveBackup = script.indexOf('Backup-HardwarePath -State $state');
   assert.ok(
     verifiedPreviousInstaller >= 0 && verifiedPreviousInstaller < firstDestructiveBackup,
     'all previous-installer download and signature preflight must finish before persistent state moves'
   );
-  assert.match(script, /try \{\s*Export-HardwareRegistryKey -State \$uninstallRegistryState/);
+  assert.match(script, /try \{\s*foreach \(\$state in \$stateSet\.RegistryStates\) \{\s*Export-HardwareRegistryKey -State \$state/);
   assert.match(recovery, /Restore-HardwarePath -State \$state/);
   assert.match(recovery, /Restore-HardwareRegistryKey -State \$state/);
   assert.match(recovery, /GetFolderPath\('Programs'\)/);
@@ -288,18 +288,20 @@ test('hardware update validation preserves persistent state and exercises migrat
     initialJournal >= 0 && initialJournal < firstDestructiveBackup,
     'the durable transaction journal must exist before the first persistent-state move'
   );
-  assert.ok(
-    (script.match(/Write-HardwareRecoveryJournal/g)?.length ?? 0) >= 11,
-    'the transaction journal is rewritten after every filesystem snapshot and every phase of each registry snapshot'
-  );
+  for (const operation of ['Export-HardwareRegistryKey', 'Backup-HardwarePath', 'Start-HardwareRegistryRemoval', 'Remove-ExportedHardwareRegistryKey']) {
+    assert.match(
+      script,
+      new RegExp(`${operation} -State \\$state[\\s\\S]*?Write-HardwareRecoveryJournal`),
+      'the transaction journal is rewritten inside the loop after every snapshot or registry phase'
+    );
+  }
   const statePlan = script.indexOf('Test-HardwareStatePlan');
-  const firstRegistryExport = script.indexOf('Export-HardwareRegistryKey -State $uninstallRegistryState');
-  const secondRegistryExport = script.indexOf('Export-HardwareRegistryKey -State $installRegistryState');
-  const firstRegistryRemoval = script.indexOf('Start-HardwareRegistryRemoval -State $uninstallRegistryState');
+  const firstRegistryExport = script.indexOf('Export-HardwareRegistryKey -State $state');
+  const firstRegistryRemoval = script.indexOf('Start-HardwareRegistryRemoval -State $state');
   assert.ok(statePlan >= 0 && statePlan < initialJournal, 'the complete state plan is validated before transaction creation');
   assert.ok(
-    firstRegistryExport > initialJournal && secondRegistryExport > firstRegistryExport && secondRegistryExport < firstDestructiveBackup,
-    'both validated registry exports finish before the first destructive filesystem move'
+    firstRegistryExport > initialJournal && firstRegistryExport < firstDestructiveBackup,
+    'all validated registry exports finish before the first destructive filesystem move'
   );
   assert.ok(firstRegistryRemoval > firstDestructiveBackup, 'live registry deletion starts only after non-destructive export preflight');
   assert.match(stateHelpers, /InitiallyExisted/);

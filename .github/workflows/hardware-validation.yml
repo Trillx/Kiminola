@@ -65,8 +65,9 @@ jobs:
           function Test-UpdaterAssets($Release, [version]$Version) {
             $assetNames = @($Release.assets | ForEach-Object { $_.name })
             foreach ($architecture in @('x64', 'arm64')) {
-              $installer = "Kimi.Nola_$Version`_$architecture-setup.exe"
-              if ($installer -notin $assetNames -or "$installer.sig" -notin $assetNames) {
+              $installers = @("OatWave_$Version`_$architecture-setup.exe", "Kimi.Nola_$Version`_$architecture-setup.exe")
+              $matching = @($installers | Where-Object { $_ -in $assetNames -and "$_.sig" -in $assetNames })
+              if ($matching.Count -ne 1) {
                 return $false
               }
             }
@@ -340,7 +341,7 @@ jobs:
         shell: pwsh
         run: |
           $paths = @(
-            'src-tauri/target/${{ matrix.target }}/release/kiminola.exe',
+            'src-tauri/target/${{ matrix.target }}/release/oatwave.exe',
             'src-tauri/target/release/onnxruntime.dll',
             'src-tauri/target/release/onnxruntime_providers_shared.dll',
             'src-tauri/target/release/sherpa-onnx-c-api.dll',

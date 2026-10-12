@@ -84,7 +84,7 @@
 </script>
 
 <svelte:head>
-  <title>{draft?.title ?? "Note draft"} — Kimi Nola</title>
+  <title>{draft?.title ?? "Note draft"} — OatWave</title>
 </svelte:head>
 
 <div class="main-content">

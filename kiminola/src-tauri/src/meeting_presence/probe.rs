@@ -365,7 +365,7 @@ fn read_process_identity(pid: u32) -> Option<ProcessIdentity> {
 }
 
 /// Scripted signals: `(pid, parent_pid, executable)`, `(pid, window title)`
-/// and `(pid, input, output)` active audio, classified as if Kimi Nola were
+/// and `(pid, input, output)` active audio, classified as if OatWave were
 /// PID 999. Every fixture process has a readable identity (its executable
 /// path derives from its name, created at time 1).
 #[cfg(test)]

@@ -6,8 +6,8 @@ $ErrorActionPreference = 'Stop'
 
 $fixtureRoot = Join-Path $env:TEMP ("kiminola-portable-test-" + [guid]::NewGuid().ToString('N'))
 $nativeRoot = Join-Path $fixtureRoot 'native'
-$appPath = Join-Path $fixtureRoot 'built-kiminola.exe'
-$archivePath = Join-Path $fixtureRoot 'Kimi-Nola-x64-portable.zip'
+$appPath = Join-Path $fixtureRoot 'built-oatwave.exe'
+$archivePath = Join-Path $fixtureRoot 'OatWave-x64-portable.zip'
 $requiredDlls = @(
     'onnxruntime.dll',
     'onnxruntime_providers_shared.dll',
@@ -38,7 +38,7 @@ try {
     } finally {
         $archive.Dispose()
     }
-    $expected = @('kiminola.exe') + $requiredDlls | Sort-Object
+    $expected = @('oatwave.exe') + $requiredDlls | Sort-Object
     if (Compare-Object -ReferenceObject $expected -DifferenceObject $names) {
         throw "Portable archive contents were wrong: $($names -join ', ')."
     }

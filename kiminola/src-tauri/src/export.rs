@@ -1,7 +1,7 @@
 //! Meeting export (SPEC.md §6, §8): notes as Markdown with YAML frontmatter
 //! (title, date, space, duration), transcript as plain text. Clipboard exports
 //! return the content; file exports write to
-//! `%USERPROFILE%\Documents\Kimi Nola\Exports` (fallback: `exports/` next to
+//! `%USERPROFILE%\Documents\OatWave\Exports` (fallback: `exports/` next to
 //! the executable) and return the written path.
 
 use std::path::PathBuf;
@@ -95,7 +95,7 @@ fn exports_dir() -> Result<PathBuf, String> {
     if let Some(profile) = std::env::var_os("USERPROFILE") {
         return Ok(PathBuf::from(profile)
             .join("Documents")
-            .join("Kimi Nola")
+            .join("OatWave")
             .join("Exports"));
     }
     let exe = std::env::current_exe().map_err(|e| format!("no current exe path: {e}"))?;

@@ -92,7 +92,7 @@
 </script>
 
 <svelte:head>
-  <title>Prototype — Meeting presence | Kimi Nola</title>
+  <title>Prototype — Meeting presence | OatWave</title>
 </svelte:head>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -119,7 +119,7 @@
 
     <div class="demo-frame" class:frame-detected={stage === "detected"}>
       <div class="frame-topline">
-        <span class="frame-app-name">Kimi Nola</span>
+        <span class="frame-app-name">OatWave</span>
         <span class="frame-context">Detection preview · local only</span>
       </div>
 
@@ -133,7 +133,7 @@
             </div>
             <div class="toast-card" role="status" aria-live="polite">
               <div class="toast-topline">
-                <span class="toast-app">KIMI NOLA</span>
+                <span class="toast-app">OATWAVE</span>
                 <span class="toast-time">now</span>
               </div>
               <div class="presence-mark" aria-hidden="true">·</div>
@@ -141,7 +141,7 @@
                 <div class="toast-kicker">Meeting presence</div>
                 <h2>You may be in a meeting.</h2>
                 <p>Granola appears open and its audio session is active.</p>
-                <p class="privacy-line">Kimi Nola is not recording.</p>
+                <p class="privacy-line">OatWave is not recording.</p>
               </div>
               <div class="toast-actions">
                 <button class="action action-primary" type="button" onclick={() => handleAction("jot")}>Jot notes</button>
@@ -193,7 +193,7 @@
             </div>
             <aside class="note-rail" aria-label="Meeting presence prompt">
               <div class="rail-topline">
-                <span class="toast-kicker">Kimi Nola</span>
+                <span class="toast-kicker">OatWave</span>
                 <span class="rail-pill">not recording</span>
               </div>
               <h2>Jot something down?</h2>

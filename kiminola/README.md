@@ -1,4 +1,4 @@
-# Kimi Nola application
+# OatWave application
 
 This directory contains the Tauri 2 desktop application: a SvelteKit and TypeScript frontend in `src/` with the Rust backend in `src-tauri/`.
 

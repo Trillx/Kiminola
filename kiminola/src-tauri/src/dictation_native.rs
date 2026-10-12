@@ -239,7 +239,7 @@ pub fn snapshot_target() -> Result<TargetSnapshot, String> {
             .0 as usize
     });
     let created = process_security(process.raw())?;
-    // An elevated Kimi Nola must not bypass UIPI to deliver either.
+    // An elevated OatWave must not bypass UIPI to deliver either.
     process_security(unsafe { GetCurrentProcess() })?;
     not_terminal(process.raw())?;
     require_release_qualification(&process)?;

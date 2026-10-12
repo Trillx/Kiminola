@@ -71,7 +71,7 @@ inputs to detection. A headset is optional.
 ## Implementation
 
 - Match helper audio to the meeting application's process ancestry. Keep
-  independent instances separate and exclude Kimi Nola's own descendants.
+  independent instances separate and exclude OatWave's own descendants.
 - Use the process-family root for episode suppression and process-loopback
   recording. Resolve the visible window separately for Companion layout.
 - Enumerate all active Windows render and capture endpoints, not only defaults.
@@ -112,7 +112,7 @@ For x64, use the matching `win-x64` library directory and pass
 ## Live read-only probe
 
 With the same environment, this invokes the actual Windows collectors and
-classifier without opening Kimi Nola or starting recording:
+classifier without opening OatWave or starting recording:
 
 ```powershell
 cargo test --lib meeting_presence::tests::inspect_live_windows_detection -- --ignored --exact --nocapture

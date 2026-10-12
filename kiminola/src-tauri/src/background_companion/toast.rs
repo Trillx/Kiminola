@@ -53,7 +53,7 @@ pub(super) fn ensure_toast_shortcut() -> Result<(), String> {
         std::fs::create_dir_all(&shortcut_dir).map_err(|error| error.to_string())?;
 
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-        let shortcut = shortcut_dir.join("Kimi Nola.lnk");
+        let shortcut = shortcut_dir.join("OatWave.lnk");
         let executable_wide = wide(executable.as_os_str());
         let shortcut_wide = wide(shortcut.as_os_str());
         let description_wide = wide(std::ffi::OsStr::new("Local meeting notes"));

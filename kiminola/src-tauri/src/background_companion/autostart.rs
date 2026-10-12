@@ -1,8 +1,8 @@
 //! Start-with-Windows registration for the Background companion: a per-user
-//! `Run` entry that launches Kimi Nola with `--background`.
+//! `Run` entry that launches OatWave with `--background`.
 
-/// Add (or remove) the `HKCU\...\Run\KimiNola` entry. Removing a missing
-/// entry is not an error.
+/// Add (or remove) the `HKCU\...\Run\OatWave` entry and remove the former
+/// `KimiNola` entry. Removing a missing entry is not an error.
 #[cfg(target_os = "windows")]
 pub(crate) fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     use std::mem::size_of;
@@ -35,10 +35,19 @@ pub(crate) fn set_start_with_windows(enabled: bool) -> Result<(), String> {
                 utf16.as_ptr() as *const u8,
                 utf16.len() * size_of::<u16>(),
             );
-            RegSetValueExW(key, w!("KimiNola"), 0, REG_SZ, Some(bytes))
+            RegSetValueExW(key, w!("OatWave"), 0, REG_SZ, Some(bytes))
         } else {
-            RegDeleteValueW(key, w!("KimiNola"))
+            RegDeleteValueW(key, w!("OatWave"))
         };
+        if result.0 == 0 || (!enabled && result.0 == 2) {
+            let legacy_result = RegDeleteValueW(key, w!("KimiNola"));
+            if legacy_result.0 != 0 && legacy_result.0 != 2 {
+                let _ = RegCloseKey(key);
+                return Err(format!(
+                    "could not remove the previous Windows startup entry: {legacy_result:?}"
+                ));
+            }
+        }
         let _ = RegCloseKey(key);
         if !enabled && (result.0 == 0 || result.0 == 2) {
             return Ok(());

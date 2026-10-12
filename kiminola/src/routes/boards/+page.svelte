@@ -209,7 +209,7 @@
 </script>
 
 <svelte:head>
-  <title>Boards — Kimi Nola</title>
+  <title>Boards — OatWave</title>
 </svelte:head>
 
 <div class="main-content boards-page">

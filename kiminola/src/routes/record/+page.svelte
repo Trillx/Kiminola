@@ -94,7 +94,7 @@
 </script>
 
 <svelte:head>
-  <title>Recording — Kimi Nola</title>
+  <title>Recording — OatWave</title>
 </svelte:head>
 
 <div class="main-content recording-content">

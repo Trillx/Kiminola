@@ -357,12 +357,12 @@
 {/snippet}
 
 {#snippet sidebarContent()}
-  <a class="wordmark" href="/" aria-label="Kimi Nola — home">
+  <a class="wordmark" href="/" aria-label="OatWave — home">
     <img
       src={themeState.theme === "dark"
-        ? "/brand/kimi-nola-logo-primary-dark.svg"
-        : "/brand/kimi-nola-logo-primary-light.svg"}
-      alt="Kimi Nola"
+        ? "/brand/oatwave-logo-primary-dark.svg"
+        : "/brand/oatwave-logo-primary-light.svg"}
+      alt="OatWave"
     />
   </a>
 
@@ -448,9 +448,9 @@
   <div class="sidebar-bottom">
     <a class="nav-item" class:active={pathname === "/settings"} href="/settings"><SettingsIcon size={16} aria-hidden="true" /> <span>Settings</span></a>
     <div class="account-row">
-      <div class="avatar">K</div>
+      <div class="avatar">O</div>
       <div class="name">
-        Kimi Nola
+        OatWave
         <span class="name-sub">Open source · MIT License</span>
       </div>
     </div>

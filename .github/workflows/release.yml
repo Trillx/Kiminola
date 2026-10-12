@@ -268,7 +268,7 @@ jobs:
           }
 
           if ($null -eq $release) {
-            $notes = @("Windows x64 and ARM64 installers for Kimi Nola $env:RELEASE_TAG.")
+            $notes = @("Windows x64 and ARM64 installers for OatWave $env:RELEASE_TAG.")
             if ($env:RELEASE_AUTHENTICODE -ne 'signpath') {
               $notes += 'These builds are not Authenticode-signed, so Windows SmartScreen may warn before the first run. Installers carry the Tauri updater signature.'
             }
@@ -278,7 +278,7 @@ jobs:
             $body = @{
               tag_name = $env:RELEASE_TAG
               target_commitish = $env:RELEASE_COMMIT
-              name = "Kimi Nola $env:RELEASE_TAG"
+              name = "OatWave $env:RELEASE_TAG"
               body = $notes -join "`n`n"
               draft = $true
               prerelease = $false
@@ -392,7 +392,7 @@ jobs:
         shell: pwsh
         run: |
           $paths = @(
-            'src-tauri/target/${{ matrix.target }}/release/kiminola.exe',
+            'src-tauri/target/${{ matrix.target }}/release/oatwave.exe',
             'src-tauri/target/release/onnxruntime.dll',
             'src-tauri/target/release/onnxruntime_providers_shared.dll',
             'src-tauri/target/release/sherpa-onnx-c-api.dll',
@@ -406,7 +406,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signpath-executable-${{ matrix.arch }}-${{ github.run_id }}
-          path: kiminola/src-tauri/target/${{ matrix.target }}/release/kiminola.exe
+          path: kiminola/src-tauri/target/${{ matrix.target }}/release/oatwave.exe
           if-no-files-found: error
           retention-days: 1
 
@@ -431,9 +431,9 @@ jobs:
         env:
           EXPECTED_SIGNER_THUMBPRINT: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT }}
         run: |
-          $signed = @(Get-ChildItem -LiteralPath '${{ runner.temp }}/signed-executable' -Filter 'kiminola.exe' -File -Recurse)
+          $signed = @(Get-ChildItem -LiteralPath '${{ runner.temp }}/signed-executable' -Filter 'oatwave.exe' -File -Recurse)
           if ($signed.Count -ne 1) { throw "Expected one SignPath-signed executable, found $($signed.Count)." }
-          $executable = 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe'
+          $executable = 'src-tauri/target/${{ matrix.target }}/release/oatwave.exe'
           Copy-Item -LiteralPath $signed[0].FullName -Destination $executable -Force
           $signature = Get-AuthenticodeSignature -FilePath $executable
           $expectedSignerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT.Trim().ToUpperInvariant()
@@ -447,7 +447,7 @@ jobs:
       - name: Test release executable startup behavior
         working-directory: kiminola
         shell: pwsh
-        run: ./scripts/startup-behavior.test.ps1 -Executable 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe' -TimeoutSeconds 30
+        run: ./scripts/startup-behavior.test.ps1 -Executable 'src-tauri/target/${{ matrix.target }}/release/oatwave.exe' -TimeoutSeconds 30
 
       - name: Stage complete portable package
         working-directory: kiminola
@@ -455,9 +455,9 @@ jobs:
         run: |
           $config = Get-Content -Raw 'src-tauri/tauri.conf.json' | ConvertFrom-Json
           ./scripts/stage-portable-package.ps1 `
-            -Executable 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe' `
+            -Executable 'src-tauri/target/${{ matrix.target }}/release/oatwave.exe' `
             -NativeDirectory 'src-tauri/target/release' `
-            -OutputPath "portable/Kimi-Nola_$($config.version)_${{ matrix.arch }}-portable.zip"
+            -OutputPath "portable/OatWave_$($config.version)_${{ matrix.arch }}-portable.zip"
 
       - name: Bundle the verified executable and create initial updater signature
         working-directory: kiminola
@@ -525,7 +525,7 @@ jobs:
 
           $version = '${{ github.ref_name }}'.Substring(1)
           $arch = '${{ matrix.arch }}'.ToLowerInvariant()
-          $canonicalInstallerName = "Kimi.Nola_${version}_${arch}-setup.exe"
+          $canonicalInstallerName = "OatWave_${version}_${arch}-setup.exe"
           $canonicalInstallerPath = Join-Path $installer.DirectoryName $canonicalInstallerName
           if (-not [string]::Equals($installer.FullName, $canonicalInstallerPath, [StringComparison]::OrdinalIgnoreCase)) {
             if (Test-Path -LiteralPath $canonicalInstallerPath) {
@@ -576,9 +576,9 @@ jobs:
           } elseif ($authenticode.Status -ne 'NotSigned') {
             throw "Installer '$($installer.Name)' unexpectedly carries an Authenticode signature in an unsigned release."
           }
-          $portable = @(Get-ChildItem -LiteralPath 'portable' -Filter 'Kimi-Nola_*_${{ matrix.arch }}-portable.zip' -File)
+          $portable = @(Get-ChildItem -LiteralPath 'portable' -Filter 'OatWave_*_${{ matrix.arch }}-portable.zip' -File)
           if ($portable.Count -ne 1) { throw "Expected one portable archive, found $($portable.Count)." }
-          $portableExecutable = 'src-tauri/target/${{ matrix.target }}/release/kiminola.exe'
+          $portableExecutable = 'src-tauri/target/${{ matrix.target }}/release/oatwave.exe'
           $portableAuthenticode = Get-AuthenticodeSignature -FilePath $portableExecutable
           if ($signedRelease) {
             if ($portableAuthenticode.Status -ne 'Valid' -or
@@ -623,7 +623,7 @@ jobs:
           path: |
             kiminola/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
             kiminola/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe.sig
-            kiminola/portable/Kimi-Nola_*_${{ matrix.arch }}-portable.zip
+            kiminola/portable/OatWave_*_${{ matrix.arch }}-portable.zip
             kiminola/portable/release-verification-${{ matrix.arch }}.json
           if-no-files-found: error
           retention-days: 1
@@ -830,7 +830,7 @@ jobs:
               $archive.Dispose()
             }
             $expectedEntries = @(
-              'kiminola.exe',
+              'oatwave.exe',
               'onnxruntime.dll',
               'onnxruntime_providers_shared.dll',
               'sherpa-onnx-c-api.dll',
@@ -845,7 +845,7 @@ jobs:
             & .\kiminola\scripts\verify-pe-architecture.ps1 `
               -Target $expected[$architecture] `
               -Paths $portablePePaths
-            $portableExecutablePath = Join-Path $portableExtract 'kiminola.exe'
+            $portableExecutablePath = Join-Path $portableExtract 'oatwave.exe'
             $portableExecutableHash = (Get-FileHash -LiteralPath $portableExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant()
             $portableAuthenticode = Get-AuthenticodeSignature -FilePath $portableExecutablePath
             if ($portableExecutableHash -ne $report.portable.executable_sha256) {

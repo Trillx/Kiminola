@@ -31,8 +31,8 @@ pub(super) fn setup(
     let toggle = MenuItemBuilder::with_id("presence-toggle", "Pause detection")
         .enabled(false)
         .build(app)?;
-    let open = MenuItemBuilder::with_id("presence-open", "Open Kimi Nola").build(app)?;
-    let quit = MenuItemBuilder::with_id("presence-quit", "Quit Kimi Nola").build(app)?;
+    let open = MenuItemBuilder::with_id("presence-open", "Open OatWave").build(app)?;
+    let quit = MenuItemBuilder::with_id("presence-quit", "Quit OatWave").build(app)?;
     let menu = MenuBuilder::new(app)
         .items(&[&status, &toggle, &open, &quit])
         .build()?;
@@ -44,7 +44,7 @@ pub(super) fn setup(
     let event_state = state.clone();
     TrayIconBuilder::with_id("main-tray")
         .icon(icon)
-        .tooltip("Kimi Nola")
+        .tooltip("OatWave")
         .menu(&menu)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "presence-toggle" => {
