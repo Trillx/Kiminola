@@ -1962,7 +1962,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -2842,7 +2842,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "windows 0.58.0",
- "windows-core 0.58.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
