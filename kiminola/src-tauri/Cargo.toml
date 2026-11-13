@@ -20,7 +20,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
-tauri-plugin-updater = "2"
+# Releases publish raw NSIS installers (createUpdaterArtifacts: true), so the
+# legacy .zip bundle extractor is never used. Leaving out the "zip" feature
+# drops the zip crate (RUSTSEC-2026-0367/0368/0369/0429) from the build.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }

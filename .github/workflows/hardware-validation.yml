@@ -29,6 +29,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
+      enabled: ${{ steps.release.outputs.enabled }}
       previous_tag: ${{ steps.release.outputs.previous_tag }}
     steps:
       - name: Check out source
@@ -42,11 +43,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HARDWARE_ENABLED: ${{ vars.KIMINOLA_HARDWARE_CI }}
+          RELEASE_GATE_ID: ${{ inputs.release_gate_id }}
           REQUESTED_PREVIOUS_TAG: ${{ inputs.previous_tag || vars.KIMINOLA_PREVIOUS_RELEASE_TAG }}
           RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           if ($env:HARDWARE_ENABLED -ne 'true') {
-            throw 'Hardware validation is required. Register matching X64 and ARM64 runners, then set KIMINOLA_HARDWARE_CI=true.'
+            if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_GATE_ID)) {
+              throw "Release hardware gate '$env:RELEASE_GATE_ID' requires KIMINOLA_HARDWARE_CI=true and matching X64 and ARM64 runners."
+            }
+            Write-Host '::warning title=Hardware validation skipped::KIMINOLA_HARDWARE_CI is not true, so no physical x64/ARM64 validation ran. Register matching X64 and ARM64 kiminola-hardware runners, then set KIMINOLA_HARDWARE_CI=true.'
+            'enabled=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
           }
 
           $package = Get-Content -Raw 'kiminola/package.json' | ConvertFrom-Json
@@ -108,10 +115,12 @@ jobs:
             }
           }
           "previous_tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          'enabled=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   hardware-integration:
     name: Hardware integration ${{ matrix.arch }}
     needs: configuration
+    if: needs.configuration.outputs.enabled == 'true'
     runs-on:
       - self-hosted
       - Windows

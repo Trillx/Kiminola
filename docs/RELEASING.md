@@ -72,7 +72,9 @@ and `latest.json` checks still run. Setting only some SignPath values fails
 preflight rather than quietly producing an unsigned release.
 
 Likewise, when `KIMINOLA_HARDWARE_CI` is not `true`, the hardware gate passes
-with a warning instead of dispatching physical validation. Draft notes for
+with a warning instead of dispatching physical validation, and the nightly
+Hardware validation run skips its physical jobs with a warning annotation
+instead of failing. Draft notes for
 either mode state what was skipped. Windows SmartScreen may warn on first run of
 an unsigned build, so perform the manual installer checks in the release flow
 below before publishing.

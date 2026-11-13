@@ -313,8 +313,10 @@ Adopted lifecycle decision: [Define dictation lifecycle, privacy, and recovery](
   stimulus-off baseline while the source remains live, WASAPI loopback, deterministic
   installed-model speech transcription, installer, and
   previous-version preservation checks, and the same workflow is a required
-  pre-draft tag-release gate. A missing runner configuration fails visibly rather
-  than producing a green no-op. The update baseline is the highest updater-signed
+  pre-draft tag-release gate once `KIMINOLA_HARDWARE_CI=true`. Until then,
+  routine runs skip the physical jobs with a warning annotation, and a
+  release-correlated dispatch still fails. Once enabled, a missing runner
+  configuration fails visibly rather than producing a green no-op. The update baseline is the highest updater-signed
   stable release strictly older than the candidate; explicit baselines must meet
   the same rule. Routine and release-correlated hardware runs use distinct
   concurrency keys so a scheduled run cannot replace a pending release gate;

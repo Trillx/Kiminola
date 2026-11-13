@@ -176,6 +176,19 @@ test('toolchains, dependencies, and hardware validation are explicitly managed',
   assert.match(hardware, /workflow_dispatch:/);
   assert.match(hardware, /schedule:/);
   assert.match(hardware, /group: hardware-validation-\$\{\{ inputs\.release_gate_id \|\| 'routine' \}\}/);
+  const notConfigured = hardware.indexOf("if ($env:HARDWARE_ENABLED -ne 'true')");
+  const releaseGateThrow = hardware.indexOf('throw "Release hardware gate', notConfigured);
+  const routineSkip = hardware.indexOf('::warning title=Hardware validation skipped::', notConfigured);
+  assert.ok(
+    notConfigured >= 0 && releaseGateThrow > notConfigured && routineSkip > releaseGateThrow,
+    'a release-correlated run fails without hardware runners before a routine run may skip with a warning'
+  );
+  assert.match(hardware, /RELEASE_GATE_ID: \$\{\{ inputs\.release_gate_id \}\}/);
+  assert.match(hardware, /'enabled=false'[\s\S]*?'enabled=true'/);
+  assert.match(
+    hardware,
+    /  hardware-integration:\r?\n[\s\S]*?needs: configuration\r?\n    if: needs\.configuration\.outputs\.enabled == 'true'\r?\n/
+  );
   assert.match(hardware, /classic_loopback_captures_non_silent_audio/);
   assert.match(hardware, /process_loopback_captures_non_silent_audio/);
   assert.match(hardware, /physical_microphone_captures_known_tone/);
