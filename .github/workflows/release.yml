@@ -158,7 +158,8 @@ jobs:
           working-directory: kiminola/src-tauri
           # SQLx's derive/migration macros retain the optional MySQL backend in
           # Cargo.lock, but it is not enabled or compiled by this SQLite-only app.
-          ignore: RUSTSEC-2023-0071
+          # RUSTSEC-2026-0459: see the matching cargo-audit note in ci.yml.
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0459
 
   hardware-gate:
     name: Dispatch and verify release hardware gate
