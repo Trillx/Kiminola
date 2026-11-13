@@ -23,7 +23,7 @@
     "@tauri-apps/plugin-updater": "^2.10.1",
     "clsx": "^2.1.1",
     "isomorphic-dompurify": "^3.19.0",
-    "marked": "^18.0.9",
+    "marked": "^18.0.13",
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
